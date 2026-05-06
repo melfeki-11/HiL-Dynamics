@@ -3,6 +3,22 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# JavaScript dependencies and run artifacts
+node_modules/
+evals/
+logs/
+*.trace.log
+LOCAL_LITELLM_CREDENTIALS.env
+*.local.env
+*.secret
+data/hil_bench/
+data/hil_bench_swe_first*/
+data/hil_bench_swe*/
+data/clarification_smoke*.json*
+data/swebench_pro_samples.csv
+data/swebench_pro_samples.jsonl
+vendor/
+
 # C extensions
 *.so
 
