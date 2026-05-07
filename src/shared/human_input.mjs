@@ -765,6 +765,10 @@ export function createHumanInputRouter({
   workspaceDir,
   approvalPolicy = "safe-looking",
   modelClient,
+  // Optional: override the LLM endpoint used for the ask_human selector.
+  // Useful when the vLLM judge server is at a different URL than the agent's LiteLLM proxy.
+  baseUrl,
+  apiKey,
 } = {}) {
   let kbPromise = null;
   const answeredBlockerIds = new Set();
@@ -803,6 +807,8 @@ export function createHumanInputRouter({
         modelId,
         seed,
         modelClient,
+        ...(baseUrl ? { baseUrl } : {}),
+        ...(apiKey ? { apiKey } : {}),
         answeredBlockerIds,
         maxAnsweredQuestions: await maxAnsweredQuestionsForInstance(),
       });

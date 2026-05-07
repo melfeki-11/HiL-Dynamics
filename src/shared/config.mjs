@@ -8,8 +8,26 @@ const execFileAsync = promisify(execFile);
 
 export const rootDir = path.resolve(new URL("../..", import.meta.url).pathname);
 export const autonomyCalibrationRoot = process.env.AUTONOMY_CALIBRATION_ROOT || "/mnt/efs/mohamedelfeki/Codes/autonomy_calibration";
-export const DEFAULT_LITELLM_CREDENTIALS_FILE =
-  process.env.LITELLM_CREDENTIALS_FILE || path.join(autonomyCalibrationRoot, "LOCAL_LITELLM_CREDENTIALS.env");
+
+// Find the credentials .env file.  Check locations in priority order so the
+// right file is picked up on any developer's machine or in CI without extra setup:
+//   1. LITELLM_CREDENTIALS_FILE env var (explicit override)
+//   2. trust_horizon/.env  (conventional location in this repo)
+//   3. hil_bench/.env      (the canonical Scale-internal credentials file)
+//   4. Legacy LOCAL_LITELLM_CREDENTIALS.env in autonomy_calibration
+function _findCredentialsFile() {
+  if (process.env.LITELLM_CREDENTIALS_FILE) return process.env.LITELLM_CREDENTIALS_FILE;
+  const candidates = [
+    path.join(rootDir, ".env"),
+    path.join(rootDir, "..", "research_evals", "hil_bench", ".env"),
+    path.join(autonomyCalibrationRoot, "LOCAL_LITELLM_CREDENTIALS.env"),
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
+  }
+  return candidates[0]; // return trust_horizon/.env as the "intended" path even if missing
+}
+export const DEFAULT_LITELLM_CREDENTIALS_FILE = _findCredentialsFile();
 export const dataDir = path.join(rootDir, "data");
 export const evalsDir = path.join(rootDir, "evals");
 export const vendorDir = process.env.SWEBENCH_PRO_VENDOR_DIR || path.join(autonomyCalibrationRoot, "vendor", "SWE-bench_Pro-os");

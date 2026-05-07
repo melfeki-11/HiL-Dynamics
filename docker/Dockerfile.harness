@@ -51,6 +51,11 @@ RUN npm ci --omit=dev 2>&1
 # `codex`, `opencode`, etc. by name without full paths.
 ENV PATH="/opt/trust_horizon/node_modules/.bin:${PATH}"
 
+# ── Claude Code CLI ───────────────────────────────────────────────────────────
+# The agent SDK spawns the `claude` binary as a subprocess.  Install it
+# globally so it is on PATH inside the container.
+RUN npm install -g @anthropic-ai/claude-code@2.0.20 2>&1
+
 # ── Google ADK (Python) ───────────────────────────────────────────────────────
 # Python 3 is already present in SWE-agent task images.
 RUN python3 -m pip install --no-cache-dir --quiet google-adk 2>&1 || \
@@ -58,11 +63,18 @@ RUN python3 -m pip install --no-cache-dir --quiet google-adk 2>&1 || \
     true   # non-fatal: google-adk harness is last priority; other agents still work
 
 # ── Sanity check ─────────────────────────────────────────────────────────────
+# Both claude-agent-sdk and codex-sdk are ESM-only, so use dynamic import()
+# with --input-type=module rather than require().
 RUN node --version && \
-    node -e "require('@anthropic-ai/claude-agent-sdk'); console.log('claude-agent-sdk ok')" && \
-    node -e "require('@openai/codex-sdk'); console.log('codex-sdk ok')" && \
+    node --input-type=module -e "import('@anthropic-ai/claude-agent-sdk').then(()=>console.log('claude-agent-sdk ok'))" && \
+    node --input-type=module -e "import('zod').then(()=>console.log('zod ok'))" && \
+    (claude --version 2>/dev/null || echo 'claude cli version check skipped') && \
     (codex --version 2>/dev/null || echo 'codex cli version check skipped') && \
     (opencode --version 2>/dev/null || echo 'opencode cli version check skipped')
+
+# SWE-agent base images set ENTRYPOINT ["sleep", "infinity"] so containers can be
+# exec-ed into.  Reset it so docker run can pass a real command directly.
+ENTRYPOINT []
 
 # Default working dir is the task repo (SWE-agent images use /testbed)
 WORKDIR /testbed
