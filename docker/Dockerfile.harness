@@ -1,0 +1,68 @@
+# Trust Horizon Harness Image
+#
+# Extends any hilbench-swe:<uid> task image with:
+#   - Node.js 20 runtime
+#   - All trust_horizon npm dependencies (agent SDKs + CLIs) pre-installed
+#   - Google ADK Python package
+#
+# At build time:  docker build --build-arg BASE_IMAGE=hilbench-swe:<uid> \
+#                              -t hilbench-swe-harness:<uid> \
+#                              -f docker/Dockerfile.harness .
+#
+# At run time, bind-mount the harness source (so code changes don't need rebuilds):
+#   docker run --rm --network host \
+#     -v /path/to/trust_horizon/src:/opt/trust_horizon/src:ro \
+#     -v /path/to/trust_horizon/scripts:/opt/trust_horizon/scripts:ro \
+#     -v <output_dir>:/output \
+#     -e TASK_UID=<uid> -e MODE=ask_human -e ... \
+#     hilbench-swe-harness:<uid> \
+#     node /opt/trust_horizon/src/harnesses/claude-code/index.mjs
+
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+# ── Node.js 20 ───────────────────────────────────────────────────────────────
+# Try NodeSource first; fall back to system nodejs if apt-get/curl unavailable.
+RUN set -e; \
+    if command -v apt-get >/dev/null 2>&1; then \
+        apt-get update -qq && \
+        apt-get install -y --no-install-recommends curl ca-certificates gnupg2 && \
+        curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+        apt-get install -y --no-install-recommends nodejs && \
+        rm -rf /var/lib/apt/lists/*; \
+    elif command -v dnf >/dev/null 2>&1; then \
+        dnf install -y nodejs npm; \
+    elif command -v yum >/dev/null 2>&1; then \
+        curl -fsSL https://rpm.nodesource.com/setup_20.x | bash - && \
+        yum install -y nodejs; \
+    else \
+        echo "ERROR: no supported package manager found" && exit 1; \
+    fi
+
+# ── Trust Horizon npm deps ────────────────────────────────────────────────────
+# Copy only package manifests first for layer caching.
+# Source files are bind-mounted at runtime — rebuilds are only needed when
+# package.json / package-lock.json change (i.e. SDK version bumps).
+WORKDIR /opt/trust_horizon
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev 2>&1
+
+# Expose node_modules/.bin on PATH so harness subprocesses can call
+# `codex`, `opencode`, etc. by name without full paths.
+ENV PATH="/opt/trust_horizon/node_modules/.bin:${PATH}"
+
+# ── Google ADK (Python) ───────────────────────────────────────────────────────
+# Python 3 is already present in SWE-agent task images.
+RUN python3 -m pip install --no-cache-dir --quiet google-adk 2>&1 || \
+    pip3 install --no-cache-dir --quiet google-adk 2>&1 || \
+    true   # non-fatal: google-adk harness is last priority; other agents still work
+
+# ── Sanity check ─────────────────────────────────────────────────────────────
+RUN node --version && \
+    node -e "require('@anthropic-ai/claude-agent-sdk'); console.log('claude-agent-sdk ok')" && \
+    node -e "require('@openai/codex-sdk'); console.log('codex-sdk ok')" && \
+    (codex --version 2>/dev/null || echo 'codex cli version check skipped') && \
+    (opencode --version 2>/dev/null || echo 'opencode cli version check skipped')
+
+# Default working dir is the task repo (SWE-agent images use /testbed)
+WORKDIR /testbed
