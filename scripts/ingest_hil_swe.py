@@ -310,10 +310,10 @@ def ingest_task(row: dict, token: str | None, skip_if_exists: bool) -> dict:
             "PASS_TO_PASS": [],
         },
         "test_files": test_files,
-        "num_blockers": len(blockers),
+        "num_blockers": len(blocker_entries),
     }
     metadata_path.write_text(json.dumps(metadata, indent=2))
-    print(f"    Written metadata ({len(blockers)} blockers, {len(tests_to_pass)} tests)")
+    print(f"    Written metadata ({len(blocker_entries)} blockers, {len(tests_to_pass)} tests)")
     return metadata
 
 

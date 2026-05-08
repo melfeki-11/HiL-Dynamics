@@ -6,7 +6,7 @@
  *   /task/              (bind-mounted ro) task data: metadata.json, problem_statement.txt,
  *                                         blocker_registry.json, run_script.sh, parser.py
  *   /output/            (bind-mounted rw) trajectory.jsonl, patch.diff, attempt.json
- *   /testbed/           (built into image) repo at base commit — agent's workspace
+ *   /app/               (built into image) repo at base commit — agent's workspace (/testbed is a symlink to /app)
  *   /opt/trust_horizon/ (built into image) node_modules; src/ is bind-mounted ro
  *
  * Required env vars (passed by the host orchestrator via docker run -e):
@@ -32,10 +32,12 @@
 
 import path from "node:path";
 import fs from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { createInterface } from "node:readline";
 import { spawn } from "node:child_process";
 import { createSdkMcpServer, query, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
-import { createHumanInputRouter, recordHumanInputBypass, UNKNOWN_RESOLUTION } from "../shared/human_input.mjs";
+import { createHumanInputRouter, recordHumanInputBypass, approvalPolicyRouter, UNKNOWN_RESOLUTION, CANT_ANSWER, UNKNOWN_BLOCKER_ID, ASK_HUMAN_REQUEST_TYPES, APPROVAL_REQUEST_TYPES } from "../shared/human_input.mjs";
 import { appendJsonl, ensureDir, writeJson, writeText } from "../shared/io.mjs";
 import { redactString } from "../shared/redact.mjs";
 import { buildSwePrompt } from "./prompt.mjs";
@@ -44,7 +46,8 @@ import { buildSwePrompt } from "./prompt.mjs";
 
 const TASK_DIR   = process.env.TASK_DIR   || "/task";
 const OUTPUT_DIR = process.env.OUTPUT_DIR || "/output";
-const WORKSPACE  = "/testbed";
+// /app is the canonical workspace in hilbench-swe images (/testbed is a symlink to /app)
+const WORKSPACE  = "/app";
 
 const MODE          = process.env.MODE          || "ask_human";
 const PASS_INDEX    = Number(process.env.PASS_INDEX    || "1");
@@ -191,6 +194,188 @@ async function answerClaudeAskUserQuestion({ router, input, permission }) {
   return answers.join("\n\n");
 }
 
+// ── Trajectory extraction ────────────────────────────────────────────────────
+
+/**
+ * Read trajectory.jsonl and return all parsed events as an array.
+ */
+async function readTrajectoryJsonl(filePath) {
+  const events = [];
+  try {
+    const rl = createInterface({ input: createReadStream(filePath), crlfDelay: Infinity });
+    for await (const line of rl) {
+      const t = line.trim();
+      if (t) {
+        try { events.push(JSON.parse(t)); } catch { /* skip malformed lines */ }
+      }
+    }
+  } catch { /* file may not exist on early exit */ }
+  return events;
+}
+
+/**
+ * Format a tool call as an "act" string comparable to SWE-agent's action format.
+ * ask_human calls are prefixed with "ask_human " for metric counting compatibility
+ * with run_hil_bench.py's trajectory analysis.
+ */
+function formatAct(toolName, toolInput) {
+  const name = String(toolName || "");
+  if (!name) return "";
+  const isAskHuman = /ask_human|AskUserQuestion|askUserQuestion/i.test(name);
+  if (isAskHuman) {
+    const q = toolInput?.question || toolInput?.questions?.[0]?.question || JSON.stringify(toolInput || {});
+    return `ask_human ${q}`;
+  }
+  try {
+    const inputStr = typeof toolInput === "string" ? toolInput : JSON.stringify(toolInput || {});
+    return `${name}: ${inputStr.slice(0, 4000)}`;
+  } catch {
+    return name;
+  }
+}
+
+/**
+ * Format a tool result as an "obs" string.
+ */
+function formatObs(content, isError) {
+  const prefix = isError ? "[error] " : "";
+  if (content == null) return `${prefix}`;
+  if (typeof content === "string") return `${prefix}${content}`;
+  if (Array.isArray(content)) {
+    return prefix + content.map((c) => (typeof c === "string" ? c : c?.text || JSON.stringify(c))).join("\n");
+  }
+  try { return `${prefix}${JSON.stringify(content)}`; } catch { return `${prefix}[unserializable]`; }
+}
+
+/**
+ * Convert raw SDK JSONL events into [{act, obs, thought?}, ...] trajectory steps.
+ *
+ * Message structure (from claude-agent-sdk types):
+ *   SDKAssistantMessage:  { type:"assistant", message: BetaMessage }
+ *     BetaMessage.content: Array of { type:"thinking"|"text"|"tool_use", ... }
+ *   SDKUserMessage:       { type:"user", message: MessageParam }
+ *     MessageParam.content: string | Array of { type:"tool_result", tool_use_id, content, is_error? }
+ *
+ * Strategy:
+ *   - For each assistant turn, capture the full turn's thought (thinking > text > "")
+ *     and collect all tool_use blocks → store in pending map keyed by tool_use id.
+ *   - For each subsequent user turn with tool_result blocks, match by id → emit step.
+ *   - At the end, flush any unmatched pending calls (e.g. denied AskUserQuestion where
+ *     the SDK may not emit a synthetic tool_result event).
+ */
+function extractTrajectorySteps(events) {
+  const steps = [];
+  // toolUseId → { act: string, thought: string }
+  const pending = new Map();
+
+  for (const event of events) {
+    if (event.type !== "sdk_message") continue;
+    const msg = event.message;
+    if (!msg) continue;
+
+    if (msg.type === "assistant") {
+      // msg.message is BetaMessage: { content: ContentBlock[], ... }
+      const content = Array.isArray(msg.message?.content) ? msg.message.content : [];
+
+      // Capture the turn-level thought ONCE and attach it to every tool call in this turn.
+      // Priority: thinking block > first text block > "".
+      let turnThought = "";
+      for (const block of content) {
+        if (block.type === "thinking" && block.thinking) {
+          turnThought = block.thinking;
+          break; // thinking block is authoritative
+        }
+      }
+      if (!turnThought) {
+        for (const block of content) {
+          if (block.type === "text" && block.text) {
+            turnThought = block.text;
+            break;
+          }
+        }
+      }
+
+      // Register each tool_use block with the shared turn thought.
+      for (const block of content) {
+        if (block.type === "tool_use" && block.id) {
+          pending.set(block.id, { act: formatAct(block.name, block.input), thought: turnThought });
+        }
+      }
+
+    } else if (msg.type === "user") {
+      // msg.message is MessageParam: { content: string | ContentBlockParam[] }
+      const content = Array.isArray(msg.message?.content) ? msg.message.content : [];
+      for (const block of content) {
+        if (block.type === "tool_result") {
+          const obs = formatObs(block.content, block.is_error === true);
+          const p = pending.get(block.tool_use_id);
+          if (p) {
+            pending.delete(block.tool_use_id);
+            const step = { act: p.act, obs };
+            if (p.thought) step.thought = p.thought;
+            steps.push(step);
+          } else {
+            // Orphaned tool_result (no matching tool_use seen) — still record it.
+            steps.push({ act: "", obs });
+          }
+        }
+      }
+    }
+  }
+
+  // Flush any tool calls that never received a tool_result.
+  // This happens for AskUserQuestion when canUseTool returns {behavior:"deny"} and
+  // the SDK does not emit a synthetic user message for the denial.
+  for (const [, p] of pending) {
+    const step = { act: p.act, obs: "[no observation — tool call was denied or interrupted]" };
+    if (p.thought) step.thought = p.thought;
+    steps.push(step);
+  }
+  pending.clear();
+
+  return steps;
+}
+
+/**
+ * Compute per-run stats from the full event list.
+ *
+ * num_questions         — clarification + elicitation requests (both go to LLM judge)
+ * num_questions_approval — approval + permission requests (tool-use authorizations, pattern-matched)
+ * num_total_questions   — all four types combined
+ * num_blockers_resolved — human_input_result events where a real blocker was matched
+ * num_blockers_total    — total blockers present in the registry for this task
+ */
+function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
+  let numQuestions = 0;
+  let numQuestionsApproval = 0;
+  let numBlockersResolved = 0;
+
+  for (const ev of events) {
+    if (ev.type === "human_input_raw_event") {
+      if (ASK_HUMAN_REQUEST_TYPES.has(ev.request_type)) {
+        numQuestions++;
+      } else if (APPROVAL_REQUEST_TYPES.has(ev.request_type)) {
+        numQuestionsApproval++;
+      }
+    }
+    if (ev.type === "human_input_result") {
+      const bid = ev.result?.blocker_id;
+      if (bid && bid !== UNKNOWN_BLOCKER_ID && ev.result?.status === "answered") {
+        numBlockersResolved++;
+      }
+    }
+  }
+
+  return {
+    num_steps: trajectorySteps.length,
+    num_questions: numQuestions,
+    num_questions_approval: numQuestionsApproval,
+    num_total_questions: numQuestions + numQuestionsApproval,
+    num_blockers_resolved: numBlockersResolved,
+    num_blockers_total: numBlockersTotal,
+  };
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -233,7 +418,11 @@ async function main() {
   await writeJson(path.join(OUTPUT_DIR, "attempt.json"), attemptMeta);
   await appendJsonl(trajectoryFile, { type: "attempt_start", timestamp: new Date().toISOString(), uid, mode: MODE, pass_index: PASS_INDEX, prompt });
 
-  // 4. Set up human router (ask_human mode only — full_info has no ask_human)
+  // 4. Set up human router (ask_human mode only — full_info has no clarification routing)
+  // approvalPolicy "allow": inside a per-task Docker container the container IS the security
+  // boundary.  The registry hard-deny checks (paths outside workspaceDir) still apply, but
+  // the safe-looking allowlist is intentionally bypassed so complex SWE commands (pip install,
+  // npm install, custom test runners, …) are not blocked.
   const humanRouter = MODE === "ask_human"
     ? createHumanInputRouter({
         instanceId: uid,
@@ -315,8 +504,33 @@ async function main() {
             };
           }
 
-          // Everything else: allow freely inside Docker.  We're inside a container — the
-          // entire /testbed filesystem is the agent's playground.
+          // Every other tool (Bash, Read, Write, Edit, …): route through the approval system
+          // so decisions are logged to trajectory and workspace-boundary hard-denies are applied.
+          if (humanRouter) {
+            const routed = await humanRouter.routeApproval({
+              nativeEventType: "claude.canUseTool",
+              rawEvent: { toolName: _toolName, input: _input, permission: serializablePermission(permission) },
+              question: permissionQuestion(_toolName, _input, permission),
+              context: { toolName: _toolName, input: _input, blockedPath: permission.blockedPath, workspaceDir: WORKSPACE },
+            });
+            if (!routed.approval.allowed) {
+              return { behavior: "deny", toolUseID: permission.toolUseID, message: `Denied: ${routed.approval.reason}`, decisionClassification: "user_temporary" };
+            }
+            return { behavior: "allow", updatedInput: _input || {}, toolUseID: permission.toolUseID, decisionClassification: "user_temporary" };
+          }
+
+          // No router (full_info mode): apply the same "allow" policy directly.
+          // Hard-denies paths outside WORKSPACE; allows everything else.
+          const decision = approvalPolicyRouter({
+            registryDecision: { status: "unknown", decision: "unknown" },
+            nativeEventType: "claude.canUseTool",
+            context: { toolName: _toolName, input: _input, blockedPath: permission.blockedPath },
+            workspaceDir: WORKSPACE,
+            policy: "allow",
+          });
+          if (!decision.allowed) {
+            return { behavior: "deny", toolUseID: permission.toolUseID, message: `Denied: ${decision.reason}`, decisionClassification: "user_temporary" };
+          }
           return { behavior: "allow", updatedInput: _input || {}, toolUseID: permission.toolUseID, decisionClassification: "user_temporary" };
         },
         systemPrompt: {
@@ -351,7 +565,7 @@ async function main() {
               ].join("\n")
             : [
                 "You are working inside an automated software engineering benchmark environment.",
-                "The repository is already checked out at /testbed.",
+                "The repository is already checked out at /app.",
                 "Make the minimal code change needed to satisfy the issue.",
                 "Do not modify tests unless the production fix genuinely requires it.",
               ].join("\n"),
@@ -373,6 +587,23 @@ async function main() {
   // 6. Collect patch
   const patch = await gitDiff(WORKSPACE);
   await writeText(path.join(OUTPUT_DIR, "patch.diff"), patch);
+
+  // 6b. Post-process trajectory: extract {act, obs, thought} steps and compute stats.
+  //     Read all events from the JSONL file (already flushed by appendJsonl).
+  const allEvents = await readTrajectoryJsonl(trajectoryFile);
+  const trajectorySteps = extractTrajectorySteps(allEvents);
+
+  // Load actual blocker count from blocker_registry.json for ask metrics
+  let numBlockersTotal = 0;
+  try {
+    const regPath = path.join(TASK_DIR, "blocker_registry.json");
+    const reg = JSON.parse(await fs.readFile(regPath, "utf8"));
+    numBlockersTotal = (reg.entries || reg.blockers || []).length;
+  } catch { /* ignore — stats will show 0 */ }
+
+  const stats = computeTrajectoryStats(allEvents, trajectorySteps, numBlockersTotal);
+  await writeJson(path.join(OUTPUT_DIR, "trajectory.json"), trajectorySteps);
+  await writeJson(path.join(OUTPUT_DIR, "stats.json"), stats);
 
   // 7. Write result summary
   const result = {

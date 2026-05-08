@@ -5,7 +5,14 @@ import { DEFAULT_ASK_HUMAN_MODEL, DEFAULT_ASK_HUMAN_SEED, getLiteLLMKey, getResp
 import { appendJsonl, ensureDir, pathExists, writeJsonAtomic } from "./io.mjs";
 
 export const UNKNOWN_BLOCKER_ID = "UNKNOWN";
+// Mirrors hil_bench/ask_human_server.py's three canonical responses:
+//   UNKNOWN_RESOLUTION  — question was rejected or no blocker matched (don't retry)
+//   CANT_ANSWER         — system/provider failure (agent may retry the question)
 export const UNKNOWN_RESOLUTION = "irrelevant question";
+export const CANT_ANSWER = "can't answer (perhaps transient hiccup)";
+
+// Reasons that represent system failures (not bad questions): agent should be told CANT_ANSWER.
+const SYSTEM_FAILURE_REASONS = new Set(["provider_failure", "replay_miss"]);
 
 export const REQUEST_TYPES = new Set(["clarification", "approval", "permission", "elicitation", "policy", "unknown"]);
 export const ASK_HUMAN_REQUEST_TYPES = new Set(["clarification", "elicitation"]);
@@ -562,10 +569,13 @@ function selectedLabelsFromResolution(options, resolution) {
 }
 
 function unknownResult({ request, kb, promptHash, modelId, cacheKey, reason, error, raw_model_output }) {
+  // System failures get CANT_ANSWER so the agent knows it can retry the question.
+  // All other non-match cases get UNKNOWN_RESOLUTION ("irrelevant question").
+  const resolution = SYSTEM_FAILURE_REASONS.has(reason) ? CANT_ANSWER : UNKNOWN_RESOLUTION;
   return {
     status: "unknown",
     blocker_id: UNKNOWN_BLOCKER_ID,
-    resolution: UNKNOWN_RESOLUTION,
+    resolution,
     selected_labels: [],
     source: {
       instance_id: request.instance_id,
@@ -951,6 +961,10 @@ export function approvalPolicyRouter({ registryDecision, nativeEventType, contex
   if (hardDeny) return fallbackApprovalDecision(false, hardDeny, registryDecision);
   if (policy === "deny") return fallbackApprovalDecision(false, "unknown_denied", registryDecision);
   if (policy === "fail") return { ...fallbackApprovalDecision(false, "unknown_failed", registryDecision), fail: true };
+  // "allow": permit everything that passes the workspace hard-deny checks above.
+  // Intended for fully-isolated execution environments (e.g. per-task Docker containers)
+  // where the container boundary is the security perimeter.
+  if (policy === "allow") return fallbackApprovalDecision(true, "allow_policy", registryDecision);
   if (policy !== "safe-looking") return fallbackApprovalDecision(false, `unknown_policy_${policy}`, registryDecision);
   const safe = isSafeLookingApproval({ nativeEventType, context, workspaceDir });
   return fallbackApprovalDecision(safe.allowed, safe.reason, registryDecision);

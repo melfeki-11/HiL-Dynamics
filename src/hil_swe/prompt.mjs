@@ -9,7 +9,7 @@
  * instance_template so trajectories are comparable to the public benchmark runs.
  */
 
-const WORKSPACE = "/testbed";
+const WORKSPACE = "/app";
 
 /**
  * Standard SWE-bench instance template preamble (matches hil-bench configs exactly).

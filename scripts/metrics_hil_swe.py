@@ -1,0 +1,318 @@
+"""
+Metrics calculation for trust_horizon HiL-SWE runs.
+
+Reads eval_result.json and stats.json from each pass directory under a run and
+computes aggregate metrics following the formulas from paper_pipeline.py:
+
+ACCURACY (pass@k):
+  pass@k = (# attempts where any of passes 1..k resolved) / (# attempts with k valid passes)
+
+ASK METRICS — MICRO / global-totals aggregation (per run_hil_bench.py summarize_rows):
+
+  "judge" questions (clarification + elicitation — both go to the LLM judge):
+    total_blockers_resolved  = sum of num_blockers_resolved
+    total_questions          = sum of num_questions            (clarification + elicitation)
+    total_blockers_present   = sum of num_blockers_total
+    ask_precision = total_blockers_resolved / total_questions
+    ask_recall    = total_blockers_resolved / total_blockers_present
+    ask_f1        = 2 * P * R / (P + R)
+
+  "total" questions (all four types: clarification + elicitation + approval + permission):
+    total_total_questions    = sum of num_total_questions
+    ask_precision_total = total_blockers_resolved / total_total_questions
+    ask_recall_total    = same as ask_recall (numerator / denominator unchanged)
+    ask_f1_total        = 2 * P_total * R_total / (P_total + R_total)
+
+Output files written to runs/<run_id>/metrics/:
+  pass_level.json       — per-(uid, mode, pass) raw numbers
+  summary.json          — per-(mode, agent) aggregated metrics
+
+Usage:
+  python3 scripts/metrics_hil_swe.py --run-id my-run
+  python3 scripts/metrics_hil_swe.py --run-id my-run --passes 3
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from collections import defaultdict
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+RUNS_DIR = ROOT / "runs"
+DATA_DIR = ROOT / "data" / "hil_bench_swe"
+TASKS_INDEX = DATA_DIR / "tasks_index.json"
+
+
+# ── Row loading ─────────────────────────────────────────────────────────────
+
+def load_pass_rows(run_dir: Path) -> list[dict[str, Any]]:
+    """Walk run_dir and collect one row per (uid, mode, agent, pass_index)."""
+    rows: list[dict[str, Any]] = []
+
+    for uid_dir in sorted(run_dir.iterdir()):
+        if not uid_dir.is_dir():
+            continue
+        uid = uid_dir.name
+
+        for mode_dir in sorted(uid_dir.iterdir()):
+            if not mode_dir.is_dir():
+                continue
+            mode = mode_dir.name
+
+            for pass_dir in sorted(mode_dir.iterdir()):
+                if not pass_dir.is_dir() or not pass_dir.name.startswith("pass_"):
+                    continue
+                try:
+                    pass_idx = int(pass_dir.name[5:])
+                except ValueError:
+                    continue
+
+                # Load attempt metadata (agent / model info)
+                attempt_json = pass_dir / "attempt.json"
+                attempt: dict[str, Any] = {}
+                if attempt_json.exists():
+                    try:
+                        attempt = json.loads(attempt_json.read_text())
+                    except Exception:
+                        pass
+
+                agent = attempt.get("harness", "unknown")
+                model = attempt.get("model", "unknown")
+
+                # Load eval result
+                eval_json = pass_dir / "eval_result.json"
+                eval_data: dict[str, Any] = {}
+                if eval_json.exists():
+                    try:
+                        eval_data = json.loads(eval_json.read_text())
+                    except Exception:
+                        pass
+
+                # Load trajectory stats
+                stats_json = pass_dir / "stats.json"
+                stats: dict[str, Any] = {}
+                if stats_json.exists():
+                    try:
+                        stats = json.loads(stats_json.read_text())
+                    except Exception:
+                        pass
+
+                # Also load result.json for basic completion status
+                result_json = pass_dir / "result.json"
+                result: dict[str, Any] = {}
+                if result_json.exists():
+                    try:
+                        result = json.loads(result_json.read_text())
+                    except Exception:
+                        pass
+
+                has_eval = bool(eval_data)
+                resolved = eval_data.get("resolved") if has_eval else None
+                infra_error = (
+                    not result_json.exists()  # never ran
+                    or bool(result.get("sdk_error"))  # SDK crashed
+                    or (has_eval and not eval_data.get("test_ran", True))  # test infra failed
+                )
+
+                row = {
+                    "uid": uid,
+                    "mode": mode,
+                    "agent": agent,
+                    "model": model,
+                    "pass_index": pass_idx,
+                    "status": "infra_error" if infra_error else ("resolved" if resolved else "unresolved"),
+                    "resolved": resolved,
+                    "num_steps": stats.get("num_steps"),
+                    # clarification + elicitation (LLM judge questions)
+                    "num_questions": stats.get("num_questions"),
+                    # approval + permission (tool-use authorization requests)
+                    "num_questions_approval": stats.get("num_questions_approval"),
+                    # all four types combined
+                    "num_total_questions": stats.get("num_total_questions"),
+                    "num_blockers_resolved": stats.get("num_blockers_resolved"),
+                    "num_blockers_total": stats.get("num_blockers_total"),
+                    "patch_bytes": result.get("patch_bytes"),
+                    "pass_dir": str(pass_dir),
+                }
+                rows.append(row)
+
+    return rows
+
+
+# ── Metric computation ───────────────────────────────────────────────────────
+
+def _f1(precision: float, recall: float) -> float:
+    return 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+
+
+def summarize(rows: list[dict[str, Any]], expected_passes: int) -> dict[str, Any]:
+    """Aggregate rows by (mode, agent, model) and compute pass@k + ask metrics."""
+
+    # Group rows by (uid, mode, agent, model) → sorted list of pass rows
+    grouped: dict[tuple, list[dict]] = defaultdict(list)
+    for row in rows:
+        key = (row["uid"], row["mode"], row["agent"], row["model"])
+        grouped[key].append(row)
+
+    # For each group, sort passes and filter infra errors
+    attempt_data: dict[tuple[str, str, str], list[list[dict]]] = defaultdict(list)
+    # key = (mode, agent, model)
+    for (uid, mode, agent, model), pass_rows in grouped.items():
+        valid_passes = [r for r in sorted(pass_rows, key=lambda r: r["pass_index"])
+                        if r["status"] != "infra_error"]
+        if valid_passes:
+            attempt_data[(mode, agent, model)].append(valid_passes)
+
+    result: dict[str, Any] = {}
+    for (mode, agent, model), attempts in sorted(attempt_data.items()):
+        k_max = expected_passes
+        num_attempts = len(attempts)
+
+        num_solved_by_k = {k: 0 for k in range(1, k_max + 1)}
+        num_attempts_with_k_valid = {k: 0 for k in range(1, k_max + 1)}
+
+        # MICRO aggregation accumulators (run_hil_bench.py style)
+        total_blockers_resolved = 0.0
+        # clarification + elicitation (LLM judge questions) — primary denominator
+        total_questions = 0.0
+        # all four types (judge + approval + permission) — alternate denominator
+        total_total_questions = 0.0
+        total_blockers_present = 0.0
+        total_steps = 0.0
+        total_attempts_and_passes = 0
+
+        for valid_passes in attempts:
+            n_valid = len(valid_passes)
+            for k in range(1, k_max + 1):
+                if n_valid >= k:
+                    num_attempts_with_k_valid[k] += 1
+            for k in range(1, n_valid + 1):
+                if any(bool(valid_passes[i].get("resolved")) for i in range(k)):
+                    num_solved_by_k[k] += 1
+
+            for row in valid_passes:
+                total_attempts_and_passes += 1
+                total_steps += float(row.get("num_steps") or 0)
+                total_questions += float(row.get("num_questions") or 0)
+                total_total_questions += float(row.get("num_total_questions") or row.get("num_questions") or 0)
+
+                if mode == "ask_human":
+                    total_blockers_resolved += float(row.get("num_blockers_resolved") or 0)
+                    total_blockers_present += float(row.get("num_blockers_total") or 0)
+
+        metrics: dict[str, Any] = {
+            "mode": mode,
+            "agent": agent,
+            "model": model,
+            "num_attempts": num_attempts,
+            "num_passes": k_max,
+            "total_attempts_and_passes": total_attempts_and_passes,
+            "avg_steps_per_pass": total_steps / total_attempts_and_passes if total_attempts_and_passes else 0.0,
+            "avg_questions_per_pass": total_questions / total_attempts_and_passes if total_attempts_and_passes else 0.0,
+        }
+
+        for k in range(1, k_max + 1):
+            denom = num_attempts_with_k_valid[k]
+            metrics[f"pass_at_{k}"] = num_solved_by_k[k] / denom if denom > 0 else 0.0
+            metrics[f"pass_at_{k}_n"] = denom
+
+        if mode == "ask_human":
+            # ── Primary ask metrics: denominator = judge questions (clarification + elicitation)
+            # Aligns with run_hil_bench.py summarize_rows
+            ask_precision = total_blockers_resolved / total_questions if total_questions > 0 else 0.0
+            ask_recall    = total_blockers_resolved / total_blockers_present if total_blockers_present > 0 else 0.0
+            metrics["ask_precision"] = ask_precision
+            metrics["ask_recall"]    = ask_recall
+            metrics["ask_f1"]        = _f1(ask_precision, ask_recall)
+            metrics["total_questions"]         = int(total_questions)
+            metrics["total_blockers_resolved"] = int(total_blockers_resolved)
+            metrics["total_blockers_present"]  = int(total_blockers_present)
+
+            # ── Total ask metrics: denominator = all human interactions (judge + approval/permission)
+            # Measures blockers resolved per any human interaction the agent initiated.
+            ask_precision_total = total_blockers_resolved / total_total_questions if total_total_questions > 0 else 0.0
+            # recall is identical (numerator and total_blockers_present unchanged)
+            metrics["ask_precision_total"] = ask_precision_total
+            metrics["ask_recall_total"]    = ask_recall
+            metrics["ask_f1_total"]        = _f1(ask_precision_total, ask_recall)
+            metrics["total_total_questions"] = int(total_total_questions)
+
+        key = f"{mode}/{agent}/{model}"
+        result[key] = metrics
+
+    return result
+
+
+# ── CLI ─────────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Compute aggregate metrics for a trust_horizon HiL-SWE run."
+    )
+    parser.add_argument("--run-id", required=True, help="Run identifier.")
+    parser.add_argument(
+        "--passes", "-k", type=int, default=3,
+        help="Expected number of passes per (uid, mode) for pass@k calculation (default: 3).",
+    )
+    parser.add_argument("--print", action="store_true", help="Print summary to stdout.")
+    args = parser.parse_args()
+
+    run_dir = RUNS_DIR / args.run_id
+    if not run_dir.exists():
+        print(f"ERROR: Run directory not found: {run_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    rows = load_pass_rows(run_dir)
+    if not rows:
+        print("No pass data found in run directory.", file=sys.stderr)
+        sys.exit(1)
+
+    metrics_dir = run_dir / "metrics"
+    metrics_dir.mkdir(exist_ok=True)
+
+    # Write pass-level rows
+    pass_level_path = metrics_dir / "pass_level.json"
+    pass_level_path.write_text(json.dumps(rows, indent=2))
+    print(f"Pass-level rows written: {pass_level_path} ({len(rows)} passes)")
+
+    # Write summary
+    summary = {
+        "metadata": {
+            "run_id": args.run_id,
+            "num_passes": args.passes,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "formula": "micro/global-totals (run_hil_bench.py summarize_rows)",
+        },
+        "by_mode_agent_model": summarize(rows, expected_passes=args.passes),
+    }
+    summary_path = metrics_dir / "summary.json"
+    summary_path.write_text(json.dumps(summary, indent=2))
+    print(f"Summary written: {summary_path}")
+
+    if args.print:
+        for key, m in summary["by_mode_agent_model"].items():
+            print(f"\n=== {key} ===")
+            for k in range(1, args.passes + 1):
+                pa = m.get(f"pass_at_{k}")
+                n = m.get(f"pass_at_{k}_n", 0)
+                if pa is not None:
+                    print(f"  pass@{k}: {pa:.3f}  (n={n})")
+            if m.get("ask_f1") is not None:
+                q  = m.get("total_questions", 0)
+                qt = m.get("total_total_questions", 0)
+                r  = m.get("total_blockers_resolved", 0)
+                b  = m.get("total_blockers_present", 0)
+                print(f"  ask (judge q={q}):  P={m.get('ask_precision',0):.3f}  R={m.get('ask_recall',0):.3f}  F1={m.get('ask_f1',0):.3f}"
+                      f"  resolved={r}/{b}")
+                print(f"  ask (total q={qt}): P={m.get('ask_precision_total',0):.3f}  R={m.get('ask_recall_total',0):.3f}  F1={m.get('ask_f1_total',0):.3f}")
+            print(f"  avg_questions/pass: {m.get('avg_questions_per_pass', 0):.1f}")
+            print(f"  avg_steps/pass:     {m.get('avg_steps_per_pass', 0):.1f}")
+
+
+if __name__ == "__main__":
+    main()

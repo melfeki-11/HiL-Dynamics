@@ -1,19 +1,28 @@
 """
 Host-side orchestrator for trust_horizon HiL-SWE runs.
 
-For each (uid, mode, pass) tuple, starts a hilbench-swe-harness:<uid> Docker container
-that runs the claude-code SWE harness entrypoint.  All runs proceed concurrently up to
---workers containers at a time.
+Runs the full pipeline in one shot:
+  Phase 1 — Solve:    spin up harness containers in parallel; each produces patch.diff + trajectory
+  Phase 2 — Evaluate: for each completed solve, run the eval container (apply patches, run tests)
+  Phase 3 — Metrics:  compute pass@k and ask precision/recall/f1 (micro, like run_hil_bench.py)
+
+All three phases can be individually skipped with --skip-eval / --skip-metrics.
 
 Output layout:
   runs/<run_id>/
     <uid>/
       <mode>/
         pass_<n>/
-          attempt.json
-          trajectory.jsonl
-          patch.diff
-          result.json
+          attempt.json        harness metadata
+          trajectory.jsonl    raw SDK event stream
+          trajectory.json     [{act, obs, thought?}, ...]  (SWE-agent compatible format)
+          stats.json          {num_steps, num_questions, num_blockers_resolved, ...}
+          patch.diff          agent's git diff
+          result.json         solve outcome
+          eval_result.json    test pass/fail (written by Phase 2)
+    metrics/
+      pass_level.json
+      summary.json
 
 Usage examples:
   # Single task, ask_human mode, 1 pass
@@ -31,8 +40,19 @@ Usage examples:
     --passes 3 \\
     --workers 12
 
+  # Solve only (skip eval and metrics), e.g. for a quick pilot
+  python3 scripts/run_hil_swe.py --run-id pilot --uids ... --skip-eval --skip-metrics
+
   # All 100 public tasks
   python3 scripts/run_hil_swe.py --run-id pub100 --all --modes ask_human full_info --passes 3
+
+  # Eval-only on existing solves (result.json already present, want eval_result.json):
+  # Solve phase is automatically skipped (result.json exists); eval runs on already-solved passes.
+  python3 scripts/run_hil_swe.py --run-id <existing-run-id> --uids ... --modes ... --passes N --skip-metrics
+
+  # Metrics-only on existing evals (eval_result.json already present, want summary.json):
+  # Both solve and eval are skipped; metrics are computed from files already on disk.
+  python3 scripts/run_hil_swe.py --run-id <existing-run-id> --uids ... --modes ... --passes N --skip-eval
 
 Environment variables (read from host env, forwarded into each container):
   Required:
@@ -60,8 +80,22 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Allow importing sibling scripts without installation
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from eval_hil_swe import eval_attempt as _eval_attempt  # noqa: E402
+from metrics_hil_swe import load_pass_rows, summarize  # noqa: E402
+
+# Shared run-owner directory (mirrors run_hil_bench.py / eval_hil_swe.py).
+# A PID token is written here at the start of each run; cleanup helpers check it
+# before removing running containers so we never kill a container mid-pass.
+RUN_OWNER_DIR = Path(os.getenv("HIL_BENCH_RUN_OWNER_DIR", "/tmp/hil_bench_run_owners"))
 
 
 def load_dotenv(env_file: Path) -> dict[str, str]:
@@ -137,6 +171,72 @@ FORWARDED_ENV_KEYS = [
 ]
 
 _print_lock = threading.Lock()
+
+
+# ── Run-owner token (mirrors run_hil_bench.py) ──────────────────────────────
+
+def register_run_owner() -> Path:
+    """Write a PID token so cleanup helpers know this process is still alive."""
+    RUN_OWNER_DIR.mkdir(parents=True, exist_ok=True)
+    token = RUN_OWNER_DIR / f"{os.getpid()}.owner"
+    token.write_text(str(os.getpid()))
+    return token
+
+
+def unregister_run_owner(token: Path) -> None:
+    token.unlink(missing_ok=True)
+
+
+def any_run_active() -> bool:
+    """Return True if any registered run-owner process is still alive."""
+    if not RUN_OWNER_DIR.exists():
+        return False
+    for t in RUN_OWNER_DIR.glob("*.owner"):
+        try:
+            pid = int(t.stem)
+            os.kill(pid, 0)  # 0 = just probe; raises if dead
+            return True
+        except ProcessLookupError:
+            t.unlink(missing_ok=True)
+        except (ValueError, PermissionError):
+            return True
+    return False
+
+
+def cleanup_orphaned_containers(harness_image: str) -> int:
+    """Remove containers that exited or are running with no active owner.
+
+    Mirrors run_hil_bench.py's cleanup_swe_containers_for_image logic:
+    - Exited/created containers: always remove (they're already done)
+    - Running containers: only remove if no run owner is currently registered
+      (guards against removing containers of an ongoing parallel run)
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "ps", "-a", "--format", "{{.ID}}\t{{.Status}}",
+             "--filter", f"ancestor={harness_image}"],
+            capture_output=True, text=True, check=False,
+        )
+        active_owner = any_run_active()
+        to_remove: set[str] = set()
+        for line in result.stdout.splitlines():
+            parts = line.split("\t")
+            if len(parts) < 2:
+                continue
+            cid, status = parts[0].strip(), parts[1].lower()
+            if status.startswith("exited") or status.startswith("created"):
+                to_remove.add(cid)
+            elif status.startswith("up") and not active_owner:
+                to_remove.add(cid)
+        if not to_remove:
+            return 0
+        subprocess.run(
+            ["docker", "rm", "-f", *sorted(to_remove)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+        )
+        return len(to_remove)
+    except Exception:
+        return 0
 
 
 def log(msg: str, file=sys.stdout) -> None:
@@ -327,6 +427,23 @@ def main() -> None:
         "--env", nargs="*", metavar="KEY=VALUE",
         help="Additional env var overrides to pass into containers (e.g. CLAUDE_MODEL=claude-opus-4-7).",
     )
+    # ── Phase control ──────────────────────────────────────────────────────────
+    parser.add_argument(
+        "--skip-eval", action="store_true",
+        help="Skip Phase 2 (evaluation). Useful when you just want solve output.",
+    )
+    parser.add_argument(
+        "--skip-metrics", action="store_true",
+        help="Skip Phase 3 (metrics). Useful when eval is skipped or you compute metrics separately.",
+    )
+    parser.add_argument(
+        "--eval-workers", type=int, default=None,
+        help="Max concurrent eval containers (default: same as --workers).",
+    )
+    parser.add_argument(
+        "--eval-timeout", type=int, default=600,
+        help="Per-attempt eval timeout in seconds (default: 600).",
+    )
     args = parser.parse_args()
 
     # ── Load credentials (.env file → os.environ fallback → explicit --env overrides) ──
@@ -392,20 +509,32 @@ def main() -> None:
             sys.exit(1)
         target_tasks = [by_uid[u] for u in args.uids]
 
-    jobs = build_job_list(target_tasks, args.modes, args.passes, args.run_id, skip_if_complete=not args.force)
-    total = len(target_tasks) * len(args.modes) * args.passes
-    skipped = total - len(jobs)
-    workers = args.workers if args.workers is not None else min(len(jobs), 8)
+    # Build the set of ALL (uid, mode, pass) keys for this run so we can
+    # also evaluate passes that were already solved in a previous invocation.
+    all_pass_keys: set[tuple[str, str, int]] = {
+        (t["uid"], mode, p)
+        for t in target_tasks
+        for mode in args.modes
+        for p in range(1, args.passes + 1)
+    }
 
-    log(f"Run '{args.run_id}': {len(jobs)} job(s) to run ({skipped} already complete), {workers} workers")
+    solve_jobs = build_job_list(
+        target_tasks, args.modes, args.passes, args.run_id, skip_if_complete=not args.force
+    )
+    total = len(all_pass_keys)
+    skipped_solve = total - len(solve_jobs)
+    # Protect against 0-worker executor when there are no solve jobs
+    workers = max(1, args.workers if args.workers is not None else min(len(solve_jobs) or 1, 8))
+    eval_workers_n = max(1, args.eval_workers if args.eval_workers is not None else workers)
+
+    log(f"Run '{args.run_id}': {len(solve_jobs)} solve job(s) to run ({skipped_solve} already complete), "
+        f"{workers} solve workers / {eval_workers_n} eval workers")
     log(f"Modes: {args.modes}  Passes: {args.passes}  Tasks: {len(target_tasks)}")
-
-    if not jobs:
-        log("Nothing to do.")
-        return
 
     successes: list[str] = []
     failures:  list[str] = []
+    eval_ok: list[str] = []
+    eval_fail: list[str] = []
 
     def run_one(job: dict) -> tuple[bool, str]:
         return run_attempt(
@@ -418,16 +547,136 @@ def main() -> None:
             extra_env=effective_env,
         )
 
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(run_one, j): j for j in jobs}
-        for future in as_completed(futures):
-            ok, msg = future.result()
-            (successes if ok else failures).append(msg)
+    def eval_one(job: dict) -> tuple[bool, str]:
+        return _eval_attempt(
+            uid=job["uid"],
+            mode=job["mode"],
+            pass_index=job["pass_index"],
+            run_id=args.run_id,
+            skip_if_complete=not args.force,
+            timeout_s=args.eval_timeout,
+        )
+
+    # ── Pipelined Solve → Eval (concurrent) ───────────────────────────────────
+    # Each pass is fully independent.  As soon as a solve container exits, its
+    # eval container is queued immediately — we don't wait for other passes.
+    # Both thread pools run concurrently, bounded by their respective worker limits.
+    # Phase 3 (metrics) runs after all evals finish.
+
+    owner_token = register_run_owner()
+    try:
+        with ExitStack() as stack:
+            solve_exec = stack.enter_context(ThreadPoolExecutor(max_workers=workers))
+            eval_exec = (
+                stack.enter_context(ThreadPoolExecutor(max_workers=eval_workers_n))
+                if not args.skip_eval else None
+            )
+
+            solve_futures: dict = {solve_exec.submit(run_one, j): j for j in solve_jobs}
+            eval_futures: dict = {}
+            submitted_eval_keys: set[tuple[str, str, int]] = set()
+
+            # As each solve finishes, immediately queue its eval.
+            for sf in as_completed(solve_futures):
+                j = solve_futures[sf]
+                ok, msg = sf.result()
+                (successes if ok else failures).append(msg)
+                log(f"  Solve {'✓' if ok else '✗'} {msg}")
+
+                if eval_exec is not None:
+                    key = (j["uid"], j["mode"], j["pass_index"])
+                    if key not in submitted_eval_keys:
+                        ef = eval_exec.submit(eval_one, j)
+                        eval_futures[ef] = j
+                        submitted_eval_keys.add(key)
+
+            # Also submit evals for any already-solved passes from a previous run
+            # that weren't just solved now (e.g. --force was not set and they had
+            # result.json already).
+            if eval_exec is not None:
+                run_dir = RUNS_DIR / args.run_id
+                for uid, mode, pass_idx in sorted(all_pass_keys - submitted_eval_keys):
+                    pass_dir = run_dir / uid / mode / f"pass_{pass_idx}"
+                    if (pass_dir / "result.json").exists():
+                        eval_job = {"uid": uid, "mode": mode, "pass_index": pass_idx}
+                        ef = eval_exec.submit(eval_one, eval_job)
+                        eval_futures[ef] = eval_job
+                        submitted_eval_keys.add((uid, mode, pass_idx))
+
+            # Wait for all evals to finish
+            for ef in as_completed(eval_futures):
+                j2 = eval_futures[ef]
+                ok2, msg2 = ef.result()
+                (eval_ok if ok2 else eval_fail).append(msg2)
+                log(f"  Eval  {'✓' if ok2 else '✗'} {msg2}")
+
+    finally:
+        unregister_run_owner(owner_token)
+        cleaned = 0
+        for task in target_tasks:
+            harness_image = f"{HARNESS_IMAGE_PREFIX}:{task['uid']}"
+            cleaned += cleanup_orphaned_containers(harness_image)
+        if cleaned > 0:
+            log(f"Cleaned up {cleaned} orphaned harness container(s)")
 
     log(f"\n{'='*60}")
-    log(f"Done: {len(successes)} succeeded, {len(failures)} failed.")
+    log(f"Solve:  {len(successes)} succeeded, {len(failures)} failed.")
     for msg in failures:
-        log(f"  FAILED: {msg}", file=sys.stderr)
+        log(f"  SOLVE FAILED: {msg}", file=sys.stderr)
+    if not args.skip_eval:
+        log(f"Eval:   {len(eval_ok)} evaluated, {len(eval_fail)} failed.")
+        for msg in eval_fail:
+            log(f"  EVAL FAILED: {msg}", file=sys.stderr)
+
+    # ── Phase 3: Metrics (after all passes + evals complete) ──────────────────
+    if not args.skip_metrics:
+        run_dir = RUNS_DIR / args.run_id
+        rows = load_pass_rows(run_dir)
+        if rows:
+            metrics_dir = run_dir / "metrics"
+            metrics_dir.mkdir(exist_ok=True)
+            (metrics_dir / "pass_level.json").write_text(json.dumps(rows, indent=2))
+            summary = {
+                "metadata": {
+                    "run_id": args.run_id,
+                    "num_passes": args.passes,
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                    "formula": "micro/global-totals (run_hil_bench.py summarize_rows)",
+                },
+                "by_mode_agent_model": summarize(rows, expected_passes=args.passes),
+            }
+            (metrics_dir / "summary.json").write_text(json.dumps(summary, indent=2))
+            log(f"\nMetrics written to {metrics_dir}")
+            for key, m in sorted(summary["by_mode_agent_model"].items()):
+                parts = [f"\n  [{key}]"]
+                for k in range(1, args.passes + 1):
+                    pa = m.get(f"pass_at_{k}")
+                    n = m.get(f"pass_at_{k}_n", 0)
+                    if pa is not None:
+                        parts.append(f"    pass@{k}={pa:.3f} (n={n})")
+                if m.get("ask_f1") is not None:
+                    q  = m.get("total_questions", 0)
+                    qt = m.get("total_total_questions", 0)
+                    r  = m.get("total_blockers_resolved", 0)
+                    b  = m.get("total_blockers_present", 0)
+                    parts.append(
+                        f"    ask (judge q={q}):  "
+                        f"P={m.get('ask_precision',0):.3f} "
+                        f"R={m.get('ask_recall',0):.3f} "
+                        f"F1={m.get('ask_f1',0):.3f}  resolved={r}/{b}"
+                    )
+                    parts.append(
+                        f"    ask (total q={qt}): "
+                        f"P={m.get('ask_precision_total',0):.3f} "
+                        f"R={m.get('ask_recall_total',0):.3f} "
+                        f"F1={m.get('ask_f1_total',0):.3f}"
+                    )
+                log("\n".join(parts))
+        else:
+            log("\nMetrics: no evaluated data yet.")
+    else:
+        log("\nMetrics: skipped (--skip-metrics).")
+
     if failures:
         sys.exit(1)
 
