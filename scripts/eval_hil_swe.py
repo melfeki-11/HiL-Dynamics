@@ -67,13 +67,117 @@ RUN_OWNER_DIR = Path(os.getenv("HIL_BENCH_RUN_OWNER_DIR", "/tmp/hil_bench_run_ow
 SWEAP_TEST_CMD = (
     "bash /root/run_script.sh > /tmp/stdout.log 2> /tmp/stderr.log; "
     "python /root/parser.py /tmp/stdout.log /tmp/stderr.log /tmp/output.json; "
-    "python -c \"print('SWEAP_JSON_START'); "
-    "import json; print(json.dumps(json.load(open('/tmp/output.json')))); "
-    "print('SWEAP_JSON_END')\""
+    "python -c \"print('SWEAP_JSON_START'); print(open('/tmp/output.json').read()); print('SWEAP_JSON_END')\""
 )
 
 SWEAP_JSON_START = "SWEAP_JSON_START"
 SWEAP_JSON_END = "SWEAP_JSON_END"
+
+# Patterns for file diffs that the canonical filter_patch() strips before applying.
+# Mirrors custom_eval.py PATCH_FILTER_PATTERNS exactly.
+# Critically includes parser.py / run_script.sh (security) and __pycache__ (git apply safety).
+_PATCH_FILTER_PATTERNS = [
+    r"__pycache__/",
+    r"node_modules/",
+    r"\.egg-info/",
+    r"diff --git a/\S+\.pyc ",
+    r"diff --git a/\S+\.pyo ",
+    r"diff --git a/\S+\.so ",
+    r"diff --git a/\S+\.dll ",
+    r"diff --git a/\S+\.dylib ",
+    # HIL-bench infrastructure files — agent must not modify the judge scripts
+    r"diff --git a/parser\.py b/parser\.py",
+    r"diff --git a/run_script\.sh b/run_script\.sh",
+    # Redis persistence files
+    r"appendonlydir/",
+    r"diff --git a/\S*dump\.rdb ",
+    r"diff --git a/\S*appendonly\.aof ",
+]
+_PATCH_FILTER_RE = re.compile("|".join(_PATCH_FILTER_PATTERNS))
+
+
+def filter_patch(patch: str) -> str:
+    """Filter generated/binary/infrastructure files from an agent patch.
+
+    Mirrors custom_eval.py filter_patch() exactly:
+    - Removes __pycache__, .pyc, .so etc. to prevent git apply failures
+    - Removes parser.py / run_script.sh changes to prevent test-infrastructure cheating
+    - Removes Redis persistence files
+
+    Called on the agent patch before git apply, matching _evaluate_single_instance() L2182.
+    """
+    if not patch:
+        return patch
+    file_diffs = re.split(r"(?=diff --git )", patch)
+    filtered = []
+    for diff in file_diffs:
+        if not diff.strip():
+            continue
+        if _PATCH_FILTER_RE.search(diff):
+            continue
+        filtered.append(diff)
+    return "".join(filtered)
+
+
+def _build_sweap_cmd(tests_to_pass: list[str], run_script_content: str | None = None) -> str:
+    """Build the SWEAP test command, passing FAIL_TO_PASS identifiers as args to run_script.sh.
+
+    Mirrors custom_eval.py's augment_test_spec_with_required_tests logic:
+    - Ansible (ansible-test): strips "path/file.py::Class::method" to just the file path.
+      ansible-test does NOT understand pytest's :: notation; passing it causes the test class
+      to be silently excluded. Canonical fix: strip to file path only (custom_eval.py L319-327).
+    - JS/TS (pipe format): strips "file | description" to just the file path.
+      run_script.sh implementations accept file paths; parser.py regenerates full names.
+    - Go: pass function names as-is (used by run_script.sh with go test -run).
+    - Other Python (pytest): pass full pytest IDs (path::Class::method).
+
+    Without arguments, run_script.sh runs the entire test suite which is correct but slow.
+    With arguments, it runs only the required tests, matching the canonical evaluation approach.
+    """
+    if not tests_to_pass:
+        return SWEAP_TEST_CMD
+
+    # Ansible-test special case: ansible-test does NOT understand pytest ::Class::method syntax.
+    # If the run_script.sh uses ansible-test and args contain ::, strip to file paths only.
+    # Mirrors custom_eval.py augment_test_spec_with_required_tests lines 319-327.
+    uses_ansible_test = (
+        run_script_content is not None
+        and "ansible-test" in run_script_content
+        and any("::" in t for t in tests_to_pass)
+    )
+    if uses_ansible_test:
+        # Strip ::Class::method, deduplicate file paths
+        seen: set[str] = set()
+        args: list[str] = []
+        for t in tests_to_pass:
+            fp = t.split("::")[0] if "::" in t else t
+            if fp not in seen:
+                seen.add(fp)
+                args.append(fp)
+    else:
+        # For JS/TS tests using "file | description" format, strip to file path only.
+        # run_script.sh implementations (NodeBB, Protonmail, element-hq, etc.) accept file paths;
+        # parser.py regenerates the full "file | description" names for matching.
+        def _to_script_arg(t: str) -> str:
+            if " | " in t:
+                return t.split(" | ", 1)[0].strip()
+            return t
+
+        seen = set()
+        args = []
+        for raw in tests_to_pass:
+            arg = _to_script_arg(raw)
+            if arg not in seen:
+                seen.add(arg)
+                args.append(arg)
+
+    # Shell-quote each argument (handle single quotes inside test names)
+    def _sh_quote(s: str) -> str:
+        return "'" + s.replace("'", "'\\''") + "'"
+
+    quoted = " ".join(_sh_quote(a) for a in args)
+    # Insert args after "run_script.sh" but before the redirect
+    return SWEAP_TEST_CMD.replace("/root/run_script.sh", f"/root/run_script.sh {quoted}")
 
 _print_lock = threading.Lock()
 
@@ -103,31 +207,219 @@ def parse_sweap_json(output: str) -> list[dict]:
     """Extract and parse the SWEAP_JSON block from combined container output.
 
     Returns list of {name: str, status: str} dicts, or [] on parse failure.
+
+    Mirrors custom_eval.py parse_log_sweap_json parsing strategies exactly:
+      Strategy 1: Look for SWEAP_JSON_START/END markers (most reliable).
+      Strategy 2: Look for {"tests" or {\\n "tests" pattern directly in output.
+      Strategy 3: Try parsing the entire output as JSON (last resort).
     """
+    data = None
+
+    # Strategy 1: Markers — most reliable
     start = output.find(SWEAP_JSON_START)
     end = output.find(SWEAP_JSON_END)
-    if start == -1 or end == -1:
+    if start != -1 and end != -1 and end > start:
+        json_str = output[start + len(SWEAP_JSON_START):end].strip()
+        try:
+            data = json.loads(json_str)
+        except Exception:
+            pass
+
+    # Strategy 2: Look for JSON structure directly (fallback for truncated/interleaved output)
+    if data is None:
+        json_start = output.find('{\n "tests"')
+        if json_start == -1:
+            json_start = output.find('{"tests"')
+        if json_start != -1:
+            section = output[json_start:]
+            for end_pattern in ['\n ]\n}', ']\n}', ']}']:
+                end_pos = section.rfind(end_pattern)
+                if end_pos != -1:
+                    json_str = section[:end_pos + len(end_pattern)]
+                    try:
+                        data = json.loads(json_str)
+                        break
+                    except Exception:
+                        continue
+
+    # Strategy 3: Try parsing entire output (last resort)
+    if data is None:
+        try:
+            data = json.loads(output.strip())
+        except Exception:
+            pass
+
+    if data is None:
         return []
-    json_str = output[start + len(SWEAP_JSON_START):end].strip()
-    try:
-        data = json.loads(json_str)
-        return data.get("tests", [])
-    except Exception:
-        return []
+    return data.get("tests", [])
+
+
+def _extract_pytest_components(test_name: str) -> tuple[str | None, str, str]:
+    """Extract (file_path, func_with_params, func_base) from a pytest-style test name.
+
+    Mirrors custom_eval.py's _extract_pytest_components exactly.
+    Examples:
+      "path/file.py::TestClass::test_foo[p1]" → ("path/file.py", "test_foo[p1]", "test_foo")
+      "test_foo" → (None, "test_foo", "test_foo")
+    """
+    file_path = None
+    func_with_params = test_name
+    if "::" in test_name:
+        parts = test_name.split("::")
+        file_path = parts[0]
+        func_with_params = parts[-1]
+    func_base = func_with_params.split("[")[0] if "[" in func_with_params else func_with_params
+    return file_path, func_with_params, func_base
+
+
+def _paths_match(path1: str | None, path2: str | None) -> bool:
+    """Check if two file paths match, handling different root prefixes.
+
+    Mirrors custom_eval.py's _paths_match exactly.
+    """
+    if path1 is None and path2 is None:
+        return True
+    if path1 is None or path2 is None:
+        return False
+    if path1 == path2:
+        return True
+    return (
+        path1.endswith("/" + path2)
+        or path2.endswith("/" + path1)
+        or path1.endswith(path2)
+        or path2.endswith(path1)
+    )
+
+
+def _match_test_name(parser_name: str, required_tests: set[str]) -> str | None:
+    """Find a required test name that matches parser_name, using fuzzy matching.
+
+    Mirrors custom_eval.py's _find_matching_required_test exactly:
+      1. Exact match
+      2. JS/TS pipe format (file | description) with path/desc suffix matching
+      3. Pytest format: path + func match with params_compatible check (two-pass:
+         prefer path match, fall back to func-only)
+    """
+    # === 1. Exact match ===
+    if parser_name in required_tests:
+        return parser_name
+
+    # === 2. JS/TS pipe format ===
+    if " | " in parser_name:
+        parser_path, parser_desc = parser_name.split(" | ", 1)
+        for req in required_tests:
+            if " | " in req:
+                req_path, req_desc = req.split(" | ", 1)
+                path_matches = (
+                    req_path == parser_path
+                    or req_path.endswith(parser_path)
+                    or parser_path.endswith(req_path)
+                )
+                desc_matches = (
+                    req_desc == parser_desc
+                    or req_desc.endswith(" | " + parser_desc)
+                    or parser_desc.endswith(" | " + req_desc)
+                )
+                if path_matches and desc_matches:
+                    return req
+            else:
+                if (
+                    req == parser_path
+                    or req.endswith(parser_path)
+                    or parser_path.endswith(req)
+                ):
+                    return req
+        return None
+
+    # === 3. Pytest format (path::func or just func, with or without params) ===
+    parser_path, parser_func_params, parser_func_base = _extract_pytest_components(parser_name)
+    parser_func_base_lower = parser_func_base.lower()
+    fallback_match: str | None = None
+    for req in required_tests:
+        if " | " in req:
+            continue
+        req_path, req_func_params, req_func_base = _extract_pytest_components(req)
+        if req_func_base.lower() != parser_func_base_lower:
+            continue
+        # Check parameter compatibility (mirrors canonical params_compatible exactly)
+        params_compatible = (
+            parser_func_params == req_func_params          # exact match
+            or req_func_params == req_func_base            # required has no params (bare)
+            or parser_func_params == parser_func_base      # parser has no params
+        )
+        if not params_compatible:
+            continue
+        # Prefer path matches; fall back to func-only (canonical two-pass strategy)
+        if parser_path is not None and req_path is not None:
+            if _paths_match(parser_path, req_path):
+                return req                                  # best match: paths align
+            if fallback_match is None:
+                fallback_match = req
+        else:
+            return req                                      # at least one side has no path
+
+    return fallback_match
 
 
 def compute_resolved(tests: list[dict], tests_to_pass: list[str]) -> tuple[bool, list[str], list[str]]:
     """Return (resolved, passed_tests, failed_tests) given parsed test results.
 
     resolved = True iff every test in tests_to_pass has status PASSED.
+
+    Mirrors custom_eval.py's parse_log_sweap_json scoring logic:
+      1. Fuzzy test-name matching via _match_test_name (_find_matching_required_test)
+      2. Parametrized test promotion: if FAIL_TO_PASS has a bare "test_foo" (no params)
+         and all parametrized variants "test_foo[p1]", "test_foo[p2]" in the parser output
+         PASSED, mark the bare required test as PASSED.  This mirrors custom_eval.py L736-778.
     """
     if not tests_to_pass:
-        # No target tests specified → can't resolve
         return False, [], []
 
-    by_name: dict[str, str] = {t["name"]: t["status"] for t in tests if "name" in t}
-    passed = [t for t in tests_to_pass if by_name.get(t, "MISSING") == "PASSED"]
-    failed = [t for t in tests_to_pass if by_name.get(t, "MISSING") != "PASSED"]
+    required_set = set(tests_to_pass)
+
+    # Build status map: required test name → PASSED|FAILED|... (via fuzzy matching).
+    # Mirrors canonical parse_log_sweap_json: later results overwrite earlier ones
+    # (no first-match guard), so a bare required test ends up with the status of the
+    # last parametrized variant that matched it.
+    status_for_required: dict[str, str] = {}
+    # Also keep a full parser-name → status map for the parametrized promotion step.
+    parser_status: dict[str, str] = {}
+    for t in tests:
+        name = t.get("name", "")
+        if not name:
+            continue
+        status = t.get("status", "MISSING")
+        parser_status[name] = status
+        matched = _match_test_name(name, required_set)
+        if matched is not None:
+            status_for_required[matched] = status  # overwrite — canonical behaviour
+
+    # Parametrized test promotion (mirrors custom_eval.py L736-778):
+    # If a required test is bare (no "["), and all parametrized variants of that
+    # test found in parser_status are PASSED, promote the bare required test to PASSED.
+    for req in required_set:
+        if req in status_for_required:
+            continue                                 # already matched
+        if " | " in req or "[" in req:
+            continue                                 # skip JS/TS pipe and already-parametrized
+        req_path, _, req_func_base = _extract_pytest_components(req)
+        req_func_base_lower = req_func_base.lower()
+        parametrized_variants: list[str] = []
+        for pname, pstatus in parser_status.items():
+            if "[" not in pname:
+                continue                             # only look at parametrized parser names
+            st_path, _, st_func_base = _extract_pytest_components(pname)
+            if st_func_base.lower() != req_func_base_lower:
+                continue
+            if req_path is not None:
+                if st_path is None or not _paths_match(req_path, st_path):
+                    continue
+            parametrized_variants.append(pname)
+        if parametrized_variants and all(parser_status.get(v) == "PASSED" for v in parametrized_variants):
+            status_for_required[req] = "PASSED"
+
+    passed = [t for t in tests_to_pass if status_for_required.get(t, "MISSING") == "PASSED"]
+    failed = [t for t in tests_to_pass if status_for_required.get(t, "MISSING") != "PASSED"]
     return len(failed) == 0 and len(passed) == len(tests_to_pass), passed, failed
 
 
@@ -169,7 +461,21 @@ def eval_attempt(
     test_patch = metadata.get("test_patch", "")
     tests_to_pass: list[str] = metadata.get("swe_bench_metadata", {}).get("FAIL_TO_PASS", [])
 
+    # Read run_script.sh to detect ansible-test (needed by _build_sweap_cmd).
+    # Mirrors custom_eval.py evaluate_from_metadata which reads run_script_content.
+    run_script_path = task_dir / "run_script.sh"
+    run_script_content: str | None = run_script_path.read_text() if run_script_path.exists() else None
+
     label = f"[{uid[:12]}|{mode}|p{pass_index}]"
+
+    # Apply canonical filter_patch before writing to temp file.
+    # Mirrors _evaluate_single_instance() L2182 in custom_eval.py:
+    #   clean_patch = filter_patch(raw_patch)
+    # Strips __pycache__, .pyc, node_modules, parser.py, run_script.sh etc.
+    raw_agent_patch = patch_path.read_text()
+    clean_agent_patch = filter_patch(raw_agent_patch)
+    if raw_agent_patch != clean_agent_patch:
+        log(f"{label} Filtered generated/infrastructure files from agent patch")
 
     # Write patches to temp files so we can bind-mount them
     with tempfile.TemporaryDirectory(prefix=f"th_eval_{uid[:8]}_") as tmpdir:
@@ -177,16 +483,27 @@ def eval_attempt(
         agent_patch_file = tmp / "agent.patch"
         test_patch_file = tmp / "test.patch"
 
-        agent_patch_file.write_text(patch_path.read_text())
+        agent_patch_file.write_text(clean_agent_patch)
         test_patch_file.write_text(test_patch)
 
         # Eval script: runs inside the container.
-        # 1. Apply agent patch (best-effort — agent may not have produced changes)
-        # 2. Apply test patch (hard-required for evaluation)
-        # 3. Run SWEAP_TEST_CMD
+        # 1. Setup (chmod, git config) — mirrors make_repo_script_list_local() in custom_eval.py
+        # 2. Apply agent patch (best-effort — agent may not have produced changes)
+        # 3. Apply test patch (hard-required for evaluation)
+        # 4. Run SWEAP_TEST_CMD
         eval_script = r"""#!/bin/sh
 set -e
 cd /app
+
+# Mirrors custom_eval.py make_repo_script_list_local() setup commands,
+# which the canonical always runs inside the eval container even for
+# skip_install=True (hilbench-swe images):
+#   chmod -R 777 /testbed
+#   git config --global user.email setup@swebench.config
+#   git config --global user.name SWE-bench
+chmod -R 777 /app
+git config --global user.email setup@swebench.config
+git config --global user.name SWE-bench
 
 PATCH_APPLIED=0
 if [ -s /tmp/agent.patch ]; then
@@ -210,12 +527,32 @@ else
   exit 2
 fi
 
-""" + SWEAP_TEST_CMD
+# Turn off exit-on-error for the test run: run_script.sh exits non-zero when
+# tests fail, which is the expected case for unsolved attempts.  We still need
+# parser.py to capture the per-test results, so we cannot let set -e bail here.
+set +e
+""" + _build_sweap_cmd(tests_to_pass, run_script_content)
         eval_script_file = tmp / "eval.sh"
         eval_script_file.write_text(eval_script)
 
         cmd = [
             "docker", "run", "--rm",
+            # hilbench-swe base images have ENTRYPOINT ["sleep", "infinity"] baked in.
+            # The harness image clears this with ENTRYPOINT [] in Dockerfile.harness, but
+            # the eval container uses the raw base image, so we MUST override it here.
+            # This mirrors ask_config_claude_opus_4-6.yaml: docker_args: ["--entrypoint=", ...]
+            "--entrypoint", "",
+            # hilbench-swe images have pip.conf pointing to non-existent 127.0.0.1:9876
+            # (same fix as ask_config_claude_opus_4-6.yaml and _DOCKERFILE_INSTANCE_PRECONFIGURED)
+            "-e", "PIP_INDEX_URL=https://pypi.org/simple/",
+            # Prevent git/man/less from opening a pager (hangs in non-interactive containers).
+            # Matches ask_config_claude_opus_4-6.yaml env_variables exactly.
+            "-e", "GIT_PAGER=cat",
+            "-e", "PAGER=cat",
+            "-e", "MANPAGER=cat",
+            "-e", "LESS=-R",
+            "-e", "LANG=C.UTF-8",
+            "-e", "LC_ALL=C.UTF-8",
             # bind-mount patches and eval script read-only
             "-v", f"{agent_patch_file}:/tmp/agent.patch:ro",
             "-v", f"{test_patch_file}:/tmp/test.patch:ro",
@@ -250,13 +587,14 @@ fi
 
         # Determine patch apply status
         patch_applied = "PATCH_APPLY_STATUS: ok" in combined_output or "PATCH_APPLY_STATUS: empty" in combined_output
-        test_ran = result.returncode in (0, 1)  # exit 0 = tests ran (all ok or some failed), exit 2 = test patch failed
+        # exit 2 = test_patch failed (explicit `exit 2` in eval_script); anything else = tests ran
+        test_ran = result.returncode != 2
 
         # Parse SWEAP JSON
         test_results = parse_sweap_json(combined_output)
         resolved, passed_tests, failed_tests = compute_resolved(test_results, tests_to_pass)
 
-        if result.returncode not in (0, 1) and result.returncode != 0:
+        if result.returncode not in (0, 1):
             error_msg = f"container exited {result.returncode}; stderr: {result.stderr[:500]}"
         else:
             error_msg = None

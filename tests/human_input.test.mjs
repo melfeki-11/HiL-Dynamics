@@ -588,10 +588,11 @@ test("router records raw and normalized events while keeping clarification and a
     cachePath: path.join(dir, "cache.json"),
     trajectoryFile,
     workspaceDir,
-    modelClient: async ({ messages }) => {
-      const user = JSON.parse(messages.at(-1).content);
-      return JSON.stringify({ blocker_id: user.request.request_type === "clarification" ? "prefix-before-name" : UNKNOWN_BLOCKER_ID });
-    },
+    // The user message is now a natural language prompt (not JSON), so we simply
+    // return the matching blocker_id for any call.  routeApproval() uses registry
+    // pattern-matching and never invokes the modelClient, so this mock only fires
+    // for the clarification call.
+    modelClient: async () => JSON.stringify({ blocker_id: "prefix-before-name" }),
   });
 
   const clarification = await router.route({

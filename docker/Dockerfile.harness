@@ -16,7 +16,7 @@
 #     -v <output_dir>:/output \
 #     -e TASK_UID=<uid> -e MODE=ask_human -e ... \
 #     hilbench-swe-harness:<uid> \
-#     node /opt/trust_horizon/src/harnesses/claude-code/index.mjs
+#     node /opt/trust_horizon/src/hil_swe/run_claude.mjs
 
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}

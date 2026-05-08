@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -46,6 +47,134 @@ ROOT = Path(__file__).resolve().parents[1]
 RUNS_DIR = ROOT / "runs"
 DATA_DIR = ROOT / "data" / "hil_bench_swe"
 TASKS_INDEX = DATA_DIR / "tasks_index.json"
+
+# ── Canonical trajectory-rerun constants (run_hil_bench.py) ──────────────────
+# Mirrors run_hil_bench.py lines 35-47 exactly.
+TRAJECTORY_TIMEOUT_OBS_RE = re.compile(r"Command '\[.*\]' timed out after \d+ seconds")
+TRAJECTORY_HICCUP_OBS = "can't answer (perhaps transient hiccup)"
+TRAJECTORY_ENV_DIED_OBS = "Environment died unexpectedly"
+TRAJECTORY_UNKNOWN_ERROR = "Exit due to unknown error"
+# SQL-specific constants — included for completeness; won't fire for SWE tasks.
+KB_QUERY_ERROR = "Error querying knowledge base"
+
+TRAJECTORY_RERUN_OCCURRENCE_THRESHOLD_STRICT = 1   # hiccup, kb_query_error, unknown_error
+TRAJECTORY_RERUN_OCCURRENCE_THRESHOLD_LENIENT = 3  # timeout
+
+
+def _load_trajectory_steps(pass_dir: str) -> list[dict]:
+    """Load trajectory steps from trajectory.json in pass_dir.
+
+    Returns a list of {act, obs, thought?} dicts (our format), or [].
+    Mirrors run_hil_bench.py load_trajectory_steps_from_dir / extract_public_trajectory_steps,
+    adapted for our trajectory.json format (already in {act, obs} form).
+    """
+    if not pass_dir:
+        return []
+    traj_path = Path(pass_dir) / "trajectory.json"
+    if not traj_path.exists():
+        return []
+    try:
+        steps = json.loads(traj_path.read_text())
+        return steps if isinstance(steps, list) else []
+    except Exception:
+        return []
+
+
+def _trajectory_has_timeout_obs(steps: list[dict]) -> bool:
+    """True if >= LENIENT (3) steps have a command-timeout observation.
+
+    Mirrors run_hil_bench.py trajectory_has_timeout_obs (lines 944-950).
+    """
+    count = 0
+    for step in steps:
+        obs = step.get("obs", "")
+        if isinstance(obs, str) and TRAJECTORY_TIMEOUT_OBS_RE.search(obs):
+            count += 1
+    return count >= TRAJECTORY_RERUN_OCCURRENCE_THRESHOLD_LENIENT
+
+
+def _trajectory_has_hiccup_obs(steps: list[dict]) -> bool:
+    """True if >= STRICT (1) steps have the exact ask_human hiccup observation.
+
+    Mirrors run_hil_bench.py trajectory_has_hiccup_obs (lines 953-959).
+    """
+    count = 0
+    for step in steps:
+        obs = step.get("obs", "")
+        if isinstance(obs, str) and obs.strip() == TRAJECTORY_HICCUP_OBS:
+            count += 1
+    return count >= TRAJECTORY_RERUN_OCCURRENCE_THRESHOLD_STRICT
+
+
+def _trajectory_has_env_died_obs(steps: list[dict]) -> bool:
+    """True if the LAST step's observation contains 'Environment died unexpectedly'.
+
+    Mirrors run_hil_bench.py trajectory_has_env_died_obs (lines 962-966).
+    """
+    if not steps:
+        return False
+    obs = steps[-1].get("obs", "")
+    return isinstance(obs, str) and TRAJECTORY_ENV_DIED_OBS in obs
+
+
+def _trajectory_has_unknown_error(steps: list[dict]) -> bool:
+    """True if the last step's 'response' field contains 'Exit due to unknown error'.
+
+    Mirrors run_hil_bench.py trajectory_has_unknown_error (lines 969-979).
+    Our trajectory.json does not emit 'response', so this will never trigger —
+    but we keep it for completeness and future-proofing.
+    """
+    if not steps:
+        return False
+    last = steps[-1]
+    if not isinstance(last, dict):
+        return False
+    response = last.get("response", "")
+    return isinstance(response, str) and TRAJECTORY_UNKNOWN_ERROR in response
+
+
+def _trajectory_has_kb_query_error(steps: list[dict]) -> bool:
+    """True if >= STRICT (1) steps have 'Error querying knowledge base' in obs.
+
+    Mirrors run_hil_bench.py trajectory_has_kb_query_error (lines 982-995).
+    SQL-specific — will not trigger for SWE tasks in practice.
+    """
+    count = 0
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        obs = step.get("obs", "")
+        if isinstance(obs, str) and KB_QUERY_ERROR in obs:
+            count += 1
+            if count >= TRAJECTORY_RERUN_OCCURRENCE_THRESHOLD_STRICT:
+                return True
+    return False
+
+
+def _trajectory_needs_rerun(pass_dir: str) -> bool:
+    """Return True if this pass's trajectory indicates a transient failure requiring rerun.
+
+    Mirrors run_hil_bench.py trajectory_needs_rerun (lines 1016-1024) exactly,
+    adapted to read from our trajectory.json format instead of .traj files:
+
+      trajectory_has_timeout_obs(trajectory)      — LENIENT threshold (3)
+      trajectory_has_hiccup_obs(trajectory)       — STRICT threshold (1)
+      trajectory_has_env_died_obs(trajectory)     — last step obs substring
+      trajectory_has_unknown_error(trajectory)    — last step response substring
+      trajectory_has_kb_query_error(trajectory)   — STRICT threshold (1), SQL-specific
+    """
+    steps = _load_trajectory_steps(pass_dir)
+    # Empty trajectory (no file) → treat as infra_error, not rerun signal.
+    # Only return True if the trajectory exists AND contains a specific signal.
+    if not steps:
+        return False
+    return (
+        _trajectory_has_timeout_obs(steps)
+        or _trajectory_has_hiccup_obs(steps)
+        or _trajectory_has_env_died_obs(steps)
+        or _trajectory_has_unknown_error(steps)
+        or _trajectory_has_kb_query_error(steps)
+    )
 
 
 # ── Row loading ─────────────────────────────────────────────────────────────
@@ -150,8 +279,20 @@ def _f1(precision: float, recall: float) -> float:
     return 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
 
 
-def summarize(rows: list[dict[str, Any]], expected_passes: int) -> dict[str, Any]:
-    """Aggregate rows by (mode, agent, model) and compute pass@k + ask metrics."""
+def summarize(
+    rows: list[dict[str, Any]],
+    expected_passes: int,
+    include_partial: bool = False,
+) -> dict[str, Any]:
+    """Aggregate rows by (mode, agent, model) and compute pass@k + ask metrics.
+
+    include_partial (default False, mirrors run_hil_bench.py default):
+      False — only include attempts that have ALL expected_passes valid passes.
+              An attempt with fewer valid passes is excluded from every pass@k.
+              This is the canonical default and the scientifically correct mode.
+      True  — include attempts with at least one valid pass (contributes to the
+              pass@k denominators it qualifies for).  Useful for partial runs.
+    """
 
     # Group rows by (uid, mode, agent, model) → sorted list of pass rows
     grouped: dict[tuple, list[dict]] = defaultdict(list)
@@ -159,13 +300,25 @@ def summarize(rows: list[dict[str, Any]], expected_passes: int) -> dict[str, Any
         key = (row["uid"], row["mode"], row["agent"], row["model"])
         grouped[key].append(row)
 
-    # For each group, sort passes and filter infra errors
+    # For each group, sort passes, filter infra errors, and filter bad trajectories.
+    # Mirrors run_hil_bench.py summarize_rows lines 783-797:
+    #   - Skip infra_error passes
+    #   - Skip passes whose trajectory needs rerun (hiccup obs → transient judge failure)
+    #   - Apply include_partial: if False (canonical default), only include attempts
+    #     that completed all expected_passes valid passes.
     attempt_data: dict[tuple[str, str, str], list[list[dict]]] = defaultdict(list)
     # key = (mode, agent, model)
     for (uid, mode, agent, model), pass_rows in grouped.items():
-        valid_passes = [r for r in sorted(pass_rows, key=lambda r: r["pass_index"])
-                        if r["status"] != "infra_error"]
-        if valid_passes:
+        valid_passes = []
+        for r in sorted(pass_rows, key=lambda r: r["pass_index"]):
+            if r["status"] == "infra_error":
+                continue
+            if _trajectory_needs_rerun(r.get("pass_dir", "")):
+                continue
+            valid_passes.append(r)
+        num_valid = len(valid_passes)
+        should_include = num_valid >= 1 if include_partial else num_valid >= expected_passes
+        if should_include:
             attempt_data[(mode, agent, model)].append(valid_passes)
 
     result: dict[str, Any] = {}
@@ -260,6 +413,16 @@ def main() -> None:
         help="Expected number of passes per (uid, mode) for pass@k calculation (default: 3).",
     )
     parser.add_argument("--print", action="store_true", help="Print summary to stdout.")
+    parser.add_argument(
+        "--include-partial",
+        action="store_true",
+        default=False,
+        help=(
+            "Include attempts that only partially completed all passes (default: False). "
+            "Canonical run_hil_bench.py default is also False: only attempts with ALL "
+            "expected passes valid are counted in pass@k denominators."
+        ),
+    )
     args = parser.parse_args()
 
     run_dir = RUNS_DIR / args.run_id
@@ -285,10 +448,13 @@ def main() -> None:
         "metadata": {
             "run_id": args.run_id,
             "num_passes": args.passes,
+            "include_partial": args.include_partial,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "formula": "micro/global-totals (run_hil_bench.py summarize_rows)",
         },
-        "by_mode_agent_model": summarize(rows, expected_passes=args.passes),
+        "by_mode_agent_model": summarize(
+            rows, expected_passes=args.passes, include_partial=args.include_partial
+        ),
     }
     summary_path = metrics_dir / "summary.json"
     summary_path.write_text(json.dumps(summary, indent=2))

@@ -32,6 +32,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import threading
@@ -164,7 +165,7 @@ def docker_image_exists(image_name: str) -> bool:
 def load_docker_image_from_archive(archive_path: Path) -> str:
     with docker_load_lock:
         if archive_path.suffix == ".zst" or ".tar.zst" in archive_path.name:
-            cmd = f"zstd -dc {archive_path} | docker load"
+            cmd = f"zstd -dc {shlex.quote(str(archive_path))} | docker load"
             result = subprocess.run(
                 cmd, shell=True, executable="/bin/bash",
                 capture_output=True, text=True,

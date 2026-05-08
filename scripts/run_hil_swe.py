@@ -67,7 +67,7 @@ Environment variables (read from host env, forwarded into each container):
     CLAUDE_MODEL           model slug for the agent (default: claude-sonnet-4-6)
     MAX_TURNS              max agent turns (default: 80)
     ATTEMPT_TIMEOUT_MS     per-attempt timeout in ms (default: 3600000)
-    PERMISSION_MODE        claude permissionMode (default: bypassPermissions)
+    PERMISSION_MODE        claude permissionMode (default: acceptEdits)
 """
 
 from __future__ import annotations
@@ -309,6 +309,20 @@ def run_attempt(
         "-e", "TASK_DIR=/task",
         "-e", "OUTPUT_DIR=/output",
         "-e", "CLAUDE_CODE_EXECUTABLE=claude",
+        # hilbench-swe images have pip.conf pointing to non-existent 127.0.0.1:9876;
+        # override so any pip install during solving works. Same fix as yaml config +
+        # _DOCKERFILE_INSTANCE_PRECONFIGURED in custom_eval.py.
+        "-e", "PIP_INDEX_URL=https://pypi.org/simple/",
+        # Prevent git/less/man from opening interactive pagers in non-TTY containers.
+        # Matches ask_config_claude_opus_4-6.yaml env_variables exactly.
+        "-e", "GIT_PAGER=cat",
+        "-e", "PAGER=cat",
+        "-e", "MANPAGER=cat",
+        "-e", "LESS=-R",
+        "-e", "LANG=C.UTF-8",
+        "-e", "LC_ALL=C.UTF-8",
+        "-e", "TQDM_DISABLE=1",
+        "-e", "PIP_PROGRESS_BAR=off",
     ]
 
     cmd = [
@@ -444,6 +458,21 @@ def main() -> None:
         "--eval-timeout", type=int, default=600,
         help="Per-attempt eval timeout in seconds (default: 600).",
     )
+    parser.add_argument(
+        "--max-turns", type=int, default=None,
+        help="Max agent turns per attempt (default: 80, set in run_claude.mjs). "
+             "Equivalent to passing --env MAX_TURNS=N.",
+    )
+    parser.add_argument(
+        "--include-partial",
+        action="store_true",
+        default=False,
+        help=(
+            "Include attempts with fewer than --passes valid passes in pass@k metrics. "
+            "Default False (canonical run_hil_bench.py behaviour): only attempts that "
+            "completed ALL expected passes are counted in the pass@k denominators."
+        ),
+    )
     args = parser.parse_args()
 
     # ── Load credentials (.env file → os.environ fallback → explicit --env overrides) ──
@@ -469,6 +498,10 @@ def main() -> None:
         if "=" in item:
             k, v = item.split("=", 1)
             effective_env[k] = v
+
+    # 4. --max-turns shorthand (equivalent to --env MAX_TURNS=N)
+    if args.max_turns is not None:
+        effective_env["MAX_TURNS"] = str(args.max_turns)
 
     # 4. Validate the minimum required vars
     api_key = (
@@ -640,10 +673,15 @@ def main() -> None:
                 "metadata": {
                     "run_id": args.run_id,
                     "num_passes": args.passes,
+                    "include_partial": getattr(args, "include_partial", False),
                     "generated_at": datetime.now(timezone.utc).isoformat(),
                     "formula": "micro/global-totals (run_hil_bench.py summarize_rows)",
                 },
-                "by_mode_agent_model": summarize(rows, expected_passes=args.passes),
+                "by_mode_agent_model": summarize(
+                    rows,
+                    expected_passes=args.passes,
+                    include_partial=getattr(args, "include_partial", False),
+                ),
             }
             (metrics_dir / "summary.json").write_text(json.dumps(summary, indent=2))
             log(f"\nMetrics written to {metrics_dir}")

@@ -53,31 +53,25 @@ export function buildSwePrompt({ problemStatement, mode, blockers = [] }) {
 }
 
 /**
- * full_info prompt — instance template wrapping problem statement, followed by the
- * Additional Context section from hil_bench/templates/problem_full_info.jinja2:
+ * full_info prompt — mirrors the canonical hil_bench "with_blockers" flow exactly:
  *
- *   {{ problem_statement }}      (embedded in instance_template)
+ *   STEP 1 — hil_bench/templates/problem_with_blockers.jinja2 augments the raw
+ *             problem_statement with the Additional Context section.
+ *   STEP 2 — The augmented text is passed as {{problem_statement}} to the
+ *             SWE-agent instance_template, so it lands INSIDE <pr_description>.
  *
- *   ---
- *
- *   ## Additional Context
- *
- *   The following clarifications are provided to help you complete this task:
- *
- *   {% for blocker in blockers %}
- *   ### {{ blocker["description"] }}
- *
- *   {{ blocker["resolution"] }}
- *   {% endfor %}
+ * CRITICAL: the "---\n## Additional Context" section must be INSIDE <pr_description>,
+ * not appended after it.  The old implementation called instanceTemplate() first and
+ * then appended the blockers section after </pr_description>, which was wrong.
  */
 function buildFullInfoPrompt(problemStatement, blockers) {
-  const base = instanceTemplate(problemStatement);
-  if (!blockers.length) return base;
+  if (!blockers.length) return instanceTemplate(problemStatement);
+  // Step 1: augment problem_statement (mirrors problem_with_blockers.jinja2).
   const sections = blockers
     .map((b) => `### ${b.description}\n\n${b.resolution}`)
     .join("\n\n");
-  return [
-    base,
+  const augmentedProblem = [
+    problemStatement,
     "",
     "---",
     "",
@@ -88,6 +82,8 @@ function buildFullInfoPrompt(problemStatement, blockers) {
     sections,
     "",
   ].join("\n");
+  // Step 2: wrap augmented text in the SWE-agent instance template.
+  return instanceTemplate(augmentedProblem);
 }
 
 /**
