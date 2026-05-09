@@ -484,7 +484,6 @@ async function callSelectorModel({ modelClient, apiKey, baseUrl, modelId, seed, 
     temperature: 0.05,  // mirrors ask_human_server.py AskHuman._evaluate_prompt() temperature=0.05
     top_p: 1,
     seed,
-    max_tokens: 64,
     response_format: {
       type: "json_schema",
       json_schema: {
