@@ -63,7 +63,8 @@ Environment variables (read from host env, forwarded into each container):
     LITELLM_PROXY_API_KEY  fallback API key
     ASK_HUMAN_BASE_URL     override URL for ask_human vLLM judge
     ASK_HUMAN_MODEL        override ask_human judge model slug
-    CLAUDE_MODEL           model slug for the agent (default: claude-sonnet-4-6)
+    CLAUDE_MODEL           model slug for the agent when --sdk claude (default: claude-sonnet-4-6)
+    CODEX_MODEL            model slug for the agent when --sdk codex  (default: gpt-5.5)
     MAX_TURNS              max agent turns (default: 200)
     ATTEMPT_TIMEOUT_MS     per-attempt timeout in ms (default: 10800000)
     PERMISSION_MODE        claude permissionMode (default: acceptEdits)
@@ -150,8 +151,29 @@ TASKS_INDEX = DATA_DIR / "tasks_index.json"
 RUNS_DIR = ROOT / "runs"
 SRC_DIR = ROOT / "src"
 
-HARNESS_IMAGE_PREFIX = "hilbench-swe-harness-claude"
-ENTRYPOINT = "/opt/trust_horizon/src/hil_swe/run_claude.mjs"
+# SDK-specific configuration.  Values are overridden in main() based on --sdk.
+SDK_CONFIGS = {
+    "claude": {
+        "harness_image_prefix": "hilbench-swe-harness-claude",
+        "entrypoint":           "/opt/trust_horizon/src/hil_swe/run_claude.mjs",
+        "model_env_key":        "CLAUDE_MODEL",
+        "default_model":        "claude-sonnet-4-6",
+        "executable_env":       "CLAUDE_CODE_EXECUTABLE=claude",
+    },
+    "codex": {
+        "harness_image_prefix": "hilbench-swe-harness-codex",
+        "entrypoint":           "/opt/trust_horizon/src/hil_swe/run_codex.mjs",
+        "model_env_key":        "CODEX_MODEL",
+        "default_model":        "gpt-5.5",
+        "executable_env":       "CODEX_CODE_EXECUTABLE=codex",
+    },
+}
+DEFAULT_SDK = "claude"
+
+# Module-level vars — set to SDK-specific values in main() before any workers start.
+SDK                  = DEFAULT_SDK
+HARNESS_IMAGE_PREFIX = SDK_CONFIGS[DEFAULT_SDK]["harness_image_prefix"]
+ENTRYPOINT           = SDK_CONFIGS[DEFAULT_SDK]["entrypoint"]
 
 # Env vars forwarded from host (or .env) into each container.
 # LiteLLM proxy credentials are the most important; the rest are optional overrides.
@@ -168,6 +190,7 @@ FORWARDED_ENV_KEYS = [
     "PAPER_ASK_HUMAN_MODEL",
     # Agent / run parameters (all optional; harness uses built-in defaults)
     "CLAUDE_MODEL",
+    "CODEX_MODEL",
     "MAX_TURNS",
     "ATTEMPT_TIMEOUT_MS",
     "PERMISSION_MODE",
@@ -396,7 +419,7 @@ def _run_attempt_inner(
         "-e", f"RUN_ID={run_id}",
         "-e", "TASK_DIR=/task",
         "-e", "OUTPUT_DIR=/output",
-        "-e", "CLAUDE_CODE_EXECUTABLE=claude",
+        "-e", SDK_CONFIGS[SDK]["executable_env"],
         # hilbench-swe images have pip.conf pointing to non-existent 127.0.0.1:9876;
         # override so any pip install during solving works. Same fix as yaml config +
         # _DOCKERFILE_INSTANCE_PRECONFIGURED in custom_eval.py.
@@ -539,6 +562,12 @@ def main() -> None:
     uid_group.add_argument("--uids", nargs="+", metavar="UID", help="Attempt UIDs to run.")
     uid_group.add_argument("--all", action="store_true", help="Run all ingested tasks from tasks_index.json.")
     parser.add_argument(
+        "--sdk", choices=list(SDK_CONFIGS), default=DEFAULT_SDK,
+        help=f"Agent SDK to use (default: {DEFAULT_SDK}). "
+             f"Determines the harness image prefix and entrypoint. "
+             f"Supported: {', '.join(SDK_CONFIGS)}.",
+    )
+    parser.add_argument(
         "--modes", nargs="+", choices=["ask_human", "full_info"], default=["ask_human"],
         help="Modes to run (default: ask_human).",
     )
@@ -584,7 +613,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--max-turns", type=int, default=None,
-        help="Max agent turns per attempt (default: 200, set in run_claude.mjs). "
+        help="Max agent turns per attempt (default: 200). "
              "Equivalent to passing --env MAX_TURNS=N.",
     )
     parser.add_argument(
@@ -598,6 +627,13 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
+
+    # ── Apply SDK-specific globals before any worker threads are started ─────────
+    global SDK, HARNESS_IMAGE_PREFIX, ENTRYPOINT
+    SDK                  = args.sdk
+    HARNESS_IMAGE_PREFIX = SDK_CONFIGS[args.sdk]["harness_image_prefix"]
+    ENTRYPOINT           = SDK_CONFIGS[args.sdk]["entrypoint"]
+    log(f"SDK: {args.sdk}  harness: {HARNESS_IMAGE_PREFIX}  entrypoint: {Path(ENTRYPOINT).name}")
 
     # ── Load credentials (.env file → os.environ fallback → explicit --env overrides) ──
 
@@ -651,7 +687,8 @@ def main() -> None:
         sys.exit(1)
 
     # Surface the model being used early so it's visible in logs
-    model = effective_env.get("CLAUDE_MODEL", "claude-sonnet-4-6")
+    sdk_cfg = SDK_CONFIGS[args.sdk]
+    model = effective_env.get(sdk_cfg["model_env_key"], sdk_cfg["default_model"])
     log(f"Proxy: {base_url}  Model: {model}")
 
     tasks = load_tasks_index()
@@ -704,13 +741,18 @@ def main() -> None:
             extra_env=effective_env,
         )
 
-    def eval_one(job: dict) -> tuple[bool, str]:
+    def eval_one(job: dict, force_eval: bool = False) -> tuple[bool, str]:
+        # force_eval=True when the solve just ran in this invocation: a new patch
+        # was produced, so any stale eval_result.json from a previous broken run
+        # must not suppress re-evaluation.  Without this, a task whose first solve
+        # failed (wrote a bad patch + eval_result.json), then had its image rebuilt
+        # and re-solved correctly, would silently keep the stale failing eval result.
         ok, msg = _eval_attempt(
             uid=job["uid"],
             mode=job["mode"],
             pass_index=job["pass_index"],
             run_id=args.run_id,
-            skip_if_complete=not args.force,
+            skip_if_complete=not args.force and not force_eval,
             timeout_s=args.eval_timeout,
         )
         # Log immediately from the eval thread so the message appears as soon as
@@ -743,23 +785,29 @@ def main() -> None:
                 (successes if ok else failures).append(msg)
                 log(f"  Solve {'✓' if ok else '✗'} {msg}")
 
-                if eval_exec is not None:
+                if eval_exec is not None and ok:
                     key = (j["uid"], j["mode"], j["pass_index"])
                     if key not in submitted_eval_keys:
-                        ef = eval_exec.submit(eval_one, j)
+                        # build_job_list already excluded passes with result.json, so
+                        # any job that returned ok=True here actually ran a new solve.
+                        # Always force re-eval so a stale eval_result.json from a
+                        # previous broken run cannot hide the new result.
+                        ef = eval_exec.submit(eval_one, j, True)
                         eval_futures[ef] = j
                         submitted_eval_keys.add(key)
 
             # Also submit evals for any already-solved passes from a previous run
             # that weren't just solved now (e.g. --force was not set and they had
-            # result.json already).
+            # result.json already).  These passes were NOT re-solved in this run so
+            # we respect skip_if_complete (force_eval=False) — if their eval is
+            # already good, no reason to re-run it.
             if eval_exec is not None:
                 run_dir = RUNS_DIR / args.run_id
                 for uid, mode, pass_idx in sorted(all_pass_keys - submitted_eval_keys):
                     pass_dir = run_dir / uid / mode / f"pass_{pass_idx}"
                     if (pass_dir / "result.json").exists():
                         eval_job = {"uid": uid, "mode": mode, "pass_index": pass_idx}
-                        ef = eval_exec.submit(eval_one, eval_job)
+                        ef = eval_exec.submit(eval_one, eval_job, False)
                         eval_futures[ef] = eval_job
                         submitted_eval_keys.add((uid, mode, pass_idx))
 

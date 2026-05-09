@@ -19,10 +19,11 @@ The harness image is SDK-specific — it bakes in different tooling per agent:
     Dockerfile:  docker/Dockerfile.harness
     Bakes in:    Node.js 20, claude CLI, @anthropic-ai/claude-agent-sdk, npm deps
 
-  --sdk codex   (future)
+  --sdk codex
     Image tag:   hilbench-swe-harness-codex:<uid>
-    Dockerfile:  docker/Dockerfile.harness.codex
-    Bakes in:    TBD (OpenAI Codex tooling)
+    Dockerfile:  docker/Dockerfile.harness   (same as claude — Dockerfile.harness installs
+                 both @openai/codex and @anthropic-ai/claude-agent-sdk via npm ci)
+    Bakes in:    Node.js 20, codex CLI, @openai/codex-sdk, npm deps
 
 Harness source files are NOT baked in for any SDK — they are bind-mounted at
 run time, so code changes never require image rebuilds.
@@ -56,10 +57,10 @@ SDK_REGISTRY: dict[str, tuple[str, Path]] = {
         "hilbench-swe-harness-claude",
         ROOT / "docker" / "Dockerfile.harness",
     ),
-    # "codex": (
-    #     "hilbench-swe-harness-codex",
-    #     ROOT / "docker" / "Dockerfile.harness.codex",
-    # ),
+    "codex": (
+        "hilbench-swe-harness-codex",
+        ROOT / "docker" / "Dockerfile.harness",   # shared; Dockerfile installs both SDKs
+    ),
 }
 DEFAULT_SDK = "claude"
 
