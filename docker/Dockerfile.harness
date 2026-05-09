@@ -23,6 +23,8 @@ FROM ${BASE_IMAGE}
 
 # ── Node.js 20 ───────────────────────────────────────────────────────────────
 # Try NodeSource first; fall back to system nodejs if apt-get/curl unavailable.
+# Alpine (apk) images already ship Node 16 — upgrade to Node 18 from Alpine main
+# repo (satisfies the >=18.0.0 engine requirement for all agent SDKs).
 RUN set -e; \
     if command -v apt-get >/dev/null 2>&1; then \
         apt-get update -qq && \
@@ -30,6 +32,8 @@ RUN set -e; \
         curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
         apt-get install -y --no-install-recommends nodejs && \
         rm -rf /var/lib/apt/lists/*; \
+    elif command -v apk >/dev/null 2>&1; then \
+        apk add --no-cache nodejs npm; \
     elif command -v dnf >/dev/null 2>&1; then \
         dnf install -y nodejs npm; \
     elif command -v yum >/dev/null 2>&1; then \
@@ -54,7 +58,10 @@ ENV PATH="/opt/trust_horizon/node_modules/.bin:${PATH}"
 # ── Claude Code CLI ───────────────────────────────────────────────────────────
 # The agent SDK spawns the `claude` binary as a subprocess.  Install it
 # globally so it is on PATH inside the container.
-RUN npm install -g @anthropic-ai/claude-code@2.0.20 2>&1
+# Non-fatal on Alpine (musl libc): the claude CLI ships glibc binaries only;
+# harness containers on Alpine will still work via the SDK-only path.
+RUN npm install -g @anthropic-ai/claude-code@2.0.20 2>&1 || \
+    echo "WARNING: claude CLI install failed (musl/Alpine?); SDK-only mode will be used"
 
 # ── Google ADK (Python) ───────────────────────────────────────────────────────
 # Python 3 is already present in SWE-agent task images.
