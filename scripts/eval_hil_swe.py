@@ -33,10 +33,11 @@ Usage:
   python3 scripts/eval_hil_swe.py --run-id my-run --force
 
 Docker cleanup:
-  Eval containers use --rm so they are removed on exit.
-  A run-owner token is registered at the start of the script; the cleanup helper
-  in run_hil_swe.py (or a future gc script) uses it to avoid removing containers
-  while this process is still alive.
+  Eval containers use the BASE hilbench-swe:<uid> image (not the harness image).
+  run_hil_swe.py's cleanup_orphaned_containers only queries by ancestor=harness_image,
+  so eval containers are never in its scope regardless of owner tokens.
+  Eval containers also use --rm (auto-removed on exit) and Popen+kill on timeout,
+  so no orphaned containers or processes remain after eval finishes.
 """
 
 from __future__ import annotations
@@ -50,6 +51,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -183,22 +185,101 @@ _print_lock = threading.Lock()
 
 
 def log(msg: str, file=sys.stdout) -> None:
-    ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    ts = datetime.now().strftime("%H:%M:%S")
     with _print_lock:
         print(f"[{ts}] {msg}", file=file, flush=True)
 
 
-# ── Run-owner registration ──────────────────────────────────────────────────
+# ── Per-uid owner tokens (mirrors run_hil_swe.py / paper_pipeline.py) ────────
+#
+# Token filename: "{uid}__{pid}__{uuid}.owner"
+# eval_attempt() registers a token for its uid at entry and unregisters it in a
+# finally block.  cleanup_orphaned_eval_containers() probes the PID before
+# removing any running eval container, so a concurrent eval for the same uid is
+# never killed mid-run.  Tokens are shared with run_hil_swe.py (same dir +
+# format) so a live solve also guards against eval-container removal.
 
-def register_run_owner() -> Path:
+def _register_uid_owner(uid: str) -> Path:
+    """Write a per-uid PID token; returns path for later unregistration."""
     RUN_OWNER_DIR.mkdir(parents=True, exist_ok=True)
-    token = RUN_OWNER_DIR / f"{os.getpid()}.owner"
+    token = RUN_OWNER_DIR / f"{uid}__{os.getpid()}__{uuid.uuid4().hex}.owner"
     token.write_text(str(os.getpid()))
     return token
 
 
-def unregister_run_owner(token: Path) -> None:
+def _unregister_uid_owner(token: "Path | None") -> None:
+    if not token:
+        return
     token.unlink(missing_ok=True)
+
+
+def _uid_has_live_owner(uid: str) -> bool:
+    """True when any registered owner process for this uid is still alive.
+
+    Mirrors run_hil_swe._uid_has_live_owner exactly: probe PID with kill(0),
+    delete stale tokens for dead processes, be conservative on PermissionError.
+    """
+    if not RUN_OWNER_DIR.exists():
+        return False
+    for marker in RUN_OWNER_DIR.glob(f"{uid}__*__*.owner"):
+        parts = marker.name.split("__")
+        if len(parts) < 3:
+            marker.unlink(missing_ok=True)
+            continue
+        try:
+            pid = int(parts[1])
+        except Exception:
+            marker.unlink(missing_ok=True)
+            continue
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            marker.unlink(missing_ok=True)
+        except PermissionError:
+            return True
+    return False
+
+
+def cleanup_orphaned_eval_containers(uid: str) -> int:
+    """Remove orphaned eval containers for one uid.
+
+    Uses the container name prefix th-eval-{uid[:12]}- (no ancestor filter
+    needed since eval containers use the base hilbench-swe image, not the
+    harness image, and base images vary per task).
+
+    Mirrors cleanup_orphaned_containers in run_hil_swe.py:
+    - Exited containers: always remove.
+    - Running containers: only remove if _uid_has_live_owner(uid) is False.
+    """
+    _FMT = "{{.ID}}\t{{.Image}}\t{{.Names}}\t{{.Status}}\t{{.RunningFor}}"
+    container_name_prefix = f"th-eval-{uid[:12]}-"
+    try:
+        by_name = subprocess.run(
+            ["docker", "ps", "-a", "--format", _FMT,
+             "--filter", f"name={container_name_prefix}"],
+            capture_output=True, text=True, check=False,
+        )
+        to_remove: set[str] = set()
+        for line in by_name.stdout.splitlines():
+            parts = line.split("\t")
+            if len(parts) < 5:
+                continue
+            cid, status = parts[0], parts[3].lower()
+            if status.startswith("exited"):
+                to_remove.add(cid)
+            elif status.startswith("up"):
+                if not _uid_has_live_owner(uid):
+                    to_remove.add(cid)
+        if not to_remove:
+            return 0
+        subprocess.run(
+            ["docker", "rm", "-f", *sorted(to_remove)],
+            capture_output=True, check=False,
+        )
+        return len(to_remove)
+    except Exception:
+        return 0
 
 
 # ── SWEAP output parsing ────────────────────────────────────────────────────
@@ -477,6 +558,18 @@ def eval_attempt(
     if raw_agent_patch != clean_agent_patch:
         log(f"{label} Filtered generated/infrastructure files from agent patch")
 
+    # Register a per-uid owner token so cleanup_orphaned_eval_containers knows
+    # this eval is active.  Mirrors run_hil_swe.run_attempt: non-fatal, always
+    # unregistered in a finally block.
+    owner_token: Path | None = None
+    try:
+        owner_token = _register_uid_owner(uid)
+    except Exception as exc:
+        log(f"{label} WARNING: failed to register eval owner token: {exc}", file=sys.stderr)
+
+    # Clean up any orphaned eval containers from previous crashed runs for this uid.
+    cleanup_orphaned_eval_containers(uid)
+
     # Write patches to temp files so we can bind-mount them
     with tempfile.TemporaryDirectory(prefix=f"th_eval_{uid[:8]}_") as tmpdir:
         tmp = Path(tmpdir)
@@ -535,8 +628,13 @@ set +e
         eval_script_file = tmp / "eval.sh"
         eval_script_file.write_text(eval_script)
 
+        # Unique name so we can kill by name on timeout (same pattern as run_hil_swe.py).
+        # Format: th-eval-<uid12>-<mode>-p<pass>-<run_id12>
+        container_name = f"th-eval-{uid[:12]}-{mode}-p{pass_index}-{run_id[:12]}"
+
         cmd = [
             "docker", "run", "--rm",
+            "--name", container_name,
             # hilbench-swe base images have ENTRYPOINT ["sleep", "infinity"] baked in.
             # The harness image clears this with ENTRYPOINT [] in Dockerfile.harness, but
             # the eval container uses the raw base image, so we MUST override it here.
@@ -564,38 +662,55 @@ set +e
 
         log(f"{label} Starting eval container ({base_image})")
         started_at = time.time()
+        proc: subprocess.Popen | None = None
+        stdout_data = b""
+        stderr_data = b""
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout_s,
-            )
-        except subprocess.TimeoutExpired:
-            err = f"eval timed out after {timeout_s}s"
-            log(f"{label} {err}", file=sys.stderr)
-            _write_eval_result(eval_path, uid, mode, pass_index, error=err)
-            return False, f"{label} {err}"
+            # Use Popen so we can explicitly kill the docker CLI process on timeout.
+            # subprocess.run(timeout=...) raises TimeoutExpired but does NOT kill the child.
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                stdout_data, stderr_data = proc.communicate(timeout=timeout_s)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate()  # drain and reap
+                subprocess.run(["docker", "rm", "-f", container_name],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                err = f"eval timed out after {timeout_s}s"
+                log(f"{label} {err}", file=sys.stderr)
+                _write_eval_result(eval_path, uid, mode, pass_index, error=err)
+                _unregister_uid_owner(owner_token)
+                return False, f"{label} {err}"
         except Exception as exc:
+            if proc is not None:
+                try:
+                    proc.kill()
+                    proc.communicate()
+                except Exception:
+                    pass
+            subprocess.run(["docker", "rm", "-f", container_name],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
             err = str(exc)
             log(f"{label} Exception: {err}", file=sys.stderr)
             _write_eval_result(eval_path, uid, mode, pass_index, error=err)
+            _unregister_uid_owner(owner_token)
             return False, f"{label} Exception: {err}"
 
         elapsed = int(time.time() - started_at)
-        combined_output = result.stdout + "\n" + result.stderr
+        combined_output = stdout_data.decode(errors="replace") + "\n" + stderr_data.decode(errors="replace")
 
         # Determine patch apply status
         patch_applied = "PATCH_APPLY_STATUS: ok" in combined_output or "PATCH_APPLY_STATUS: empty" in combined_output
         # exit 2 = test_patch failed (explicit `exit 2` in eval_script); anything else = tests ran
-        test_ran = result.returncode != 2
+        returncode = proc.returncode
+        test_ran = returncode != 2
 
         # Parse SWEAP JSON
         test_results = parse_sweap_json(combined_output)
         resolved, passed_tests, failed_tests = compute_resolved(test_results, tests_to_pass)
 
-        if result.returncode not in (0, 1):
-            error_msg = f"container exited {result.returncode}; stderr: {result.stderr[:500]}"
+        if returncode not in (0, 1):
+            error_msg = f"container exited {returncode}; stderr: {stderr_data.decode(errors='replace')[:500]}"
         else:
             error_msg = None
 
@@ -610,7 +725,7 @@ set +e
             "passed_tests": passed_tests,
             "failed_tests": failed_tests,
             "all_tests": test_results,
-            "container_exit_code": result.returncode,
+            "container_exit_code": returncode,
             "elapsed_s": elapsed,
             "error": error_msg,
             "evaluated_at": datetime.now(timezone.utc).isoformat(),
@@ -619,6 +734,7 @@ set +e
 
         status_str = "RESOLVED ✓" if resolved else "unresolved"
         log(f"{label} {status_str} in {elapsed}s ({len(passed_tests)}/{len(tests_to_pass)} FAIL_TO_PASS tests)")
+        _unregister_uid_owner(owner_token)
         return True, f"{label} {status_str}"
 
 
@@ -707,11 +823,11 @@ def main() -> None:
     parser.add_argument("--force", action="store_true", help="Re-evaluate even if eval_result.json exists.")
     parser.add_argument(
         "--workers", "-w", type=int, default=None,
-        help="Max concurrent eval containers (default: min(num_jobs, 8)).",
+        help="Max concurrent eval containers (default: min(num_jobs, 10)).",
     )
     parser.add_argument(
-        "--timeout", type=int, default=600,
-        help="Per-attempt eval timeout in seconds (default: 600).",
+        "--timeout", type=int, default=3600,
+        help="Per-attempt eval timeout in seconds (default: 3600).",
     )
     args = parser.parse_args()
 
@@ -732,15 +848,16 @@ def main() -> None:
         log("No attempts to evaluate (all already have eval_result.json, or no solve results found).")
         return
 
-    workers = args.workers if args.workers is not None else min(len(jobs), 8)
+    workers = args.workers if args.workers is not None else min(len(jobs), 10)
     log(f"Evaluating {len(jobs)} attempt(s) with {workers} worker(s) — run_id='{args.run_id}'")
 
-    owner_token = register_run_owner()
     successes: list[str] = []
     failures: list[str] = []
+    evaluated_uids: set[str] = set()
 
     try:
         def run_one(job: dict) -> tuple[bool, str]:
+            evaluated_uids.add(job["uid"])
             return eval_attempt(
                 uid=job["uid"],
                 mode=job["mode"],
@@ -756,7 +873,11 @@ def main() -> None:
                 ok, msg = future.result()
                 (successes if ok else failures).append(msg)
     finally:
-        unregister_run_owner(owner_token)
+        # Last-resort sweep: remove any eval containers that were left running
+        # (e.g. if the process was SIGKILLed mid-communicate).
+        cleaned = sum(cleanup_orphaned_eval_containers(uid) for uid in evaluated_uids)
+        if cleaned:
+            log(f"Cleaned up {cleaned} orphaned eval container(s)")
 
     log(f"\n{'='*60}")
     log(f"Done: {len(successes)} evaluated, {len(failures)} failed.")

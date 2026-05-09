@@ -14,7 +14,6 @@ Output layout:
       <mode>/
         pass_<n>/
           attempt.json        harness metadata
-          trajectory.jsonl    raw SDK event stream
           trajectory.json     [{act, obs, thought?}, ...]  (SWE-agent compatible format)
           stats.json          {num_steps, num_questions, num_blockers_resolved, ...}
           patch.diff          agent's git diff
@@ -65,8 +64,8 @@ Environment variables (read from host env, forwarded into each container):
     ASK_HUMAN_BASE_URL     override URL for ask_human vLLM judge
     ASK_HUMAN_MODEL        override ask_human judge model slug
     CLAUDE_MODEL           model slug for the agent (default: claude-sonnet-4-6)
-    MAX_TURNS              max agent turns (default: 80)
-    ATTEMPT_TIMEOUT_MS     per-attempt timeout in ms (default: 3600000)
+    MAX_TURNS              max agent turns (default: 200)
+    ATTEMPT_TIMEOUT_MS     per-attempt timeout in ms (default: 10800000)
     PERMISSION_MODE        claude permissionMode (default: acceptEdits)
 """
 
@@ -79,6 +78,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack
 from datetime import datetime, timezone
@@ -89,13 +89,22 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from eval_hil_swe import eval_attempt as _eval_attempt  # noqa: E402
+from eval_hil_swe import eval_attempt as _eval_attempt, cleanup_orphaned_eval_containers  # noqa: E402
 from metrics_hil_swe import load_pass_rows, summarize  # noqa: E402
 
-# Shared run-owner directory (mirrors run_hil_bench.py / eval_hil_swe.py).
-# A PID token is written here at the start of each run; cleanup helpers check it
-# before removing running containers so we never kill a container mid-pass.
+# Per-uid owner directory (mirrors paper_pipeline.py ATTEMPT_OWNER_DIR pattern).
+# Each run_attempt() call writes a "{uid}__{pid}__{token}.owner" marker; cleanup
+# helpers probe the PID before removing running containers so we never kill a
+# container belonging to a concurrent script instance (e.g. a different agent/model
+# run for the same task that happens to share the same harness image).
 RUN_OWNER_DIR = Path(os.getenv("HIL_BENCH_RUN_OWNER_DIR", "/tmp/hil_bench_run_owners"))
+
+# ── Attempt-start stagger (mirrors paper_pipeline.py: 20 s between launches) ─
+# Ensures the LiteLLM proxy / model API is not hammered with simultaneous cold
+# starts.  The lock + timestamp pattern mirrors paper_pipeline._wait_for_launch_slot.
+ATTEMPT_START_STAGGER_SECONDS = 20
+_stagger_lock = threading.Lock()
+_next_start_time: float = 0.0  # monotonic clock time after which the next attempt may start
 
 
 def load_dotenv(env_file: Path) -> dict[str, str]:
@@ -141,7 +150,7 @@ TASKS_INDEX = DATA_DIR / "tasks_index.json"
 RUNS_DIR = ROOT / "runs"
 SRC_DIR = ROOT / "src"
 
-HARNESS_IMAGE_PREFIX = "hilbench-swe-harness"
+HARNESS_IMAGE_PREFIX = "hilbench-swe-harness-claude"
 ENTRYPOINT = "/opt/trust_horizon/src/hil_swe/run_claude.mjs"
 
 # Env vars forwarded from host (or .env) into each container.
@@ -173,61 +182,97 @@ FORWARDED_ENV_KEYS = [
 _print_lock = threading.Lock()
 
 
-# ── Run-owner token (mirrors run_hil_bench.py) ──────────────────────────────
+# ── Per-uid owner tokens (mirrors paper_pipeline.py _register_attempt_owner) ─
+#
+# Token filename: "{uid}__{pid}__{uuid}.owner"
+# Each run_attempt() call registers a token for its uid at entry and unregisters
+# it in a try/finally, so tokens always reflect live passes.  Cleanup queries
+# only the specific uid's tokens, so a concurrent script instance running a
+# *different* uid cannot block cleanup of an orphaned container here.
 
-def register_run_owner() -> Path:
-    """Write a PID token so cleanup helpers know this process is still alive."""
+def _register_uid_owner(uid: str) -> Path:
+    """Write a per-uid PID token; returns the token path for later unregistration."""
     RUN_OWNER_DIR.mkdir(parents=True, exist_ok=True)
-    token = RUN_OWNER_DIR / f"{os.getpid()}.owner"
+    token = RUN_OWNER_DIR / f"{uid}__{os.getpid()}__{uuid.uuid4().hex}.owner"
     token.write_text(str(os.getpid()))
     return token
 
 
-def unregister_run_owner(token: Path) -> None:
+def _unregister_uid_owner(token: Path | None) -> None:
+    if not token:
+        return
     token.unlink(missing_ok=True)
 
 
-def any_run_active() -> bool:
-    """Return True if any registered run-owner process is still alive."""
+def _uid_has_live_owner(uid: str) -> bool:
+    """True when any registered owner process for this uid is still alive.
+
+    Mirrors paper_pipeline._attempt_has_live_owner:  probe the PID with kill(0),
+    delete stale tokens for dead processes, be conservative (return True) on
+    PermissionError (different user / same uid).
+    """
     if not RUN_OWNER_DIR.exists():
         return False
-    for t in RUN_OWNER_DIR.glob("*.owner"):
+    for marker in RUN_OWNER_DIR.glob(f"{uid}__*__*.owner"):
+        parts = marker.name.split("__")
+        if len(parts) < 3:
+            marker.unlink(missing_ok=True)
+            continue
         try:
-            pid = int(t.stem)
-            os.kill(pid, 0)  # 0 = just probe; raises if dead
-            return True
+            pid = int(parts[1])
+        except Exception:
+            marker.unlink(missing_ok=True)
+            continue
+        try:
+            os.kill(pid, 0)
+            return True          # process is alive → uid still has a live owner
         except ProcessLookupError:
-            t.unlink(missing_ok=True)
-        except (ValueError, PermissionError):
-            return True
+            marker.unlink(missing_ok=True)   # stale — clean up
+        except PermissionError:
+            return True          # different user; be conservative
     return False
 
 
-def cleanup_orphaned_containers(harness_image: str) -> int:
-    """Remove containers that exited or are running with no active owner.
+def cleanup_orphaned_containers(harness_image: str, uid: str) -> int:
+    """Remove containers for one uid that exited or are running with no live owner.
 
-    Mirrors run_hil_bench.py's cleanup_swe_containers_for_image logic:
-    - Exited/created containers: always remove (they're already done)
-    - Running containers: only remove if no run owner is currently registered
-      (guards against removing containers of an ongoing parallel run)
+    Mirrors paper_pipeline.cleanup_swe_containers_for_attempt exactly:
+    - Two docker queries: by ancestor image AND by container name prefix.
+      The name filter catches containers whose ancestor tracking is stale
+      (e.g. image rebuilt with the same tag after the container started).
+    - Exited containers: always remove (they're done).
+    - Running containers: only remove if _uid_has_live_owner(uid) is False.
+      This is uid-scoped, so a concurrent script owning a *different* uid
+      cannot block cleanup here.
     """
+    # 5-field format mirrors paper_pipeline: ID, Image, Names, Status, RunningFor.
+    # Status is at index 3.
+    _FMT = "{{.ID}}\t{{.Image}}\t{{.Names}}\t{{.Status}}\t{{.RunningFor}}"
+    # Container name prefix for this uid (all passes/modes/runs share this prefix).
+    container_name_prefix = f"th-swe-{uid[:12]}-"
     try:
-        result = subprocess.run(
-            ["docker", "ps", "-a", "--format", "{{.ID}}\t{{.Status}}",
+        by_ancestor = subprocess.run(
+            ["docker", "ps", "-a", "--format", _FMT,
              "--filter", f"ancestor={harness_image}"],
             capture_output=True, text=True, check=False,
         )
-        active_owner = any_run_active()
+        by_name = subprocess.run(
+            ["docker", "ps", "-a", "--format", _FMT,
+             "--filter", f"name={container_name_prefix}"],
+            capture_output=True, text=True, check=False,
+        )
         to_remove: set[str] = set()
-        for line in result.stdout.splitlines():
-            parts = line.split("\t")
-            if len(parts) < 2:
-                continue
-            cid, status = parts[0].strip(), parts[1].lower()
-            if status.startswith("exited") or status.startswith("created"):
-                to_remove.add(cid)
-            elif status.startswith("up") and not active_owner:
-                to_remove.add(cid)
+        for source in (by_ancestor.stdout, by_name.stdout):
+            for line in source.splitlines():
+                parts = line.split("\t")
+                if len(parts) < 5:
+                    continue
+                cid, status = parts[0], parts[3].lower()
+                if status.startswith("exited"):
+                    to_remove.add(cid)
+                elif status.startswith("up"):
+                    if not _uid_has_live_owner(uid):
+                        to_remove.add(cid)
         if not to_remove:
             return 0
         subprocess.run(
@@ -240,7 +285,7 @@ def cleanup_orphaned_containers(harness_image: str) -> int:
 
 
 def log(msg: str, file=sys.stdout) -> None:
-    ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    ts = datetime.now().strftime("%H:%M:%S")
     with _print_lock:
         print(f"[{ts}] {msg}", file=file, flush=True)
 
@@ -294,6 +339,49 @@ def run_attempt(
     out_dir.mkdir(parents=True, exist_ok=True)
     task_dir = DATA_DIR / "tasks" / uid
 
+    # Register a per-uid owner token so cleanup_orphaned_containers knows this
+    # pass is active.  Unregistered in a finally so it always fires, even on
+    # timeout or exception.  Mirrors paper_pipeline._register_attempt_owner.
+    # Initialization to None + inner try/except mirrors paper_pipeline exactly:
+    # registration failure is a non-fatal warning, not a hard error.
+    owner_token: Path | None = None
+    try:
+        owner_token = _register_uid_owner(uid)
+    except Exception as exc:
+        log(f"[{uid[:12]}|{mode}|p{pass_index}] WARNING: failed to register owner token: {exc}",
+            file=sys.stderr)
+    try:
+        return _run_attempt_inner(
+            uid=uid,
+            harness_image=harness_image,
+            mode=mode,
+            pass_index=pass_index,
+            run_id=run_id,
+            out_dir=out_dir,
+            task_dir=task_dir,
+            extra_env=extra_env,
+        )
+    finally:
+        _unregister_uid_owner(owner_token)
+
+
+def _run_attempt_inner(
+    *,
+    uid: str,
+    harness_image: str,
+    mode: str,
+    pass_index: int,
+    run_id: str,
+    out_dir: Path,
+    task_dir: Path,
+    extra_env: dict[str, str],
+) -> tuple[bool, str]:
+    """Build + run the docker container for one (uid, mode, pass_index) pass."""
+    # Remove stale trajectory.jsonl from any previous run format that wrote it.
+    stale_jsonl = out_dir / "trajectory.jsonl"
+    if stale_jsonl.exists():
+        stale_jsonl.unlink()
+
     # Build docker run command
     env_args: list[str] = []
     for key in FORWARDED_ENV_KEYS:
@@ -325,8 +413,14 @@ def run_attempt(
         "-e", "PIP_PROGRESS_BAR=off",
     ]
 
+    # Unique container name for targeted cleanup on timeout.
+    # Format: th-swe-<uid12>-<mode>-p<pass>-<run_id12>
+    container_name = f"th-swe-{uid[:12]}-{mode}-p{pass_index}-{run_id[:12]}"
+
     cmd = [
-        "docker", "run", "--rm",
+        "docker", "run",
+        "--rm",                         # auto-remove on clean exit
+        "--name", container_name,       # named for targeted kill on timeout
         # Allow container to reach host services (LiteLLM proxy, vLLM judge server).
         # --add-host maps host.docker.internal → host gateway (same pattern as hil-bench
         # configs/swe/ask_config_claude_opus_4-6.yaml).  Clients should use
@@ -344,34 +438,64 @@ def run_attempt(
     ]
 
     label = f"[{uid[:12]}|{mode}|p{pass_index}]"
+
+    # ── Stagger: wait until our turn, then advance the global launch clock ────
+    # Mirrors paper_pipeline.py _wait_for_launch_slot (20 s between attempt starts).
+    # The stagger happens right before the container launches, after all pre-checks,
+    # so validation/setup is not delayed.
+    global _next_start_time
+    with _stagger_lock:
+        now = time.monotonic()
+        delay = max(0.0, _next_start_time - now)
+        if delay > 0:
+            time.sleep(delay)
+        _next_start_time = max(time.monotonic(), _next_start_time) + ATTEMPT_START_STAGGER_SECONDS
+
     log(f"{label} Starting container {harness_image}")
 
     container_log = out_dir / "container.log"
     started_at = time.time()
+    host_timeout = int(os.environ.get("ATTEMPT_TIMEOUT_MS", "10800000")) // 1000 + 120
+    proc: subprocess.Popen | None = None
     try:
         with open(container_log, "w") as log_fh:
-            result = subprocess.run(
-                cmd,
-                stdout=log_fh,
-                stderr=subprocess.STDOUT,
-                timeout=int(os.environ.get("ATTEMPT_TIMEOUT_MS", "3600000")) // 1000 + 120,
-            )
+            # Use Popen (not run) so we can explicitly kill the docker CLI process on
+            # timeout.  subprocess.run(timeout=...) raises TimeoutExpired but does NOT
+            # kill the child — it would leave an orphaned `docker run` process.
+            proc = subprocess.Popen(cmd, stdout=log_fh, stderr=subprocess.STDOUT)
+            try:
+                proc.wait(timeout=host_timeout)
+            except subprocess.TimeoutExpired:
+                # Kill the docker CLI process first, then the container.
+                proc.kill()
+                proc.wait()  # reap so no zombie
+                elapsed = int(time.time() - started_at)
+                msg = f"{label} Timed out on host after {elapsed}s — killing container {container_name}"
+                log(msg, file=sys.stderr)
+                subprocess.run(["docker", "rm", "-f", container_name],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                return False, msg
         elapsed = int(time.time() - started_at)
-        if result.returncode == 0:
+        if proc.returncode == 0:
             log(f"{label} Done in {elapsed}s ✓")
             return True, f"{label} done in {elapsed}s"
         else:
             tail = _tail(container_log, 20)
-            msg = f"{label} Container exited {result.returncode} after {elapsed}s. Last lines:\n{tail}"
+            msg = f"{label} Container exited {proc.returncode} after {elapsed}s. Last lines:\n{tail}"
             log(msg, file=sys.stderr)
             return False, msg
-    except subprocess.TimeoutExpired:
-        msg = f"{label} Timed out on host after {int(time.time() - started_at)}s"
-        log(msg, file=sys.stderr)
-        return False, msg
     except Exception as exc:
         msg = f"{label} Exception: {exc}"
         log(msg, file=sys.stderr)
+        # Kill the docker CLI process if it's still running.
+        if proc is not None:
+            try:
+                proc.kill()
+                proc.wait()
+            except Exception:
+                pass
+        subprocess.run(["docker", "rm", "-f", container_name],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
         return False, msg
 
 
@@ -424,7 +548,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--workers", "-w", type=int, default=None,
-        help="Max concurrent Docker containers. Defaults to min(num_jobs, 8).",
+        help="Max concurrent Docker containers. Defaults to min(num_jobs, 10).",
     )
     parser.add_argument(
         "--force", action="store_true",
@@ -455,12 +579,12 @@ def main() -> None:
         help="Max concurrent eval containers (default: same as --workers).",
     )
     parser.add_argument(
-        "--eval-timeout", type=int, default=600,
-        help="Per-attempt eval timeout in seconds (default: 600).",
+        "--eval-timeout", type=int, default=3600,
+        help="Per-attempt eval timeout in seconds (default: 3600).",
     )
     parser.add_argument(
         "--max-turns", type=int, default=None,
-        help="Max agent turns per attempt (default: 80, set in run_claude.mjs). "
+        help="Max agent turns per attempt (default: 200, set in run_claude.mjs). "
              "Equivalent to passing --env MAX_TURNS=N.",
     )
     parser.add_argument(
@@ -557,7 +681,7 @@ def main() -> None:
     total = len(all_pass_keys)
     skipped_solve = total - len(solve_jobs)
     # Protect against 0-worker executor when there are no solve jobs
-    workers = max(1, args.workers if args.workers is not None else min(len(solve_jobs) or 1, 8))
+    workers = max(1, args.workers if args.workers is not None else min(len(solve_jobs) or 1, 10))
     eval_workers_n = max(1, args.eval_workers if args.eval_workers is not None else workers)
 
     log(f"Run '{args.run_id}': {len(solve_jobs)} solve job(s) to run ({skipped_solve} already complete), "
@@ -581,7 +705,7 @@ def main() -> None:
         )
 
     def eval_one(job: dict) -> tuple[bool, str]:
-        return _eval_attempt(
+        ok, msg = _eval_attempt(
             uid=job["uid"],
             mode=job["mode"],
             pass_index=job["pass_index"],
@@ -589,6 +713,10 @@ def main() -> None:
             skip_if_complete=not args.force,
             timeout_s=args.eval_timeout,
         )
+        # Log immediately from the eval thread so the message appears as soon as
+        # the eval finishes, not after all solve futures have been drained.
+        log(f"  Eval  {'✓' if ok else '✗'} {msg}")
+        return ok, msg
 
     # ── Pipelined Solve → Eval (concurrent) ───────────────────────────────────
     # Each pass is fully independent.  As soon as a solve container exits, its
@@ -596,7 +724,6 @@ def main() -> None:
     # Both thread pools run concurrently, bounded by their respective worker limits.
     # Phase 3 (metrics) runs after all evals finish.
 
-    owner_token = register_run_owner()
     try:
         with ExitStack() as stack:
             solve_exec = stack.enter_context(ThreadPoolExecutor(max_workers=workers))
@@ -636,21 +763,26 @@ def main() -> None:
                         eval_futures[ef] = eval_job
                         submitted_eval_keys.add((uid, mode, pass_idx))
 
-            # Wait for all evals to finish
+            # Collect eval results (logging already done inside eval_one).
             for ef in as_completed(eval_futures):
-                j2 = eval_futures[ef]
                 ok2, msg2 = ef.result()
                 (eval_ok if ok2 else eval_fail).append(msg2)
-                log(f"  Eval  {'✓' if ok2 else '✗'} {msg2}")
 
     finally:
-        unregister_run_owner(owner_token)
-        cleaned = 0
+        # Per-uid tokens are unregistered inside run_attempt / eval_attempt's own finally.
+        # This end-of-run pass is a last-resort safety net for any containers
+        # that slipped through (e.g. SIGKILL during a run).
+        cleaned_solve = 0
+        cleaned_eval = 0
         for task in target_tasks:
             harness_image = f"{HARNESS_IMAGE_PREFIX}:{task['uid']}"
-            cleaned += cleanup_orphaned_containers(harness_image)
-        if cleaned > 0:
-            log(f"Cleaned up {cleaned} orphaned harness container(s)")
+            cleaned_solve += cleanup_orphaned_containers(harness_image, task["uid"])
+            if not args.skip_eval:
+                cleaned_eval += cleanup_orphaned_eval_containers(task["uid"])
+        if cleaned_solve > 0:
+            log(f"Cleaned up {cleaned_solve} orphaned harness container(s)")
+        if cleaned_eval > 0:
+            log(f"Cleaned up {cleaned_eval} orphaned eval container(s)")
 
     log(f"\n{'='*60}")
     log(f"Solve:  {len(successes)} succeeded, {len(failures)} failed.")

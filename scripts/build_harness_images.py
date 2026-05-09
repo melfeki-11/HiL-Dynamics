@@ -3,25 +3,36 @@
 Build trust_horizon harness Docker images on top of each hilbench-swe task image.
 
 For each ingested task (read from data/hil_bench_swe/tasks_index.json), this script:
-  1. Checks whether hilbench-swe-harness:<uid> already exists (skips if so)
+  1. Checks whether the harness image already exists (skips if so)
   2. Runs: docker build --build-arg BASE_IMAGE=<image_name> \\
-                        -t hilbench-swe-harness:<uid> \\
-                        -f docker/Dockerfile.harness .
+                        -t <harness_image_prefix>:<uid> \\
+                        -f docker/<Dockerfile> .
   from the trust_horizon root directory.
 
-The harness image bakes in:
-  - Node.js 20
-  - All npm dependencies from package.json (agent SDKs + CLI binaries)
-  - Google ADK Python package
+SDK-specific harness images
+---------------------------
+The base hilbench-swe:<uid> image is always the same (task repo environment).
+The harness image is SDK-specific — it bakes in different tooling per agent:
 
-Harness source files are NOT baked in — they are bind-mounted at run time,
-so code changes never require image rebuilds.
+  --sdk claude  (default)
+    Image tag:   hilbench-swe-harness-claude:<uid>
+    Dockerfile:  docker/Dockerfile.harness
+    Bakes in:    Node.js 20, claude CLI, @anthropic-ai/claude-agent-sdk, npm deps
+
+  --sdk codex   (future)
+    Image tag:   hilbench-swe-harness-codex:<uid>
+    Dockerfile:  docker/Dockerfile.harness.codex
+    Bakes in:    TBD (OpenAI Codex tooling)
+
+Harness source files are NOT baked in for any SDK — they are bind-mounted at
+run time, so code changes never require image rebuilds.
 
 Usage:
-  python3 scripts/build_harness_images.py                      # all ingested tasks
+  python3 scripts/build_harness_images.py                        # all tasks, claude (default)
+  python3 scripts/build_harness_images.py --sdk claude           # explicit claude
   python3 scripts/build_harness_images.py --uids 69bc1094... 69a9... 69c6...
-  python3 scripts/build_harness_images.py --workers 4          # parallel builds
-  python3 scripts/build_harness_images.py --force              # rebuild even if present
+  python3 scripts/build_harness_images.py --workers 4            # parallel builds
+  python3 scripts/build_harness_images.py --force                # rebuild even if present
 """
 
 from __future__ import annotations
@@ -33,11 +44,27 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+from tqdm import tqdm
+
 ROOT = Path(__file__).resolve().parents[1]
 TASKS_INDEX = ROOT / "data" / "hil_bench_swe" / "tasks_index.json"
-DOCKERFILE = ROOT / "docker" / "Dockerfile.harness"
 
-HARNESS_IMAGE_PREFIX = "hilbench-swe-harness"
+# Registry of supported SDKs: sdk_name → (image_tag_prefix, dockerfile_path)
+# Add a new entry here when onboarding a new agent SDK.
+SDK_REGISTRY: dict[str, tuple[str, Path]] = {
+    "claude": (
+        "hilbench-swe-harness-claude",
+        ROOT / "docker" / "Dockerfile.harness",
+    ),
+    # "codex": (
+    #     "hilbench-swe-harness-codex",
+    #     ROOT / "docker" / "Dockerfile.harness.codex",
+    # ),
+}
+DEFAULT_SDK = "claude"
+
+# Kept for import compatibility with run_hil_swe.py
+HARNESS_IMAGE_PREFIX = SDK_REGISTRY[DEFAULT_SDK][0]
 
 
 def docker_image_exists(image_name: str) -> bool:
@@ -48,12 +75,12 @@ def docker_image_exists(image_name: str) -> bool:
     return result.returncode == 0
 
 
-def build_harness_image(uid: str, base_image: str, force: bool) -> tuple[str, bool, str]:
-    """
-    Build harness image for a single task.
-    Returns (uid, success, message).
-    """
-    harness_image = f"{HARNESS_IMAGE_PREFIX}:{uid}"
+def build_harness_image(
+    uid: str, base_image: str, force: bool,
+    image_prefix: str, dockerfile: Path,
+) -> tuple[str, bool, str]:
+    """Build a harness image for a single task.  Returns (uid, success, message)."""
+    harness_image = f"{image_prefix}:{uid}"
 
     if not force and docker_image_exists(harness_image):
         return uid, True, f"already exists: {harness_image}"
@@ -61,20 +88,18 @@ def build_harness_image(uid: str, base_image: str, force: bool) -> tuple[str, bo
     if not docker_image_exists(base_image):
         return uid, False, f"base image not found: {base_image} — run ingest_hil_swe.py first"
 
+    if not dockerfile.exists():
+        return uid, False, f"Dockerfile not found: {dockerfile}"
+
     print(f"  [{uid}] Building {harness_image} from {base_image} ...", flush=True)
     cmd = [
         "docker", "build",
         "--build-arg", f"BASE_IMAGE={base_image}",
         "-t", harness_image,
-        "-f", str(DOCKERFILE),
+        "-f", str(dockerfile),
         ".",
     ]
-    result = subprocess.run(
-        cmd,
-        cwd=str(ROOT),
-        capture_output=True,
-        text=True,
-    )
+    result = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True)
     if result.returncode != 0:
         msg = f"docker build failed:\n{result.stderr[-2000:]}"
         print(f"  [{uid}] ERROR: {msg}", flush=True)
@@ -95,6 +120,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Build trust_horizon harness Docker images for ingested HiL-bench SWE tasks."
     )
+    parser.add_argument(
+        "--sdk", choices=list(SDK_REGISTRY), default=DEFAULT_SDK,
+        help=f"Agent SDK to build harness for (default: {DEFAULT_SDK}). "
+             f"Each SDK uses a different Dockerfile and image tag prefix. "
+             f"Supported: {', '.join(SDK_REGISTRY)}.",
+    )
     parser.add_argument("--uids", nargs="+", metavar="UID",
                         help="Build only for these specific attempt UIDs.")
     parser.add_argument("--workers", type=int, default=None,
@@ -103,6 +134,9 @@ def main() -> None:
     parser.add_argument("--force", action="store_true",
                         help="Rebuild even if harness image already exists.")
     args = parser.parse_args()
+
+    image_prefix, dockerfile = SDK_REGISTRY[args.sdk]
+    print(f"SDK: {args.sdk}  →  image prefix: {image_prefix}  Dockerfile: {dockerfile.name}")
 
     tasks = load_tasks_index()
     by_uid = {t["uid"]: t for t in tasks}
@@ -128,18 +162,22 @@ def main() -> None:
             uid=task["uid"],
             base_image=task["image_name"],
             force=args.force,
+            image_prefix=image_prefix,
+            dockerfile=dockerfile,
         )
 
     if workers == 1:
-        for task in target_tasks:
+        for task in tqdm(target_tasks, desc="Building", unit="image"):
             uid, ok, msg = build_one(task)
             (successes if ok else failures).append((uid, msg))
     else:
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {executor.submit(build_one, t): t["uid"] for t in target_tasks}
-            for future in as_completed(futures):
-                uid, ok, msg = future.result()
-                (successes if ok else failures).append((uid, msg))
+            with tqdm(total=len(target_tasks), desc="Building", unit="image") as pbar:
+                for future in as_completed(futures):
+                    uid, ok, msg = future.result()
+                    (successes if ok else failures).append((uid, msg))
+                    pbar.update(1)
 
     print(f"\n{'='*60}")
     print(f"Done: {len(successes)} succeeded, {len(failures)} failed.")

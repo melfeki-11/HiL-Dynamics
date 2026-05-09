@@ -556,8 +556,8 @@ function validateSelectorResult({ selectorText, candidates, request, kb, promptH
   } catch {
     return unknownResult({ request, kb, promptHash, modelId, cacheKey, reason: "malformed_json", raw_model_output: selectorText });
   }
-  // Schema now includes both "reasoning" (chain-of-thought, mirrors ask_human_server.py) and "blocker_id".
-  // Validate that blocker_id is present as a string; reasoning is allowed but not required for backward compat.
+  // Schema requires both "reasoning" (chain-of-thought, mirrors ask_human_server.py) and "blocker_id".
+  // STRICT_SELECTOR_SCHEMA enforces both fields; here we validate blocker_id presence as a string.
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || typeof parsed.blocker_id !== "string") {
     return unknownResult({ request, kb, promptHash, modelId, cacheKey, reason: "invalid_schema", raw_model_output: selectorText });
   }
@@ -946,8 +946,10 @@ async function recordHumanInputResult({ trajectoryFile, request, result }) {
   });
 }
 
-async function appendJsonlIfConfigured(filePath, value) {
-  if (filePath) await appendJsonl(filePath, value);
+async function appendJsonlIfConfigured(sink, value) {
+  if (!sink) return;
+  if (typeof sink === "function") { sink(value); return; }
+  await appendJsonl(sink, value);
 }
 
 export async function selectApprovalFromRegistry({ request, kbPath, registry, context = {} }) {

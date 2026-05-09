@@ -40,6 +40,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
+from tqdm import tqdm
+
 # Canonical test command matching run_hil_bench.py
 SWEAP_TEST_CMD = (
     "bash /root/run_script.sh > /tmp/stdout.log 2> /tmp/stderr.log; "
@@ -244,8 +246,6 @@ def download_hf_file(hf_uri: str, destination: Path, token: str | None) -> None:
                 break
             dst.write(chunk)
             bytes_written += len(chunk)
-            if bytes_written % (64 * 1024 * 1024) < chunk_size:
-                print(f"    ... {bytes_written // 1024 // 1024} MB", flush=True)
     tmp.rename(destination)
     print(f"    Downloaded {bytes_written // 1024 // 1024} MB → {destination.name}", flush=True)
 
@@ -404,23 +404,25 @@ def main() -> None:
         return ingest_task(rows_by_uid[uid], token, args.skip_if_exists)
 
     if workers == 1:
-        for uid in target_uids:
+        for uid in tqdm(target_uids, desc="Ingesting", unit="task"):
             try:
                 metadata = ingest_one(uid)
                 results.append(metadata)
             except Exception as e:
-                print(f"  ERROR ingesting {uid}: {e}", file=sys.stderr, flush=True)
+                tqdm.write(f"  ERROR ingesting {uid}: {e}", file=sys.stderr)
                 errors.append((uid, str(e)))
     else:
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {executor.submit(ingest_one, uid): uid for uid in target_uids}
-            for future in as_completed(futures):
-                uid = futures[future]
-                try:
-                    results.append(future.result())
-                except Exception as e:
-                    print(f"  ERROR ingesting {uid}: {e}", file=sys.stderr, flush=True)
-                    errors.append((uid, str(e)))
+            with tqdm(total=len(target_uids), desc="Ingesting", unit="task") as pbar:
+                for future in as_completed(futures):
+                    uid = futures[future]
+                    try:
+                        results.append(future.result())
+                    except Exception as e:
+                        tqdm.write(f"  ERROR ingesting {uid}: {e}", file=sys.stderr)
+                        errors.append((uid, str(e)))
+                    pbar.update(1)
 
     write_tasks_index(results)
 
