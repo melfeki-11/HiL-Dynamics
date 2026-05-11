@@ -47,36 +47,25 @@ import {
 import { ensureDir, writeJson, writeText } from "../shared/io.mjs";
 import { redactString } from "../shared/redact.mjs";
 import { buildSwePrompt } from "./prompt.mjs";
+import {
+  WORKSPACE, TASK_DIR, OUTPUT_DIR,
+  MODE, PASS_INDEX, RUN_ID, TIMEOUT_MS,
+  ASK_HUMAN_BASE_URL, ASK_HUMAN_MODEL, buildAskHumanGuidance,
+  THOUGHT_CAP, ACT_CAP, cap, gitDiff,
+} from "./constants.mjs";
+
+// Codex's native question-asking tool is requestUserInput
+const ASK_HUMAN_GUIDANCE = buildAskHumanGuidance("requestUserInput");
 
 // ── Configuration from env ──────────────────────────────────────────────────
 
-const TASK_DIR   = process.env.TASK_DIR   || "/task";
-const OUTPUT_DIR = process.env.OUTPUT_DIR || "/output";
-// /app is the canonical workspace in hilbench-swe images (/testbed is a symlink to /app)
-const WORKSPACE  = "/app";
-
-const MODE        = process.env.MODE        || "ask_human";
-const PASS_INDEX  = Number(process.env.PASS_INDEX  || "1");
-const RUN_ID      = process.env.RUN_ID      || "swe-run";
 const CODEX_MODEL = process.env.CODEX_MODEL || "gpt-5.5";
-const TIMEOUT_MS  = Number(process.env.ATTEMPT_TIMEOUT_MS || String(3 * 3600 * 1000));
 const CODEX_BIN   = process.env.CODEX_CODE_EXECUTABLE || "codex";
 // MAX_TURNS: max completed items (commands + file edits + tool calls) before we interrupt
 // the turn via turn/interrupt.  0 or unset = no limit (wall-clock TIMEOUT_MS still applies).
 // The codex app-server has no native turn limit param, so we implement it by counting
 // ItemCompletedNotification events and calling turn/interrupt when the threshold is reached.
 const MAX_TURNS   = Number(process.env.MAX_TURNS || "0");
-
-// ask_human judge: prefer a dedicated ASK_HUMAN_BASE_URL, fall back to LiteLLM/v1.
-// Apply localhost → host.docker.internal rewrite so the container can reach the judge.
-const ASK_HUMAN_BASE_URL = (() => {
-  const raw = (process.env.ASK_HUMAN_BASE_URL || "").trim().replace(/\blocalhost\b/g, "host.docker.internal");
-  if (raw) return raw;
-  const litellm = (process.env.LITELLM_BASE_URL || "").trim().replace(/\/+$/, "").replace(/\blocalhost\b/g, "host.docker.internal");
-  return litellm ? `${litellm}/v1` : "";
-})();
-
-const ASK_HUMAN_MODEL = process.env.ASK_HUMAN_MODEL || process.env.PAPER_ASK_HUMAN_MODEL || undefined;
 
 // ── API env helpers ──────────────────────────────────────────────────────────
 
@@ -133,17 +122,6 @@ function codexApiEnv() {
   };
 }
 
-// ── git diff ─────────────────────────────────────────────────────────────────
-
-async function gitDiff(cwd) {
-  return new Promise((resolve) => {
-    const child = spawn("git", ["diff", "--binary", "HEAD"], { cwd, stdio: ["ignore", "pipe", "pipe"] });
-    let out = "";
-    child.stdout.on("data", (c) => { out += c; });
-    child.on("close", () => resolve(out || ""));
-    child.on("error", () => resolve(""));
-  });
-}
 
 // ── JsonRpcProcess ────────────────────────────────────────────────────────────
 //
@@ -270,14 +248,7 @@ async function handleRequestUserInput({ params, router, pushEvent }) {
 
 // ── Trajectory extraction ─────────────────────────────────────────────────────
 
-const THOUGHT_CAP = 4000; // chars
-const ACT_CAP     = 4000;
-const OBS_CAP     = 8000;
-
-function cap(s, limit) {
-  const str = String(s || "");
-  return str.length > limit ? `${str.slice(0, limit)}… [truncated]` : str;
-}
+const OBS_CAP = 8000; // chars — codex-only; claude's formatObs does not cap
 
 /** camelCase/PascalCase item type → snake_case */
 function snakeCase(t) {
@@ -583,12 +554,12 @@ async function runCodexAppServer({ prompt, env, uid, humanRouter, pushEvent, abo
         });
 
         const threadStart = await rpc.request("thread/start", {
-          cwd:                 WORKSPACE,
-          model:               CODEX_MODEL,
-          modelProvider:       "litellm",
-          approvalPolicy:      "on-request",
-          approvalsReviewer:   "user",
-          sandbox:             "workspace-write",
+          cwd:                  WORKSPACE,
+          model:                CODEX_MODEL,
+          modelProvider:        "litellm",
+          approvalPolicy:       "on-request",
+          approvalsReviewer:    "user",
+          sandbox:              "workspace-write",
           sandboxPolicy: {
             type:                "workspaceWrite",
             writableRoots:       [WORKSPACE],
@@ -596,8 +567,9 @@ async function runCodexAppServer({ prompt, env, uid, humanRouter, pushEvent, abo
             excludeTmpdirEnvVar: false,
             excludeSlashTmp:     false,
           },
-          config:              env.CODEX_APP_CONFIG ? JSON.parse(env.CODEX_APP_CONFIG) : undefined,
-          ephemeral:           true,
+          config:               env.CODEX_APP_CONFIG ? JSON.parse(env.CODEX_APP_CONFIG) : undefined,
+          ephemeral:            true,
+          ...(MODE === "ask_human" ? { developerInstructions: ASK_HUMAN_GUIDANCE } : {}),
         });
 
         threadId = threadStart?.thread?.id;

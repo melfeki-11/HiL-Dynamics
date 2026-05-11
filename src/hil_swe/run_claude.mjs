@@ -32,42 +32,30 @@
 
 import path from "node:path";
 import fs from "node:fs/promises";
-import { spawn } from "node:child_process";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { createHumanInputRouter, approvalPolicyRouter, UNKNOWN_RESOLUTION, CANT_ANSWER, UNKNOWN_BLOCKER_ID, ASK_HUMAN_REQUEST_TYPES, APPROVAL_REQUEST_TYPES } from "../shared/human_input.mjs";
 import { ensureDir, writeJson, writeText } from "../shared/io.mjs";
 import { redactString } from "../shared/redact.mjs";
 import { buildSwePrompt } from "./prompt.mjs";
+import {
+  WORKSPACE, TASK_DIR, OUTPUT_DIR,
+  MODE, PASS_INDEX, RUN_ID, TIMEOUT_MS,
+  ASK_HUMAN_BASE_URL, ASK_HUMAN_MODEL, buildAskHumanGuidance,
+  THOUGHT_CAP, ACT_CAP, cap, gitDiff,
+} from "./constants.mjs";
+
+// Claude's native question-asking tool is AskUserQuestion
+const ASK_HUMAN_GUIDANCE = buildAskHumanGuidance("AskUserQuestion");
 
 // ── Configuration from env ──────────────────────────────────────────────────
 
-const TASK_DIR   = process.env.TASK_DIR   || "/task";
-const OUTPUT_DIR = process.env.OUTPUT_DIR || "/output";
-// /app is the canonical workspace in hilbench-swe images (/testbed is a symlink to /app)
-const WORKSPACE  = "/app";
-
-const MODE          = process.env.MODE          || "ask_human";
-const PASS_INDEX    = Number(process.env.PASS_INDEX    || "1");
-const RUN_ID        = process.env.RUN_ID        || "swe-run";
-const CLAUDE_MODEL  = process.env.CLAUDE_MODEL  || "claude-sonnet-4-6";
-const MAX_TURNS     = Number(process.env.MAX_TURNS     || "200");
-const TIMEOUT_MS    = Number(process.env.ATTEMPT_TIMEOUT_MS || String(3 * 3600 * 1000));
+const CLAUDE_MODEL    = process.env.CLAUDE_MODEL  || "claude-sonnet-4-6";
+const MAX_TURNS       = Number(process.env.MAX_TURNS || "200");
 // "acceptEdits" auto-approves file edits while still letting canUseTool fire for
 // shell/MCP/AskUserQuestion calls so we can intercept them.  bypassPermissions would
 // skip the canUseTool callback for some tool types entirely.
 const PERMISSION_MODE = process.env.PERMISSION_MODE || "acceptEdits";
-const CLAUDE_BIN    = process.env.CLAUDE_CODE_EXECUTABLE || "claude";
-
-// ask_human judge: prefer a dedicated ASK_HUMAN_BASE_URL (the vLLM server), fall back to LiteLLM.
-// Apply the same localhost → host.docker.internal rewrite so the container can reach the judge.
-const ASK_HUMAN_BASE_URL = (() => {
-  const raw = (process.env.ASK_HUMAN_BASE_URL || "").trim().replace(/\blocalhost\b/g, "host.docker.internal");
-  if (raw) return raw;
-  const litellm = (process.env.LITELLM_BASE_URL || "").trim().replace(/\/+$/, "").replace(/\blocalhost\b/g, "host.docker.internal");
-  return litellm ? `${litellm}/v1` : "";
-})();
-
-const ASK_HUMAN_MODEL = process.env.ASK_HUMAN_MODEL || process.env.PAPER_ASK_HUMAN_MODEL || undefined;
+const CLAUDE_BIN      = process.env.CLAUDE_CODE_EXECUTABLE || "claude";
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -94,20 +82,6 @@ function claudeApiEnv() {
     ANTHROPIC_BASE_URL: baseUrl,
     LITELLM_BASE_URL: baseUrl,
   };
-}
-
-async function gitDiff(cwd) {
-  // Capture all uncommitted changes (staged + unstaged) relative to HEAD.
-  return new Promise((resolve) => {
-    const child = spawn("git", ["diff", "--binary", "HEAD"], { cwd, stdio: ["ignore", "pipe", "pipe"] });
-    let out = "";
-    let err = "";
-    child.stdout.on("data", (c) => { out += c; });
-    child.stderr.on("data", (c) => { err += c; });
-    child.on("close", () => resolve(out || ""));
-    child.on("error", () => resolve(""));
-    void err;
-  });
 }
 
 // ── Claude SDK helpers (mirrors claude-code/index.mjs) ───────────────────────
@@ -192,13 +166,6 @@ function formatObs(content, isError) {
   try { return `${prefix}${JSON.stringify(content)}`; } catch { return `${prefix}[unserializable]`; }
 }
 
-const THOUGHT_CAP = 4000; // chars
-const ACT_CAP     = 4000; // chars
-
-function cap(s, limit) {
-  if (!s) return s;
-  return s.length > limit ? `${s.slice(0, limit)}… [truncated]` : s;
-}
 
 /**
  * Convert raw SDK events into [{thought?, act, obs}, ...] trajectory steps.
@@ -467,7 +434,13 @@ async function main() {
           }
           return { behavior: "allow", updatedInput: _input || {}, toolUseID: permission.toolUseID, decisionClassification: "user_temporary" };
         },
-        systemPrompt: { type: "preset", preset: "claude_code" },
+        systemPrompt: MODE === "ask_human"
+          ? {
+              type: "preset",
+              preset: "claude_code",
+              append: ASK_HUMAN_GUIDANCE,
+            }
+          : { type: "preset", preset: "claude_code" },
       },
     })) {
       pushEvent({ type: "sdk_message", timestamp: new Date().toISOString(), message });
