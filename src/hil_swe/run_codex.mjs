@@ -61,6 +61,11 @@ const RUN_ID      = process.env.RUN_ID      || "swe-run";
 const CODEX_MODEL = process.env.CODEX_MODEL || "gpt-5.5";
 const TIMEOUT_MS  = Number(process.env.ATTEMPT_TIMEOUT_MS || String(3 * 3600 * 1000));
 const CODEX_BIN   = process.env.CODEX_CODE_EXECUTABLE || "codex";
+// MAX_TURNS: max completed items (commands + file edits + tool calls) before we interrupt
+// the turn via turn/interrupt.  0 or unset = no limit (wall-clock TIMEOUT_MS still applies).
+// The codex app-server has no native turn limit param, so we implement it by counting
+// ItemCompletedNotification events and calling turn/interrupt when the threshold is reached.
+const MAX_TURNS   = Number(process.env.MAX_TURNS || "0");
 
 // ask_human judge: prefer a dedicated ASK_HUMAN_BASE_URL, fall back to LiteLLM/v1.
 // Apply localhost → host.docker.internal rewrite so the container can reach the judge.
@@ -464,8 +469,10 @@ async function runCodexAppServer({ prompt, env, uid, humanRouter, pushEvent, abo
   const serverEnv = { ...env, CODEX_HOME: codexHome, HOME: homeDir };
 
   return new Promise((resolve, reject) => {
-    let threadId = null;
-    let settled  = false;
+    let threadId    = null;
+    let currentTurnId = null;
+    let itemsDone   = 0;   // completed items (commands + edits + tool calls) in this turn
+    let settled     = false;
 
     const settle = (err) => {
       if (settled) return;
@@ -525,6 +532,35 @@ async function runCodexAppServer({ prompt, env, uid, humanRouter, pushEvent, abo
       onNotification: async (msg) => {
         // All notifications go into allEvents for trajectory extraction and stats
         pushEvent({ type: "sdk_event", timestamp: new Date().toISOString(), event: msg });
+
+        // Track the active turn ID so we can interrupt it if needed
+        if (msg.method === "turn/started" &&
+            (!threadId || msg.params?.threadId === threadId)) {
+          currentTurnId = msg.params?.turn?.id ?? null;
+          itemsDone = 0;
+        }
+
+        // Count completed items (commands + file edits + MCP tool calls).
+        // When MAX_TURNS is set and the threshold is reached, interrupt the turn.
+        // This is the codex equivalent of Claude SDK's maxTurns — the app-server
+        // protocol has no native turn/step limit parameter.
+        if (msg.method === "item/completed" &&
+            MAX_TURNS > 0 &&
+            !settled &&
+            currentTurnId &&
+            threadId) {
+          itemsDone++;
+          if (itemsDone >= MAX_TURNS) {
+            pushEvent({
+              type: "max_turns_reached",
+              timestamp: new Date().toISOString(),
+              items_done: itemsDone,
+              max_turns: MAX_TURNS,
+            });
+            // Fire-and-forget: don't await so we don't block the notification handler
+            rpc.request("turn/interrupt", { threadId, turnId: currentTurnId }).catch(() => {});
+          }
+        }
 
         if (msg.method === "turn/completed" &&
             (!threadId || msg.params?.threadId === threadId)) {
@@ -623,6 +659,7 @@ async function main() {
     pass_index: PASS_INDEX,
     harness:    "codex",
     model:      CODEX_MODEL,
+    max_turns:  MAX_TURNS > 0 ? MAX_TURNS : null,  // null = no limit (timeout only)
     timeout_ms: TIMEOUT_MS,
     workspace:  WORKSPACE,
     task_dir:   TASK_DIR,
