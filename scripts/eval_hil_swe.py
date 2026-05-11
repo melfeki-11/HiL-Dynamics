@@ -121,6 +121,30 @@ def filter_patch(patch: str) -> str:
     return "".join(filtered)
 
 
+def _patch_modified_files(patch: str) -> set[str]:
+    """Return the set of b-side filenames present in a git diff.
+
+    Strips trailing \\r so CRLF-encoded patches (common in HuggingFace exports)
+    produce the same filenames as LF-encoded patches.
+    """
+    return {
+        m.group(1).rstrip("\r")
+        for m in re.finditer(r"^diff --git a/\S+ b/(\S+)", patch, re.MULTILINE)
+    }
+
+
+def _agent_caused_test_patch_failure(agent_patch: str, test_patch: str) -> bool:
+    """True when the agent modified at least one file also targeted by the hidden test patch.
+
+    Distinguishes two exit-2 scenarios:
+      Agent-caused: agent edited test/infra files, conflicting with the test patch → FAIL
+      Dataset bug:  test patch has intrinsic issues (trailing whitespace, base mismatch) → infra_error
+    """
+    if not agent_patch or not test_patch:
+        return False
+    return bool(_patch_modified_files(agent_patch) & _patch_modified_files(test_patch))
+
+
 def _build_sweap_cmd(tests_to_pass: list[str], run_script_content: str | None = None) -> str:
     """Build the SWEAP test command, passing FAIL_TO_PASS identifiers as args to run_script.sh.
 
@@ -709,15 +733,41 @@ set +e
         test_results = parse_sweap_json(combined_output)
         resolved, passed_tests, failed_tests = compute_resolved(test_results, tests_to_pass)
 
-        if returncode not in (0, 1):
+        # ── Classify eval outcome ──────────────────────────────────────────────────
+        # eval_status distinguishes FAIL from infra_error for test-patch failures.
+        #
+        #   "resolved"              – all FAIL_TO_PASS tests passed
+        #   "unresolved"            – tests ran, not resolved (includes agent patch not applying)
+        #   "agent_test_interference" – test patch failed because agent modified test files (FAIL)
+        #   "infra_error"           – test patch has intrinsic issues unrelated to agent (excluded)
+        #
+        # Only exit 2 (test patch failure) needs the agent-caused check.
+        # Agent patch not applying (patch_applied=False, test_ran=True) is always "unresolved".
+        if returncode == 2:
+            if _agent_caused_test_patch_failure(clean_agent_patch, test_patch):
+                eval_status = "agent_test_interference"
+                error_msg = (
+                    "agent modified test files that conflict with the hidden test patch; "
+                    f"files: {sorted(_patch_modified_files(clean_agent_patch) & _patch_modified_files(test_patch))}"
+                )
+            else:
+                eval_status = "infra_error"
+                error_msg = f"container exited {returncode}; stderr: {stderr_data.decode(errors='replace')[:500]}"
+        elif returncode not in (0, 1):
+            eval_status = "infra_error"
             error_msg = f"container exited {returncode}; stderr: {stderr_data.decode(errors='replace')[:500]}"
+        elif resolved:
+            eval_status = "resolved"
+            error_msg = None
         else:
+            eval_status = "unresolved"
             error_msg = None
 
         eval_data = {
             "uid": uid,
             "mode": mode,
             "pass_index": pass_index,
+            "eval_status": eval_status,
             "resolved": resolved,
             "patch_applied": patch_applied,
             "test_ran": test_ran,
@@ -744,6 +794,7 @@ def _write_eval_result(path: Path, uid: str, mode: str, pass_index: int, error: 
         "uid": uid,
         "mode": mode,
         "pass_index": pass_index,
+        "eval_status": "infra_error",
         "resolved": False,
         "patch_applied": False,
         "test_ran": False,

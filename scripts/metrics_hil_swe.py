@@ -46,6 +46,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 RUNS_DIR = ROOT / "runs"
 DATA_DIR = ROOT / "data" / "hil_bench_swe"
+TASKS_DIR = DATA_DIR / "tasks"
 TASKS_INDEX = DATA_DIR / "tasks_index.json"
 
 # ── Canonical trajectory-rerun constants (run_hil_bench.py) ──────────────────
@@ -177,6 +178,34 @@ def _trajectory_needs_rerun(pass_dir: str) -> bool:
     )
 
 
+# ── Eval failure classification helpers ─────────────────────────────────────
+
+def _patch_modified_files(patch: str) -> set[str]:
+    """Return the set of b-side filenames listed in a git diff.
+
+    Strips trailing \\r so CRLF-encoded patches (common in HuggingFace exports)
+    produce the same filenames as LF-encoded patches.
+    """
+    return {
+        m.group(1).rstrip("\r")
+        for m in re.finditer(r"^diff --git a/\S+ b/(\S+)", patch, re.MULTILINE)
+    }
+
+
+def _agent_caused_test_patch_failure(agent_patch: str, test_patch: str) -> bool:
+    """Return True when the agent modified at least one file that the test patch targets.
+
+    When the test patch fails (eval exit code 2), this distinguishes two scenarios:
+      - Agent-caused interference: agent edited test files, conflicting with the hidden
+        test patch → FAIL (agent violated the "don't touch tests" constraint).
+      - Pure dataset bug: test patch has intrinsic issues (trailing whitespace, base
+        mismatch unrelated to agent) → infra_error (excluded from pass@k).
+    """
+    if not agent_patch or not test_patch:
+        return False
+    return bool(_patch_modified_files(agent_patch) & _patch_modified_files(test_patch))
+
+
 # ── Row loading ─────────────────────────────────────────────────────────────
 
 def load_pass_rows(run_dir: Path) -> list[dict[str, Any]]:
@@ -242,11 +271,49 @@ def load_pass_rows(run_dir: Path) -> list[dict[str, Any]]:
 
                 has_eval = bool(eval_data)
                 resolved = eval_data.get("resolved") if has_eval else None
-                infra_error = (
-                    not result_json.exists()  # never ran
-                    or bool(result.get("sdk_error"))  # SDK crashed
-                    or (has_eval and not eval_data.get("test_ran", True))  # test infra failed
-                )
+
+                # ── Classify eval outcome ───────────────────────────────────────────
+                # Three-way: resolved | unresolved (FAIL) | infra_error (excluded from
+                # pass@k).  Order of precedence:
+                #
+                #   1. eval_status field (written by eval_hil_swe.py ≥ v2):
+                #        "resolved"               → resolved
+                #        "unresolved"             → FAIL
+                #        "agent_test_interference"→ FAIL  (agent modified test files)
+                #        "infra_error"            → excluded
+                #   2. Legacy eval_result.json (no eval_status field):
+                #        test_ran=False + agent modified test files → FAIL
+                #        test_ran=False + pure dataset bug          → infra_error
+                #        everything else                            → resolved / FAIL per resolved flag
+                #
+                eval_status_field = eval_data.get("eval_status") if has_eval else None
+
+                if eval_status_field is not None:
+                    # New-format eval_result.json: trust the explicit field.
+                    infra_error = eval_status_field == "infra_error"
+                else:
+                    # Legacy format: test_ran=False could be agent-caused or a dataset bug.
+                    # Distinguish by checking file overlap between agent patch and test patch.
+                    agent_test_interference = False
+                    if has_eval and not eval_data.get("test_ran", True):
+                        agent_patch_path = pass_dir / "patch.diff"
+                        meta_path = TASKS_DIR / uid / "metadata.json"
+                        if agent_patch_path.exists() and meta_path.exists():
+                            try:
+                                meta = json.loads(meta_path.read_text())
+                                agent_patch = agent_patch_path.read_text()
+                                test_patch = meta.get("test_patch", "")
+                                agent_test_interference = _agent_caused_test_patch_failure(
+                                    agent_patch, test_patch
+                                )
+                            except Exception:
+                                pass
+                    infra_error = (
+                        not result_json.exists()  # never ran
+                        or bool(result.get("sdk_error"))  # SDK crashed
+                        # test infra failed AND not because the agent edited test files
+                        or (has_eval and not eval_data.get("test_ran", True) and not agent_test_interference)
+                    )
 
                 row = {
                     "uid": uid,
