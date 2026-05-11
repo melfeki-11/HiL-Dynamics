@@ -345,9 +345,13 @@ def write_tasks_index(results: list[dict]) -> None:
     index_path = DATA_DIR / "tasks_index.json"
     index = []
     for m in results:
+        instance_id = m.get("instance_id", "")
+        # task_id is formatted as "public_swe_N" or "private_swe_N" by prepare_hf_tasks.py
+        is_public = str(instance_id).startswith("public_")
         index.append({
             "uid": m.get("uid"),
-            "instance_id": m.get("instance_id"),
+            "instance_id": instance_id,
+            "is_public": is_public,
             "repo_or_db_name": m.get("repo_or_db_name"),
             "image_name": m.get("image_name"),
             "num_blockers": m.get("num_blockers", 0),

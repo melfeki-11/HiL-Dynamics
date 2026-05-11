@@ -121,29 +121,6 @@ def filter_patch(patch: str) -> str:
     return "".join(filtered)
 
 
-def _patch_modified_files(patch: str) -> set[str]:
-    """Return the set of b-side filenames present in a git diff.
-
-    Strips trailing \\r so CRLF-encoded patches (common in HuggingFace exports)
-    produce the same filenames as LF-encoded patches.
-    """
-    return {
-        m.group(1).rstrip("\r")
-        for m in re.finditer(r"^diff --git a/\S+ b/(\S+)", patch, re.MULTILINE)
-    }
-
-
-def _agent_caused_test_patch_failure(agent_patch: str, test_patch: str) -> bool:
-    """True when the agent modified at least one file also targeted by the hidden test patch.
-
-    Distinguishes two exit-2 scenarios:
-      Agent-caused: agent edited test/infra files, conflicting with the test patch → FAIL
-      Dataset bug:  test patch has intrinsic issues (trailing whitespace, base mismatch) → infra_error
-    """
-    if not agent_patch or not test_patch:
-        return False
-    return bool(_patch_modified_files(agent_patch) & _patch_modified_files(test_patch))
-
 
 def _build_sweap_cmd(tests_to_pass: list[str], run_script_content: str | None = None) -> str:
     """Build the SWEAP test command, passing FAIL_TO_PASS identifiers as args to run_script.sh.
@@ -594,49 +571,183 @@ def eval_attempt(
     # Clean up any orphaned eval containers from previous crashed runs for this uid.
     cleanup_orphaned_eval_containers(uid)
 
-    # Write patches to temp files so we can bind-mount them
+    # Extract test files from the test patch for the reset command.
+    # Strip \r from the header lines first (safe: headers never need \r) so that
+    # the regex reliably captures paths even when the patch has CRLF headers.
+    # We do NOT blindly strip \r from content lines here — some fixture files
+    # (e.g. MIME multipart .txt) are genuinely CRLF in the repo and their patch
+    # content lines must stay CRLF.  Full normalization happens inside the container
+    # via normalize_patch.py which reads each target file to decide per-file.
+    _HEADER_STARTS = (
+        "diff --git ", "--- ", "+++ ", "index ", "@@ ",
+        "old mode ", "new mode ", "deleted file mode ", "new file mode ",
+        "similarity index ", "rename from ", "rename to ",
+    )
+    _header_stripped_lines = [
+        line.rstrip("\r") if any(line.startswith(h) for h in _HEADER_STARTS) else line
+        for line in test_patch.split("\n")
+    ]
+    test_patch_for_header_scan = "\n".join(_header_stripped_lines)
+
+    # Mirrors swebench's make_eval_script_list:
+    #   DIFF_MODIFIED_FILE_REGEX = r"--- a/(.*)"
+    #   reset_tests_command = f"git checkout {base_commit} {' '.join(test_files)}"
+    _raw_test_files = re.findall(r"--- a/(.*)", test_patch_for_header_scan)
+    _test_files = [f.strip() for f in _raw_test_files if f.strip() and f.strip() != "/dev/null"]
+
+    def _sh_quote_path(s: str) -> str:
+        return "'" + s.replace("'", "'\\''") + "'"
+
+    if _test_files:
+        reset_test_files_cmd = (
+            "git checkout HEAD -- " + " ".join(_sh_quote_path(f) for f in _test_files)
+        )
+    else:
+        reset_test_files_cmd = "# no test files extracted from test patch"
+
+    # Write patches and the in-container normalizer to temp files for bind-mounting.
     with tempfile.TemporaryDirectory(prefix=f"th_eval_{uid[:8]}_") as tmpdir:
         tmp = Path(tmpdir)
         agent_patch_file = tmp / "agent.patch"
         test_patch_file = tmp / "test.patch"
+        normalizer_file = tmp / "normalize_patch.py"
 
         agent_patch_file.write_text(clean_agent_patch)
-        test_patch_file.write_text(test_patch)
+        # Write the raw test patch (preserving original \r in content lines).
+        # The in-container normalizer handles per-file CRLF normalization.
+        test_patch_file.write_bytes(test_patch.encode("utf-8"))
+        # normalize_patch.py: direct port of hil_bench_agent.normalize_golden_script
+        # (lines 6565-6611 of hil_bench_agent.py).  That script is itself a
+        # serialisation of _normalize_patch_line_endings (line 780).
+        # Differences from the original that are forced by our context:
+        #   - reads patch_in (sys.argv[1]) and writes patch_out (sys.argv[3])
+        #     instead of modifying the file in-place, because /tmp/test.patch is
+        #     mounted read-only.
+        #   - repo_dir taken from sys.argv[2] (/app).
+        # Everything else — the 5 header prefixes, the append+continue pattern,
+        # the file-CRLF detection via rb read(8192), the content-line normalization
+        # — is identical to the canonical script.
+        normalizer_file.write_text(
+            r"""import os, sys
+patch_in, repo_dir, patch_out = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(patch_in, 'r', encoding='utf-8', errors='replace') as f:
+    patch_content = f.read()
+if not patch_content.strip():
+    open(patch_out, 'w').close()
+    sys.exit(0)
+lines = patch_content.split('\n')
+result_lines = []
+current_file = None
+file_has_crlf = {}
+for line in lines:
+    if line.startswith('diff --git ') or line.startswith('--- ') or line.startswith('+++ ') or line.startswith('index ') or line.startswith('@@ '):
+        line = line.rstrip('\r')
+    if line.startswith('diff --git '):
+        parts = line.split()
+        if len(parts) >= 4:
+            file_path = parts[3].rstrip('\r')
+            if file_path.startswith('b/'):
+                file_path = file_path[2:]
+            current_file = file_path
+            target_path = os.path.join(repo_dir, file_path)
+            if os.path.exists(target_path):
+                try:
+                    with open(target_path, 'rb') as f:
+                        content = f.read(8192)
+                    file_has_crlf[file_path] = b'\r\n' in content
+                except Exception:
+                    file_has_crlf[file_path] = False
+            else:
+                file_has_crlf[file_path] = False
+        result_lines.append(line)
+        continue
+    if current_file is not None:
+        if line.startswith((' ', '+', '-')):
+            if file_has_crlf.get(current_file, False):
+                if not line.endswith('\r'):
+                    line = line + '\r'
+            else:
+                if line.endswith('\r'):
+                    line = line[:-1]
+    result_lines.append(line)
+normalized = '\n'.join(result_lines)
+with open(patch_out, 'w', encoding='utf-8') as f:
+    f.write(normalized)
+"""
+        )
 
         # Eval script: runs inside the container.
-        # 1. Setup (chmod, git config) — mirrors make_repo_script_list_local() in custom_eval.py
-        # 2. Apply agent patch (best-effort — agent may not have produced changes)
-        # 3. Apply test patch (hard-required for evaluation)
-        # 4. Run SWEAP_TEST_CMD
-        eval_script = r"""#!/bin/sh
+        # Mirrors swebench run_evaluation.py + make_eval_script_list exactly:
+        #
+        # 1. Setup (chmod, git config) — mirrors make_repo_script_list_local()
+        # 2. Apply agent patch with --allow-empty; fall back to patch --fuzz=5
+        #    Mirrors run_evaluation.py L122-146:
+        #      git apply --allow-empty -v /tmp/patch.diff
+        #      OR patch --batch --fuzz=5 -p1 -i /tmp/patch.diff
+        # 3. Reset test files to HEAD — mirrors reset_tests_command in make_eval_script_list
+        #      git checkout HEAD -- {test_files}
+        # 4. Normalize test patch line endings per target file (mirrors
+        #    hil_bench_agent._normalize_patch_line_endings): python3 reads each file
+        #    in /app to detect CRLF vs LF, normalizes patch content lines to match.
+        # 5. Apply normalized test patch
+        # 6. Run SWEAP_TEST_CMD
+        eval_script = (
+            r"""#!/bin/sh
 set -e
 cd /app
 
-# Mirrors custom_eval.py make_repo_script_list_local() setup commands,
-# which the canonical always runs inside the eval container even for
-# skip_install=True (hilbench-swe images):
-#   chmod -R 777 /testbed
-#   git config --global user.email setup@swebench.config
-#   git config --global user.name SWE-bench
+# Mirrors custom_eval.py make_repo_script_list_local() setup:
 chmod -R 777 /app
 git config --global user.email setup@swebench.config
 git config --global user.name SWE-bench
+# Mirrors swebench make_eval_script_list: safe.directory for nonroot users
+git config --global --add safe.directory /app
 
+# Apply agent patch.
+# Mirrors run_evaluation.py: git apply --allow-empty -v, then patch --fuzz=5 fallback.
 PATCH_APPLIED=0
 if [ -s /tmp/agent.patch ]; then
-  if git apply /tmp/agent.patch 2>/tmp/agent_patch.log; then
+  if git apply --allow-empty -v /tmp/agent.patch 2>/tmp/agent_patch.log; then
     PATCH_APPLIED=1
     echo "PATCH_APPLY_STATUS: ok"
   else
-    echo "PATCH_APPLY_STATUS: failed"
+    echo "git apply failed, trying patch --batch --fuzz=5..." >&2
     cat /tmp/agent_patch.log >&2
+    if patch --batch --fuzz=5 -p1 -i /tmp/agent.patch 2>/tmp/agent_patch2.log; then
+      PATCH_APPLIED=1
+      echo "PATCH_APPLY_STATUS: ok (patch fallback)"
+    else
+      echo "PATCH_APPLY_STATUS: failed"
+      cat /tmp/agent_patch2.log >&2
+    fi
   fi
 else
   echo "PATCH_APPLY_STATUS: empty"
   PATCH_APPLIED=1
 fi
 
-if git apply /tmp/test.patch 2>/tmp/test_patch.log; then
+# Reset test files to HEAD before applying the test patch.
+# Mirrors swebench make_eval_script_list reset_tests_command:
+#   git checkout {base_commit} {test_files}
+# If the agent modified test files, this undoes those changes so the test
+# patch can be applied cleanly. base_commit is HEAD for hilbench-swe images.
+"""
+            + reset_test_files_cmd
+            + r"""
+
+# Normalize test patch line endings against actual files in /app.
+# Mirrors hil_bench_agent._normalize_patch_line_endings: always strip \r from
+# header lines; for content lines, add or strip \r to match the file's endings.
+# This handles patches where some files are CRLF (e.g. MIME fixtures) and
+# others are LF. A simple blanket replace("\r\n","\n") would break CRLF files.
+if command -v python3 >/dev/null 2>&1; then
+  python3 /tmp/normalize_patch.py /tmp/test.patch /app /tmp/test_normalized.patch
+else
+  # Fallback for images without Python: strip all \r (works for LF-only repos).
+  tr -d '\r' < /tmp/test.patch > /tmp/test_normalized.patch
+fi
+
+if git apply -v /tmp/test_normalized.patch 2>/tmp/test_patch.log; then
   echo "TEST_PATCH_STATUS: ok"
 else
   echo "TEST_PATCH_STATUS: failed"
@@ -648,7 +759,9 @@ fi
 # tests fail, which is the expected case for unsolved attempts.  We still need
 # parser.py to capture the per-test results, so we cannot let set -e bail here.
 set +e
-""" + _build_sweap_cmd(tests_to_pass, run_script_content)
+"""
+            + _build_sweap_cmd(tests_to_pass, run_script_content)
+        )
         eval_script_file = tmp / "eval.sh"
         eval_script_file.write_text(eval_script)
 
@@ -675,9 +788,10 @@ set +e
             "-e", "LESS=-R",
             "-e", "LANG=C.UTF-8",
             "-e", "LC_ALL=C.UTF-8",
-            # bind-mount patches and eval script read-only
+            # bind-mount patches, normalizer, and eval script read-only
             "-v", f"{agent_patch_file}:/tmp/agent.patch:ro",
             "-v", f"{test_patch_file}:/tmp/test.patch:ro",
+            "-v", f"{normalizer_file}:/tmp/normalize_patch.py:ro",
             "-v", f"{eval_script_file}:/tmp/eval.sh:ro",
             # No harness needed for eval — use the clean base image
             base_image,
@@ -734,25 +848,18 @@ set +e
         resolved, passed_tests, failed_tests = compute_resolved(test_results, tests_to_pass)
 
         # ── Classify eval outcome ──────────────────────────────────────────────────
-        # eval_status distinguishes FAIL from infra_error for test-patch failures.
+        # eval_status:
+        #   "resolved"    – all FAIL_TO_PASS tests passed
+        #   "unresolved"  – tests ran (or agent patch failed), not resolved
+        #   "infra_error" – test patch itself failed to apply, or unexpected container exit
         #
-        #   "resolved"              – all FAIL_TO_PASS tests passed
-        #   "unresolved"            – tests ran, not resolved (includes agent patch not applying)
-        #   "agent_test_interference" – test patch failed because agent modified test files (FAIL)
-        #   "infra_error"           – test patch has intrinsic issues unrelated to agent (excluded)
-        #
-        # Only exit 2 (test patch failure) needs the agent-caused check.
-        # Agent patch not applying (patch_applied=False, test_ran=True) is always "unresolved".
+        # exit 2 = test patch failed (`exit 2` in eval_script).
+        # We reset test files to HEAD before applying the test patch (mirroring swebench's
+        # reset_tests_command), so agent-caused test file modifications no longer trigger
+        # exit 2. If the test patch still can't apply after the reset, it's a dataset issue.
         if returncode == 2:
-            if _agent_caused_test_patch_failure(clean_agent_patch, test_patch):
-                eval_status = "agent_test_interference"
-                error_msg = (
-                    "agent modified test files that conflict with the hidden test patch; "
-                    f"files: {sorted(_patch_modified_files(clean_agent_patch) & _patch_modified_files(test_patch))}"
-                )
-            else:
-                eval_status = "infra_error"
-                error_msg = f"container exited {returncode}; stderr: {stderr_data.decode(errors='replace')[:500]}"
+            eval_status = "infra_error"
+            error_msg = f"container exited {returncode}; stderr: {stderr_data.decode(errors='replace')[:500]}"
         elif returncode not in (0, 1):
             eval_status = "infra_error"
             error_msg = f"container exited {returncode}; stderr: {stderr_data.decode(errors='replace')[:500]}"

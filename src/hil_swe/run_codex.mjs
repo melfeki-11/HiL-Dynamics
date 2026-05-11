@@ -233,6 +233,17 @@ async function handleRequestUserInput({ params, router, pushEvent }) {
         ? result.selected_labels
         : [result.resolution || UNKNOWN_RESOLUTION];
       answers[question.id] = { answers: selected };
+      // Emit a structured event so extractCodexTrajectorySteps can include the
+      // ask/answer pair in trajectory.json.  requestUserInput arrives as a JSON-RPC
+      // *request* (not a notification), so it never appears as an sdk_event and would
+      // otherwise be invisible to the trajectory extractor.
+      pushEvent({
+        type:        "codex_ask_question",
+        timestamp:   new Date().toISOString(),
+        question:    prompt,
+        answer:      selected.join("; "),
+        question_id: question.id,
+      });
     } else {
       // full_info mode: no human present — deny with canonical "irrelevant question"
       pushEvent({
@@ -277,6 +288,20 @@ function extractCodexTrajectorySteps(events) {
   let currentThought = "";
 
   for (const ev of events) {
+    // ── Ask/answer pairs from requestUserInput handling ───────────────────────
+    // requestUserInput arrives as a JSON-RPC *request* (not a notification), so it
+    // is never wrapped in sdk_event.  The codex_ask_question event is pushed by
+    // handleRequestUserInput after the LLM judge returns the answer.
+    if (ev.type === "codex_ask_question") {
+      steps.push({
+        thought: currentThought,
+        act:     cap(`ask_human ${ev.question}`, ACT_CAP),
+        obs:     cap(String(ev.answer ?? ""), OBS_CAP),
+      });
+      currentThought = "";
+      continue;
+    }
+
     if (ev.type !== "sdk_event") continue;
     const notif = ev.event;
     if (!notif?.method) continue;

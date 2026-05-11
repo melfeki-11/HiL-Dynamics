@@ -190,9 +190,31 @@ function formatObs(content, isError) {
  */
 function extractTrajectorySteps(events) {
   const steps = [];
-  const pending = new Map(); // toolUseId → { act, thought }
+  const pending    = new Map(); // toolUseId → { act, thought }
+  // tool_use_ids that were already emitted via a claude_ask_question event;
+  // any SDK-injected synthetic tool_result for these ids should be skipped to
+  // prevent duplicate trajectory steps.
+  const handledAskIds = new Set();
 
   for (const event of events) {
+    // ── Ask/answer pairs from AskUserQuestion handling ────────────────────────
+    // AskUserQuestion is denied (behavior:"deny") so the SDK never executes it
+    // natively.  The claude_ask_question event is pushed by canUseTool after the
+    // LLM judge returns the answer, giving us a clean question + answer pair.
+    // We consume the pending entry here so the deny's synthetic tool_result (if
+    // the SDK emits one) is suppressed by the handledAskIds guard below.
+    if (event.type === "claude_ask_question") {
+      const p = pending.get(event.tool_use_id);
+      steps.push({
+        thought: p?.thought ?? "",
+        act:     cap(`ask_human ${event.question}`, ACT_CAP),
+        obs:     cap(String(event.answer ?? ""), OBS_CAP),
+      });
+      pending.delete(event.tool_use_id);
+      handledAskIds.add(event.tool_use_id);
+      continue;
+    }
+
     if (event.type !== "sdk_message") continue;
     const msg = event.message;
     if (!msg) continue;
@@ -227,6 +249,10 @@ function extractTrajectorySteps(events) {
       const content = Array.isArray(msg.message?.content) ? msg.message.content : [];
       for (const block of content) {
         if (block.type === "tool_result") {
+          // Skip tool_results that were already captured via claude_ask_question.
+          // The SDK may inject a synthetic tool_result when canUseTool denies a
+          // tool; without this guard we would emit a second, duplicate step.
+          if (handledAskIds.has(block.tool_use_id)) continue;
           const obs = formatObs(block.content, block.is_error === true);
           const p = pending.get(block.tool_use_id);
           if (p) {
@@ -384,10 +410,23 @@ async function main() {
             if (humanRouter) {
               // ask_human mode: route to the LLM-backed human simulator.
               const answer = await answerClaudeAskUserQuestion({ router: humanRouter, input: _input, permission });
+              // Emit a structured event so extractTrajectorySteps can record the
+              // ask/answer pair in trajectory.json with a clean obs.  We deny the
+              // tool (so it never blocks on stdin) and pass the answer as the deny
+              // message.  If the SDK also injects a synthetic tool_result for the
+              // deny, extractTrajectorySteps will skip it via the handledAskIds set.
+              const q = _input?.question || _input?.questions?.[0]?.question || JSON.stringify(_input || {});
+              pushEvent({
+                type:        "claude_ask_question",
+                timestamp:   new Date().toISOString(),
+                question:    String(q),
+                answer,
+                tool_use_id: permission.toolUseID,
+              });
               return {
                 behavior: "deny",
                 toolUseID: permission.toolUseID,
-                message: `Routed built-in AskUserQuestion through ask_human. Use this answer:\n\n${answer}`,
+                message:   answer,
                 decisionClassification: "user_temporary",
               };
             }

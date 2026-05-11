@@ -29,11 +29,14 @@ Harness source files are NOT baked in for any SDK — they are bind-mounted at
 run time, so code changes never require image rebuilds.
 
 Usage:
-  python3 scripts/build_harness_images.py                        # all tasks, claude (default)
-  python3 scripts/build_harness_images.py --sdk claude           # explicit claude
+  python3 scripts/build_harness_images.py                              # all tasks (public+private), claude
+  python3 scripts/build_harness_images.py --p-set public              # 100 public tasks only
+  python3 scripts/build_harness_images.py --p-set private             # 50 private tasks only
+  python3 scripts/build_harness_images.py --sdk claude                # explicit claude
+  python3 scripts/build_harness_images.py --sdk codex --p-set public  # codex, public only
   python3 scripts/build_harness_images.py --uids 69bc1094... 69a9... 69c6...
-  python3 scripts/build_harness_images.py --workers 4            # parallel builds
-  python3 scripts/build_harness_images.py --force                # rebuild even if present
+  python3 scripts/build_harness_images.py --workers 4                 # parallel builds
+  python3 scripts/build_harness_images.py --force                     # rebuild even if present
 """
 
 from __future__ import annotations
@@ -117,6 +120,34 @@ def load_tasks_index() -> list[dict]:
     return json.loads(TASKS_INDEX.read_text())
 
 
+def _task_is_public(task: dict) -> bool:
+    """Return True if a task belongs to the public partition.
+
+    Checks the ``is_public`` field written by ingest_hil_swe.py; falls back to
+    inspecting the ``instance_id`` prefix (``public_swe_N`` vs ``private_swe_N``)
+    so that existing tasks_index.json files without the field still work.
+    """
+    if "is_public" in task:
+        return bool(task["is_public"])
+    return str(task.get("instance_id", "")).startswith("public_")
+
+
+def filter_tasks_by_pset(tasks: list[dict], p_set: str) -> list[dict]:
+    """Filter tasks by partition set.
+
+    p_set values:
+      "both"    — all tasks (public + private)
+      "public"  — only the 100 public tasks
+      "private" — only the 50 private tasks
+    """
+    if p_set == "both":
+        return tasks
+    if p_set == "public":
+        return [t for t in tasks if _task_is_public(t)]
+    # private
+    return [t for t in tasks if not _task_is_public(t)]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Build trust_horizon harness Docker images for ingested HiL-bench SWE tasks."
@@ -129,6 +160,14 @@ def main() -> None:
     )
     parser.add_argument("--uids", nargs="+", metavar="UID",
                         help="Build only for these specific attempt UIDs.")
+    parser.add_argument(
+        "--p-set", choices=["public", "private", "both"], default="both",
+        help=(
+            "Partition set to build when --uids is not given (default: both). "
+            "'public' = 100 public tasks, 'private' = 50 private tasks, "
+            "'both' = all 150 tasks. Ignored when --uids is given."
+        ),
+    )
     parser.add_argument("--workers", type=int, default=None,
                         help="Parallel docker build workers. Defaults to min(num_tasks, 2). "
                              "Note: docker builds are CPU/IO heavy; keep ≤4 to avoid contention.")
@@ -149,7 +188,8 @@ def main() -> None:
             sys.exit(1)
         target_tasks = [by_uid[u] for u in args.uids]
     else:
-        target_tasks = tasks
+        target_tasks = filter_tasks_by_pset(tasks, args.p_set)
+        print(f"p-set: {args.p_set}  →  {len(target_tasks)} task(s) selected from {len(tasks)} ingested")
 
     workers = args.workers if args.workers is not None else min(len(target_tasks), 2)
     print(f"Building harness images for {len(target_tasks)} task(s) with {workers} worker(s)...\n",

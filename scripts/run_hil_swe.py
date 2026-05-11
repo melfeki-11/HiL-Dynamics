@@ -42,8 +42,9 @@ Usage examples:
   # Solve only (skip eval and metrics), e.g. for a quick pilot
   python3 scripts/run_hil_swe.py --run-id pilot --uids ... --skip-eval --skip-metrics
 
-  # All 100 public tasks
-  python3 scripts/run_hil_swe.py --run-id pub100 --all --modes ask_human full_info --passes 3
+  # All 100 public tasks (--p-set public) or all 150 (default: both)
+  python3 scripts/run_hil_swe.py --run-id pub100 --all --p-set public --modes ask_human full_info --passes 3
+  python3 scripts/run_hil_swe.py --run-id all150 --all --modes ask_human --passes 1
 
   # Eval-only on existing solves (result.json already present, want eval_result.json):
   # Solve phase is automatically skipped (result.json exists); eval runs on already-solved passes.
@@ -320,6 +321,34 @@ def load_tasks_index() -> list[dict]:
     return json.loads(TASKS_INDEX.read_text())
 
 
+def _task_is_public(task: dict) -> bool:
+    """Return True if a task belongs to the public partition.
+
+    Checks the ``is_public`` field written by ingest_hil_swe.py; falls back to
+    inspecting the ``instance_id`` prefix (``public_swe_N`` vs ``private_swe_N``)
+    so that existing tasks_index.json files without the field still work.
+    """
+    if "is_public" in task:
+        return bool(task["is_public"])
+    return str(task.get("instance_id", "")).startswith("public_")
+
+
+def filter_tasks_by_pset(tasks: list[dict], p_set: str) -> list[dict]:
+    """Filter tasks by partition set.
+
+    p_set values:
+      "both"    — all tasks (public + private)
+      "public"  — only the 100 public tasks
+      "private" — only the 50 private tasks
+    """
+    if p_set == "both":
+        return tasks
+    if p_set == "public":
+        return [t for t in tasks if _task_is_public(t)]
+    # private
+    return [t for t in tasks if not _task_is_public(t)]
+
+
 def docker_image_exists(image_name: str) -> bool:
     r = subprocess.run(["docker", "image", "inspect", image_name], capture_output=True, check=False)
     return r.returncode == 0
@@ -562,6 +591,14 @@ def main() -> None:
     uid_group.add_argument("--uids", nargs="+", metavar="UID", help="Attempt UIDs to run.")
     uid_group.add_argument("--all", action="store_true", help="Run all ingested tasks from tasks_index.json.")
     parser.add_argument(
+        "--p-set", choices=["public", "private", "both"], default="both",
+        help=(
+            "Partition set to run when --all is used (default: both). "
+            "'public' = 100 public tasks, 'private' = 50 private tasks, "
+            "'both' = all 150 tasks. Ignored when --uids is given."
+        ),
+    )
+    parser.add_argument(
         "--sdk", choices=list(SDK_CONFIGS), default=DEFAULT_SDK,
         help=f"Agent SDK to use (default: {DEFAULT_SDK}). "
              f"Determines the harness image prefix and entrypoint. "
@@ -695,7 +732,8 @@ def main() -> None:
     by_uid = {t["uid"]: t for t in tasks}
 
     if args.all:
-        target_tasks = tasks
+        target_tasks = filter_tasks_by_pset(tasks, args.p_set)
+        log(f"p-set: {args.p_set}  →  {len(target_tasks)} task(s) selected from {len(tasks)} ingested")
     else:
         missing = [u for u in args.uids if u not in by_uid]
         if missing:
