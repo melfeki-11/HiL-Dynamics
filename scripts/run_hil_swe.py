@@ -42,9 +42,9 @@ Usage examples:
   # Solve only (skip eval and metrics), e.g. for a quick pilot
   python3 scripts/run_hil_swe.py --run-id pilot --uids ... --skip-eval --skip-metrics
 
-  # All 100 public tasks (--p-set public) or all 150 (default: both)
-  python3 scripts/run_hil_swe.py --run-id pub100 --all --p-set public --modes ask_human full_info --passes 3
-  python3 scripts/run_hil_swe.py --run-id all150 --all --modes ask_human --passes 1
+  # All 100 public tasks, or all 150 (default --p-set both)
+  python3 scripts/run_hil_swe.py --run-id pub100 --p-set public --modes ask_human full_info --passes 3
+  python3 scripts/run_hil_swe.py --run-id all150 --p-set both --modes ask_human --passes 1
 
   # Eval-only on existing solves (result.json already present, want eval_result.json):
   # Solve phase is automatically skipped (result.json exists); eval runs on already-solved passes.
@@ -588,14 +588,13 @@ def main() -> None:
     )
     parser.add_argument("--run-id", required=True, help="Unique run identifier (used as output directory name).")
     uid_group = parser.add_mutually_exclusive_group(required=True)
-    uid_group.add_argument("--uids", nargs="+", metavar="UID", help="Attempt UIDs to run.")
-    uid_group.add_argument("--all", action="store_true", help="Run all ingested tasks from tasks_index.json.")
-    parser.add_argument(
-        "--p-set", choices=["public", "private", "both"], default="both",
+    uid_group.add_argument("--uids", nargs="+", metavar="UID", help="Specific attempt UIDs to run.")
+    uid_group.add_argument(
+        "--p-set", choices=["public", "private", "both"],
         help=(
-            "Partition set to run when --all is used (default: both). "
+            "Run all ingested tasks for the given partition: "
             "'public' = 100 public tasks, 'private' = 50 private tasks, "
-            "'both' = all 150 tasks. Ignored when --uids is given."
+            "'both' = all 150 tasks."
         ),
     )
     parser.add_argument(
@@ -731,7 +730,7 @@ def main() -> None:
     tasks = load_tasks_index()
     by_uid = {t["uid"]: t for t in tasks}
 
-    if args.all:
+    if args.p_set:
         target_tasks = filter_tasks_by_pset(tasks, args.p_set)
         log(f"p-set: {args.p_set}  →  {len(target_tasks)} task(s) selected from {len(tasks)} ingested")
     else:

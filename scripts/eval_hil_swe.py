@@ -679,11 +679,12 @@ with open(patch_out, 'w', encoding='utf-8') as f:
         # Eval script: runs inside the container.
         # Mirrors swebench run_evaluation.py + make_eval_script_list exactly:
         #
-        # 1. Setup (chmod, git config) — mirrors make_repo_script_list_local()
+        # 1. Setup (git config) — mirrors make_repo_script_list_local() / make_eval_script_list
         # 2. Apply agent patch with --allow-empty; fall back to patch --fuzz=5
         #    Mirrors run_evaluation.py L122-146:
         #      git apply --allow-empty -v /tmp/patch.diff
         #      OR patch --batch --fuzz=5 -p1 -i /tmp/patch.diff
+        #      BOTH fail → EvaluationError → exit 3 (unresolved, no test run)
         # 3. Reset test files to HEAD — mirrors reset_tests_command in make_eval_script_list
         #      git checkout HEAD -- {test_files}
         # 4. Normalize test patch line endings per target file (mirrors
@@ -696,8 +697,10 @@ with open(patch_out, 'w', encoding='utf-8') as f:
 set -e
 cd /app
 
-# Mirrors custom_eval.py make_repo_script_list_local() setup:
-chmod -R 777 /app
+# Setup mirrors custom_eval.py make_repo_script_list_local() / swebench make_eval_script_list.
+# NOTE: chmod -R 777 /app is intentionally omitted. hilbench-swe containers run as root,
+# which already has full access to all files regardless of permissions. The recursive
+# chmod on large repos causes multi-minute I/O stalls with no benefit.
 git config --global user.email setup@swebench.config
 git config --global user.name SWE-bench
 # Mirrors swebench make_eval_script_list: safe.directory for nonroot users
@@ -705,25 +708,25 @@ git config --global --add safe.directory /app
 
 # Apply agent patch.
 # Mirrors run_evaluation.py: git apply --allow-empty -v, then patch --fuzz=5 fallback.
-PATCH_APPLIED=0
+# If both fail → EvaluationError("APPLY_PATCH_FAIL") in canonical → we exit 3 (unresolved,
+# no tests run) to match canonical behaviour: a failed agent patch is NOT an infra error,
+# it's an unresolved attempt.
 if [ -s /tmp/agent.patch ]; then
   if git apply --allow-empty -v /tmp/agent.patch 2>/tmp/agent_patch.log; then
-    PATCH_APPLIED=1
     echo "PATCH_APPLY_STATUS: ok"
   else
     echo "git apply failed, trying patch --batch --fuzz=5..." >&2
     cat /tmp/agent_patch.log >&2
     if patch --batch --fuzz=5 -p1 -i /tmp/agent.patch 2>/tmp/agent_patch2.log; then
-      PATCH_APPLIED=1
       echo "PATCH_APPLY_STATUS: ok (patch fallback)"
     else
       echo "PATCH_APPLY_STATUS: failed"
       cat /tmp/agent_patch2.log >&2
+      exit 3
     fi
   fi
 else
   echo "PATCH_APPLY_STATUS: empty"
-  PATCH_APPLIED=1
 fi
 
 # Reset test files to HEAD before applying the test patch.
@@ -839,9 +842,12 @@ set +e
 
         # Determine patch apply status
         patch_applied = "PATCH_APPLY_STATUS: ok" in combined_output or "PATCH_APPLY_STATUS: empty" in combined_output
-        # exit 2 = test_patch failed (explicit `exit 2` in eval_script); anything else = tests ran
         returncode = proc.returncode
-        test_ran = returncode != 2
+        # test_ran is True only when the test harness actually ran (exit 0 or 1).
+        # exit 2  = test patch failed to apply (explicit `exit 2` in eval_script) → tests never ran.
+        # exit 3  = agent patch failed to apply (both git apply and patch --fuzz=5 failed) → unresolved.
+        # exit other (e.g. 137 SIGKILL, container crash) → tests never ran → infra_error.
+        test_ran = returncode in (0, 1)
 
         # Parse SWEAP JSON
         test_results = parse_sweap_json(combined_output)
@@ -857,7 +863,16 @@ set +e
         # We reset test files to HEAD before applying the test patch (mirroring swebench's
         # reset_tests_command), so agent-caused test file modifications no longer trigger
         # exit 2. If the test patch still can't apply after the reset, it's a dataset issue.
-        if returncode == 2:
+        #
+        # exit 3 = agent patch failed (both git apply and patch --fuzz=5 failed).
+        # Mirrors canonical run_evaluation.py EvaluationError("APPLY_PATCH_FAIL"):
+        # an agent's failing patch is NOT an infra error, it's an unresolved attempt
+        # (the agent is at fault, not our infrastructure).
+        if returncode == 3:
+            # Agent patch failed — mirrors canonical EvaluationError("APPLY_PATCH_FAIL")
+            eval_status = "unresolved"
+            error_msg = f"agent patch failed to apply (APPLY_PATCH_FAIL); stderr: {stderr_data.decode(errors='replace')[:500]}"
+        elif returncode == 2:
             eval_status = "infra_error"
             error_msg = f"container exited {returncode}; stderr: {stderr_data.decode(errors='replace')[:500]}"
         elif returncode not in (0, 1):
@@ -889,7 +904,12 @@ set +e
         }
         eval_path.write_text(json.dumps(eval_data, indent=2))
 
-        status_str = "RESOLVED ✓" if resolved else "unresolved"
+        if eval_status == "resolved":
+            status_str = "RESOLVED ✓"
+        elif eval_status == "infra_error":
+            status_str = f"infra_error (exit {returncode})"
+        else:
+            status_str = "unresolved"
         log(f"{label} {status_str} in {elapsed}s ({len(passed_tests)}/{len(tests_to_pass)} FAIL_TO_PASS tests)")
         _unregister_uid_owner(owner_token)
         return True, f"{label} {status_str}"

@@ -41,7 +41,7 @@ import {
   WORKSPACE, TASK_DIR, OUTPUT_DIR,
   MODE, PASS_INDEX, RUN_ID, TIMEOUT_MS,
   ASK_HUMAN_BASE_URL, ASK_HUMAN_MODEL, buildAskHumanGuidance,
-  THOUGHT_CAP, ACT_CAP, cap, gitDiff,
+  THOUGHT_CAP, ACT_CAP, OBS_CAP, cap, gitDiff,
 } from "./constants.mjs";
 
 // Claude's native question-asking tool is AskUserQuestion

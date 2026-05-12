@@ -61,6 +61,7 @@ export function buildAskHumanGuidance(toolName) {
 
 export const THOUGHT_CAP = 4000; // chars
 export const ACT_CAP     = 4000; // chars
+export const OBS_CAP     = 8000; // chars
 
 /**
  * Truncate a value to at most `limit` characters.

@@ -51,7 +51,7 @@ import {
   WORKSPACE, TASK_DIR, OUTPUT_DIR,
   MODE, PASS_INDEX, RUN_ID, TIMEOUT_MS,
   ASK_HUMAN_BASE_URL, ASK_HUMAN_MODEL, buildAskHumanGuidance,
-  THOUGHT_CAP, ACT_CAP, cap, gitDiff,
+  THOUGHT_CAP, ACT_CAP, OBS_CAP, cap, gitDiff,
 } from "./constants.mjs";
 
 // Codex's native question-asking tool is requestUserInput
@@ -258,8 +258,6 @@ async function handleRequestUserInput({ params, router, pushEvent }) {
 }
 
 // ── Trajectory extraction ─────────────────────────────────────────────────────
-
-const OBS_CAP = 8000; // chars — codex-only; claude's formatObs does not cap
 
 /** camelCase/PascalCase item type → snake_case */
 function snakeCase(t) {
