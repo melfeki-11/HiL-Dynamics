@@ -160,6 +160,7 @@ SDK_CONFIGS = {
         "model_env_key":        "CLAUDE_MODEL",
         "default_model":        "claude-sonnet-4-6",
         "executable_env":       "CLAUDE_CODE_EXECUTABLE=claude",
+        # runtime defaults to "node" when absent
     },
     "codex": {
         "harness_image_prefix": "hilbench-swe-harness-codex",
@@ -167,6 +168,14 @@ SDK_CONFIGS = {
         "model_env_key":        "CODEX_MODEL",
         "default_model":        "gpt-5.5",
         "executable_env":       "CODEX_CODE_EXECUTABLE=codex",
+    },
+    "adk": {
+        "harness_image_prefix": "hilbench-swe-harness-adk",
+        "entrypoint":           "/opt/trust_horizon/src/hil_swe/run_adk.py",
+        "model_env_key":        "ADK_MODEL",
+        "default_model":        "gemini/gemini-3.1-pro-preview-customtools",
+        "executable_env":       "ADK_SUPPRESS_GEMINI_LITELLM_WARNINGS=true",
+        "runtime":              "python3",
     },
 }
 DEFAULT_SDK = "claude"
@@ -192,6 +201,7 @@ FORWARDED_ENV_KEYS = [
     # Agent / run parameters (all optional; harness uses built-in defaults)
     "CLAUDE_MODEL",
     "CODEX_MODEL",
+    "ADK_MODEL",
     "MAX_TURNS",
     "ATTEMPT_TIMEOUT_MS",
     "PERMISSION_MODE",
@@ -486,7 +496,7 @@ def _run_attempt_inner(
         "-v", f"{out_dir.resolve()}:/output",
         *env_args,
         harness_image,
-        "node", ENTRYPOINT,
+        SDK_CONFIGS[SDK].get("runtime", "node"), ENTRYPOINT,
     ]
 
     label = f"[{uid[:12]}|{mode}|p{pass_index}]"
@@ -754,6 +764,8 @@ def main() -> None:
     )
     total = len(all_pass_keys)
     skipped_solve = total - len(solve_jobs)
+    completed_runs = 0
+    completed_runs_lock = threading.Lock()
     # Protect against 0-worker executor when there are no solve jobs
     workers = max(1, args.workers if args.workers is not None else min(len(solve_jobs) or 1, 10))
     eval_workers_n = max(1, args.eval_workers if args.eval_workers is not None else workers)
@@ -792,9 +804,13 @@ def main() -> None:
             skip_if_complete=not args.force and not force_eval,
             timeout_s=args.eval_timeout,
         )
+        nonlocal completed_runs
+        with completed_runs_lock:
+            completed_runs += 1
+            done = completed_runs
         # Log immediately from the eval thread so the message appears as soon as
         # the eval finishes, not after all solve futures have been drained.
-        log(f"  Eval  {'✓' if ok else '✗'} {msg}")
+        log(f"  Eval  {'✓' if ok else '✗'} {msg} [{done}/{total} done]")
         return ok, msg
 
     # ── Pipelined Solve → Eval (concurrent) ───────────────────────────────────
@@ -820,6 +836,9 @@ def main() -> None:
                 j = solve_futures[sf]
                 ok, msg = sf.result()
                 (successes if ok else failures).append(msg)
+                if not ok:
+                    with completed_runs_lock:
+                        completed_runs += 1
                 log(f"  Solve {'✓' if ok else '✗'} {msg}")
 
                 if eval_exec is not None and ok:

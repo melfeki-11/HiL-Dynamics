@@ -64,6 +64,10 @@ SDK_REGISTRY: dict[str, tuple[str, Path]] = {
         "hilbench-swe-harness-codex",
         ROOT / "docker" / "Dockerfile.harness",   # shared; Dockerfile installs both SDKs
     ),
+    "adk": (
+        "hilbench-swe-harness-adk",
+        ROOT / "docker" / "Dockerfile.harness",   # shared; google-adk conditional on SDK=adk
+    ),
 }
 DEFAULT_SDK = "claude"
 
@@ -81,7 +85,7 @@ def docker_image_exists(image_name: str) -> bool:
 
 def build_harness_image(
     uid: str, base_image: str, force: bool,
-    image_prefix: str, dockerfile: Path,
+    image_prefix: str, dockerfile: Path, sdk: str,
 ) -> tuple[str, bool, str]:
     """Build a harness image for a single task.  Returns (uid, success, message)."""
     harness_image = f"{image_prefix}:{uid}"
@@ -99,6 +103,7 @@ def build_harness_image(
     cmd = [
         "docker", "build",
         "--build-arg", f"BASE_IMAGE={base_image}",
+        "--build-arg", f"SDK={sdk}",
         "-t", harness_image,
         "-f", str(dockerfile),
         ".",
@@ -205,6 +210,7 @@ def main() -> None:
             force=args.force,
             image_prefix=image_prefix,
             dockerfile=dockerfile,
+            sdk=args.sdk,
         )
 
     if workers == 1:
