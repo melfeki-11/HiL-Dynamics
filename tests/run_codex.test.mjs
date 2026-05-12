@@ -43,6 +43,26 @@ function extractCodexTrajectorySteps(events) {
   let currentThought = "";
 
   for (const ev of events) {
+    if (ev.type === "codex_ask_question") {
+      steps.push({
+        thought: currentThought,
+        act:     cap(`ask_human ${ev.question}`, ACT_CAP),
+        obs:     cap(String(ev.answer ?? ""), OBS_CAP),
+      });
+      currentThought = "";
+      continue;
+    }
+
+    if (ev.type === "ask_question_full_info_mode") {
+      steps.push({
+        thought: currentThought,
+        act:     cap(`ask_human ${ev.question || ""}`, ACT_CAP),
+        obs:     UNKNOWN_RESOLUTION,
+      });
+      currentThought = "";
+      continue;
+    }
+
     if (ev.type !== "sdk_event") continue;
     const notif = ev.event;
     if (!notif?.method) continue;
@@ -136,15 +156,17 @@ function extractCodexTrajectorySteps(events) {
 }
 
 function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
-  let numQuestions         = 0;
-  let numQuestionsApproval = 0;
-  let numBlockersResolved  = 0;
+  let numQuestions          = 0;
+  let numQuestionsApproval  = 0;
+  let numQuestionsFullInfo  = 0;
+  let numBlockersResolved   = 0;
 
   for (const ev of events) {
     if (ev.type === "human_input_raw_event") {
-      if (ASK_HUMAN_REQUEST_TYPES.has(ev.request_type))       numQuestions++;
+      if (ASK_HUMAN_REQUEST_TYPES.has(ev.request_type))     numQuestions++;
       else if (APPROVAL_REQUEST_TYPES.has(ev.request_type)) numQuestionsApproval++;
     }
+    if (ev.type === "ask_question_full_info_mode") numQuestionsFullInfo++;
     if (ev.type === "human_input_result") {
       const bid = ev.result?.blocker_id;
       if (bid && bid !== UNKNOWN_BLOCKER_ID && ev.result?.status === "answered")
@@ -153,12 +175,13 @@ function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
   }
 
   return {
-    num_steps:              trajectorySteps.length,
-    num_questions:          numQuestions,
-    num_questions_approval: numQuestionsApproval,
-    num_total_questions:    numQuestions + numQuestionsApproval,
-    num_blockers_resolved:  numBlockersResolved,
-    num_blockers_total:     numBlockersTotal,
+    num_steps:                trajectorySteps.length,
+    num_questions:            numQuestions,
+    num_questions_approval:   numQuestionsApproval,
+    num_total_questions:      numQuestions + numQuestionsApproval,
+    num_questions_full_info:  numQuestionsFullInfo,
+    num_blockers_resolved:    numBlockersResolved,
+    num_blockers_total:       numBlockersTotal,
   };
 }
 
@@ -454,6 +477,7 @@ test("computeTrajectoryStats: empty events → zero stats", () => {
     num_questions: 0,
     num_questions_approval: 0,
     num_total_questions: 0,
+    num_questions_full_info: 0,
     num_blockers_resolved: 0,
     num_blockers_total: 0,
   });
@@ -521,6 +545,107 @@ test("computeTrajectoryStats: mixed events full accounting", () => {
   assert.equal(stats.num_questions,          1);
   assert.equal(stats.num_questions_approval, 1);
   assert.equal(stats.num_total_questions,    2);
+  assert.equal(stats.num_questions_full_info, 0);  // no full_info events
   assert.equal(stats.num_blockers_resolved,  1);
   assert.equal(stats.num_blockers_total,     3);
+});
+
+// ── 5. full_info mode question tracking ──────────────────────────────────────
+// Verifies that ask_question_full_info_mode events:
+//   a) produce a trajectory step with act="ask_human …" and obs="irrelevant question"
+//   b) are counted in num_questions_full_info (NOT in num_questions)
+
+test("extractCodexTrajectorySteps: ask_question_full_info_mode → step with obs=irrelevant question", () => {
+  const events = [
+    { type: "ask_question_full_info_mode", timestamp: "t", question: "Which branch to target?" },
+  ];
+  const steps = extractCodexTrajectorySteps(events);
+  assert.equal(steps.length, 1);
+  assert.ok(steps[0].act.startsWith("ask_human "));
+  assert.ok(steps[0].act.includes("Which branch to target?"));
+  assert.equal(steps[0].obs, UNKNOWN_RESOLUTION);
+  assert.equal(steps[0].thought, "");
+});
+
+test("extractCodexTrajectorySteps: ask_question_full_info_mode clears current thought", () => {
+  const events = [
+    mkSdkEvent("item/updated",   { item: { type: "reasoning", text: "I need more info" } }),
+    { type: "ask_question_full_info_mode", timestamp: "t", question: "What is the expected output?" },
+    mkSdkEvent("item/completed", { item: { id: "c1", type: "commandExecution", command: "pytest", aggregatedOutput: "pass", exitCode: 0 } }),
+    mkSdkEvent("turn/completed", {}),
+  ];
+  const steps = extractCodexTrajectorySteps(events);
+  assert.equal(steps.length, 2);
+  // First step: full_info question, thought is attached from the preceding reasoning
+  assert.equal(steps[0].thought, "I need more info");
+  assert.ok(steps[0].act.includes("What is the expected output?"));
+  assert.equal(steps[0].obs, UNKNOWN_RESOLUTION);
+  // Second step: command after question, thought is cleared
+  assert.equal(steps[1].thought, "");
+  assert.equal(steps[1].act, "pytest");
+});
+
+test("extractCodexTrajectorySteps: multiple full_info questions all produce steps", () => {
+  const events = [
+    { type: "ask_question_full_info_mode", timestamp: "t1", question: "Question A" },
+    { type: "ask_question_full_info_mode", timestamp: "t2", question: "Question B" },
+  ];
+  const steps = extractCodexTrajectorySteps(events);
+  assert.equal(steps.length, 2);
+  assert.ok(steps[0].act.includes("Question A"));
+  assert.ok(steps[1].act.includes("Question B"));
+  assert.equal(steps[0].obs, UNKNOWN_RESOLUTION);
+  assert.equal(steps[1].obs, UNKNOWN_RESOLUTION);
+});
+
+test("computeTrajectoryStats: ask_question_full_info_mode counted in num_questions_full_info, not num_questions", () => {
+  const events = [
+    { type: "ask_question_full_info_mode", question: "Q1" },
+    { type: "ask_question_full_info_mode", question: "Q2" },
+    { type: "ask_question_full_info_mode", question: "Q3" },
+  ];
+  const stats = computeTrajectoryStats(events, [], 0);
+  assert.equal(stats.num_questions_full_info, 3);
+  assert.equal(stats.num_questions,           0);   // NOT counted as ask_human questions
+  assert.equal(stats.num_questions_approval,  0);
+  assert.equal(stats.num_total_questions,     0);   // full_info questions excluded from this total
+});
+
+test("computeTrajectoryStats: full_info and ask_human questions are counted independently", () => {
+  // In practice ask_human mode never fires ask_question_full_info_mode and vice versa,
+  // but the counter logic must be independent — verify both can coexist.
+  const events = [
+    { type: "human_input_raw_event",      request_type: "clarification" },
+    { type: "ask_question_full_info_mode", question: "Q-full-info" },
+    { type: "human_input_raw_event",      request_type: "elicitation" },
+    { type: "ask_question_full_info_mode", question: "Q-full-info-2" },
+  ];
+  const stats = computeTrajectoryStats(events, [], 0);
+  assert.equal(stats.num_questions,           2);   // two ask_human (clarification + elicitation)
+  assert.equal(stats.num_questions_full_info, 2);   // two full_info questions
+  assert.equal(stats.num_total_questions,     2);   // full_info NOT in this total
+});
+
+test("extractCodexTrajectorySteps: ask_question_full_info_mode with empty question string", () => {
+  const events = [
+    { type: "ask_question_full_info_mode", timestamp: "t", question: "" },
+  ];
+  const steps = extractCodexTrajectorySteps(events);
+  assert.equal(steps.length, 1);
+  assert.equal(steps[0].act,  "ask_human ");   // empty question → just the prefix
+  assert.equal(steps[0].obs,  UNKNOWN_RESOLUTION);
+});
+
+test("extractCodexTrajectorySteps: codex_ask_question still works alongside full_info events", () => {
+  // ask_human and full_info events in same event stream — both produce steps independently.
+  const events = [
+    { type: "codex_ask_question",          timestamp: "t1", question: "Ask-human Q", answer: "The answer" },
+    { type: "ask_question_full_info_mode", timestamp: "t2", question: "Full-info Q" },
+  ];
+  const steps = extractCodexTrajectorySteps(events);
+  assert.equal(steps.length, 2);
+  assert.ok(steps[0].act.includes("Ask-human Q"));
+  assert.equal(steps[0].obs, "The answer");
+  assert.ok(steps[1].act.includes("Full-info Q"));
+  assert.equal(steps[1].obs, UNKNOWN_RESOLUTION);
 });

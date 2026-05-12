@@ -245,7 +245,10 @@ async function handleRequestUserInput({ params, router, pushEvent }) {
         question_id: question.id,
       });
     } else {
-      // full_info mode: no human present — deny with canonical "irrelevant question"
+      // full_info mode: no human present — deny with canonical "irrelevant question".
+      // We still push a structured event so the trajectory extractor can record the
+      // attempt (as an ask_human step with obs "irrelevant question") and so the
+      // stats counter num_questions_full_info is incremented.
       pushEvent({
         type:      "ask_question_full_info_mode",
         timestamp: new Date().toISOString(),
@@ -295,6 +298,20 @@ function extractCodexTrajectorySteps(events) {
         thought: currentThought,
         act:     cap(`ask_human ${ev.question}`, ACT_CAP),
         obs:     cap(String(ev.answer ?? ""), OBS_CAP),
+      });
+      currentThought = "";
+      continue;
+    }
+
+    // ── full_info mode questions ──────────────────────────────────────────────
+    // In full_info mode the agent may still call requestUserInput; the handler
+    // denies it with UNKNOWN_RESOLUTION and pushes this event so we capture the
+    // attempt in the trajectory (act: "ask_human …", obs: "irrelevant question").
+    if (ev.type === "ask_question_full_info_mode") {
+      steps.push({
+        thought: currentThought,
+        act:     cap(`ask_human ${ev.question || ""}`, ACT_CAP),
+        obs:     UNKNOWN_RESOLUTION,
       });
       currentThought = "";
       continue;
@@ -414,17 +431,24 @@ function extractCodexTrajectorySteps(events) {
  * Compute per-run stats — identical to computeTrajectoryStats in run_claude.mjs.
  * Counts are derived from the same human_input_raw_event / human_input_result
  * events that the router emits into allEvents via the pushEvent callback.
+ *
+ * num_questions_full_info  — questions asked in full_info mode (ask_question_full_info_mode
+ *                            events).  These are tracked even though the agent receives
+ *                            "irrelevant question" because it is analytically useful to know
+ *                            how often agents ask despite having all info in the prompt.
  */
 function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
-  let numQuestions         = 0;
-  let numQuestionsApproval = 0;
-  let numBlockersResolved  = 0;
+  let numQuestions          = 0;
+  let numQuestionsApproval  = 0;
+  let numQuestionsFullInfo  = 0;
+  let numBlockersResolved   = 0;
 
   for (const ev of events) {
     if (ev.type === "human_input_raw_event") {
       if (ASK_HUMAN_REQUEST_TYPES.has(ev.request_type))  numQuestions++;
       else if (APPROVAL_REQUEST_TYPES.has(ev.request_type)) numQuestionsApproval++;
     }
+    if (ev.type === "ask_question_full_info_mode") numQuestionsFullInfo++;
     if (ev.type === "human_input_result") {
       const bid = ev.result?.blocker_id;
       if (bid && bid !== UNKNOWN_BLOCKER_ID && ev.result?.status === "answered")
@@ -437,6 +461,7 @@ function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
     num_questions:            numQuestions,
     num_questions_approval:   numQuestionsApproval,
     num_total_questions:      numQuestions + numQuestionsApproval,
+    num_questions_full_info:  numQuestionsFullInfo,
     num_blockers_resolved:    numBlockersResolved,
     num_blockers_total:       numBlockersTotal,
   };

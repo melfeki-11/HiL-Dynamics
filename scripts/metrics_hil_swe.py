@@ -270,12 +270,14 @@ def load_pass_rows(run_dir: Path) -> list[dict[str, Any]]:
                     "status": "infra_error" if infra_error else ("resolved" if resolved else "unresolved"),
                     "resolved": resolved,
                     "num_steps": stats.get("num_steps"),
-                    # clarification + elicitation (LLM judge questions)
+                    # clarification + elicitation (LLM judge questions, ask_human mode)
                     "num_questions": stats.get("num_questions"),
                     # approval + permission (tool-use authorization requests)
                     "num_questions_approval": stats.get("num_questions_approval"),
                     # all four types combined
                     "num_total_questions": stats.get("num_total_questions"),
+                    # questions asked in full_info mode (agent asked despite having all info)
+                    "num_questions_full_info": stats.get("num_questions_full_info"),
                     "num_blockers_resolved": stats.get("num_blockers_resolved"),
                     "num_blockers_total": stats.get("num_blockers_total"),
                     "patch_bytes": result.get("patch_bytes"),
@@ -350,6 +352,8 @@ def summarize(
         total_total_questions = 0.0
         total_blockers_present = 0.0
         total_steps = 0.0
+        # questions asked in full_info mode (agent asked despite having all info in prompt)
+        total_questions_full_info = 0.0
         total_attempts_and_passes = 0
 
         for valid_passes in attempts:
@@ -366,6 +370,7 @@ def summarize(
                 total_steps += float(row.get("num_steps") or 0)
                 total_questions += float(row.get("num_questions") or 0)
                 total_total_questions += float(row.get("num_total_questions") or row.get("num_questions") or 0)
+                total_questions_full_info += float(row.get("num_questions_full_info") or 0)
 
                 if mode == "ask_human":
                     total_blockers_resolved += float(row.get("num_blockers_resolved") or 0)
@@ -380,6 +385,8 @@ def summarize(
             "total_attempts_and_passes": total_attempts_and_passes,
             "avg_steps_per_pass": total_steps / total_attempts_and_passes if total_attempts_and_passes else 0.0,
             "avg_questions_per_pass": total_questions / total_attempts_and_passes if total_attempts_and_passes else 0.0,
+            # avg questions asked in full_info mode per pass (non-zero only in full_info mode)
+            "avg_questions_full_info_per_pass": total_questions_full_info / total_attempts_and_passes if total_attempts_and_passes else 0.0,
         }
 
         for k in range(1, k_max + 1):
@@ -407,6 +414,11 @@ def summarize(
             metrics["ask_recall_total"]    = ask_recall
             metrics["ask_f1_total"]        = _f1(ask_precision_total, ask_recall)
             metrics["total_total_questions"] = int(total_total_questions)
+
+        if mode == "full_info":
+            # Report the total count of full_info questions so analysts can see
+            # how often agents asked despite having all info in their prompt.
+            metrics["total_questions_full_info"] = int(total_questions_full_info)
 
         key = f"{mode}/{agent}/{model}"
         result[key] = metrics

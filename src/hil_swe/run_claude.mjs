@@ -197,7 +197,7 @@ function extractTrajectorySteps(events) {
   const handledAskIds = new Set();
 
   for (const event of events) {
-    // ── Ask/answer pairs from AskUserQuestion handling ────────────────────────
+    // ── Ask/answer pairs from AskUserQuestion handling (ask_human mode) ──────
     // AskUserQuestion is denied (behavior:"deny") so the SDK never executes it
     // natively.  The claude_ask_question event is pushed by canUseTool after the
     // LLM judge returns the answer, giving us a clean question + answer pair.
@@ -212,6 +212,26 @@ function extractTrajectorySteps(events) {
       });
       pending.delete(event.tool_use_id);
       handledAskIds.add(event.tool_use_id);
+      continue;
+    }
+
+    // ── full_info mode questions ──────────────────────────────────────────────
+    // In full_info mode the agent may still call AskUserQuestion; the handler
+    // denies it with UNKNOWN_RESOLUTION and pushes this event so we capture the
+    // attempt in the trajectory (act: "ask_human …", obs: "irrelevant question").
+    // Adding the id to handledAskIds ensures the SDK's synthetic tool_result does
+    // not create a duplicate trajectory step.
+    if (event.type === "ask_question_full_info_mode") {
+      const p = pending.get(event.tool_use_id);
+      steps.push({
+        thought: p?.thought ?? "",
+        act:     cap(`ask_human ${event.question || ""}`, ACT_CAP),
+        obs:     UNKNOWN_RESOLUTION,
+      });
+      if (event.tool_use_id) {
+        pending.delete(event.tool_use_id);
+        handledAskIds.add(event.tool_use_id);
+      }
       continue;
     }
 
@@ -284,10 +304,17 @@ function extractTrajectorySteps(events) {
  * num_blockers_resolved — human_input_result events where a real blocker was matched
  * num_blockers_total    — total blockers present in the registry for this task
  */
+/**
+ * num_questions_full_info  — questions asked in full_info mode (ask_question_full_info_mode
+ *                            events).  Tracked even though the agent receives "irrelevant
+ *                            question", because it is analytically useful to know how often
+ *                            agents ask despite having all info in the prompt.
+ */
 function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
-  let numQuestions = 0;
+  let numQuestions         = 0;
   let numQuestionsApproval = 0;
-  let numBlockersResolved = 0;
+  let numQuestionsFullInfo = 0;
+  let numBlockersResolved  = 0;
 
   for (const ev of events) {
     if (ev.type === "human_input_raw_event") {
@@ -297,6 +324,7 @@ function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
         numQuestionsApproval++;
       }
     }
+    if (ev.type === "ask_question_full_info_mode") numQuestionsFullInfo++;
     if (ev.type === "human_input_result") {
       const bid = ev.result?.blocker_id;
       if (bid && bid !== UNKNOWN_BLOCKER_ID && ev.result?.status === "answered") {
@@ -306,12 +334,13 @@ function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
   }
 
   return {
-    num_steps: trajectorySteps.length,
-    num_questions: numQuestions,
-    num_questions_approval: numQuestionsApproval,
-    num_total_questions: numQuestions + numQuestionsApproval,
-    num_blockers_resolved: numBlockersResolved,
-    num_blockers_total: numBlockersTotal,
+    num_steps:               trajectorySteps.length,
+    num_questions:           numQuestions,
+    num_questions_approval:  numQuestionsApproval,
+    num_total_questions:     numQuestions + numQuestionsApproval,
+    num_questions_full_info: numQuestionsFullInfo,
+    num_blockers_resolved:   numBlockersResolved,
+    num_blockers_total:      numBlockersTotal,
   };
 }
 
@@ -436,12 +465,21 @@ async function main() {
             // that ask_human_server.py returns for unmatched questions.  This keeps the
             // trajectory observation clean and consistent across modes: the model sees
             // "irrelevant question" and understands it should proceed without asking.
-            pushEvent({
-              type: "ask_question_full_info_mode",
-              timestamp: new Date().toISOString(),
-              toolName: _toolName,
-              input: _input,
-            });
+            // We still push a structured event (with question + tool_use_id) so:
+            //   1. extractTrajectorySteps can record the attempt as an ask_human step.
+            //   2. computeTrajectoryStats can increment num_questions_full_info.
+            //   3. handledAskIds suppresses the SDK's synthetic tool_result duplicate.
+            {
+              const q = _input?.question || _input?.questions?.[0]?.question || JSON.stringify(_input || {});
+              pushEvent({
+                type:        "ask_question_full_info_mode",
+                timestamp:   new Date().toISOString(),
+                question:    String(q),
+                tool_use_id: permission.toolUseID,
+                toolName:    _toolName,
+                input:       _input,
+              });
+            }
             return {
               behavior: "deny",
               toolUseID: permission.toolUseID,
