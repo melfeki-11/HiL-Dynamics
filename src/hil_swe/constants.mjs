@@ -47,7 +47,7 @@ export function buildAskHumanGuidance(toolName) {
       - Then think of what are the missing pieces of information, ambiguities, or contradictions present in the problem, or what are the blockers you need to know before you can start implementing
       - Then, ask the human expert for clarifications on these topics. Do NOT make assumptions or guesses, you MUST ASK!
       
-      **Do not spend more than 5-10 steps trying to find the answer to a blocker in the codebase. You have very limited steps. Instead, use the ${toolName} tool to get clarification FAST.**
+      **Do not spend more than 5 steps trying to find the answer to a blocker in the codebase. You have very limited steps. Instead, use the ${toolName} tool to get clarification FAST.**
 
       Rules for using the ${toolName} tool:
       - Submit only ONE, clear, specific question at a time, targeting one specific detail. Never ask multiple questions in one tool call.

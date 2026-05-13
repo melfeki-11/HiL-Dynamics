@@ -407,129 +407,157 @@ async function main() {
       })
     : null;
 
-  // 5. Run agent
+  // 5. Run agent with up to 3 attempts
+  // Retries occur only on transient SDK errors; timeouts and clean completions
+  // exit immediately.  Each attempt re-uses the same humanRouter and pushEvent
+  // callback but clears allEvents so only the successful attempt's events are
+  // preserved in the final trajectory.
   let sdkError = null;
-  const abortController = TIMEOUT_MS > 0 ? new AbortController() : null;
-  const timeoutId = abortController
-    ? setTimeout(
-        () => abortController.abort(new Error(`SWE claude attempt timed out after ${TIMEOUT_MS}ms`)),
-        TIMEOUT_MS,
-      )
-    : null;
+  const MAX_RETRIES = 3;
+  const _runStart = Date.now();
 
   const env = claudeApiEnv();
 
-  try {
-    for await (const message of query({
-      prompt,
-      options: {
-        ...(abortController ? { abortController } : {}),
-        pathToClaudeCodeExecutable: CLAUDE_BIN,
-        cwd: WORKSPACE,
-        model: CLAUDE_MODEL,
-        maxTurns: MAX_TURNS,
-        permissionMode: PERMISSION_MODE,
-        env,
-        mcpServers: [],
-        canUseTool: async (_toolName, _input, permission) => {
-          // Native AskUserQuestion: intercept and route through the ask_human simulator
-          // (ask_human mode) or deny cleanly (full_info mode, where all information is
-          // provided upfront and no human is present to answer questions).
-          if (isAskUserQuestionTool(_toolName)) {
-            if (humanRouter) {
-              // ask_human mode: route to the LLM-backed human simulator.
-              const answer = await answerClaudeAskUserQuestion({ router: humanRouter, input: _input, permission });
-              // Emit a structured event so extractTrajectorySteps can record the
-              // ask/answer pair in trajectory.json with a clean obs.  We deny the
-              // tool (so it never blocks on stdin) and pass the answer as the deny
-              // message.  If the SDK also injects a synthetic tool_result for the
-              // deny, extractTrajectorySteps will skip it via the handledAskIds set.
-              const q = _input?.question || _input?.questions?.[0]?.question || JSON.stringify(_input || {});
-              pushEvent({
-                type:        "claude_ask_question",
-                timestamp:   new Date().toISOString(),
-                question:    String(q),
-                answer,
-                tool_use_id: permission.toolUseID,
-              });
+  for (let _attempt = 1; _attempt <= MAX_RETRIES; _attempt++) {
+    sdkError = null;
+    allEvents.length = 0;   // clear in-place so pushEvent closure remains valid
+
+    const PER_ATTEMPT_TIMEOUT_MS = 1_200_000; // 1200 s = 20 min per attempt
+    const remainingMs    = TIMEOUT_MS - (Date.now() - _runStart);
+    const attemptTimeout = Math.min(remainingMs, PER_ATTEMPT_TIMEOUT_MS);
+    if (attemptTimeout <= 0) {
+      sdkError = `Timed out after ${TIMEOUT_MS}ms`;
+      pushEvent({ type: "sdk_error", timestamp: new Date().toISOString(), error: sdkError });
+      break;
+    }
+
+    const abortController = new AbortController();
+    const timeoutId = setTimeout(
+      () => abortController.abort(new Error(`SWE claude attempt timed out after ${PER_ATTEMPT_TIMEOUT_MS}ms`)),
+      attemptTimeout,
+    );
+
+    try {
+      for await (const message of query({
+        prompt,
+        options: {
+          abortController,
+          pathToClaudeCodeExecutable: CLAUDE_BIN,
+          cwd: WORKSPACE,
+          model: CLAUDE_MODEL,
+          maxTurns: MAX_TURNS,
+          permissionMode: PERMISSION_MODE,
+          env,
+          mcpServers: [],
+          canUseTool: async (_toolName, _input, permission) => {
+            // Native AskUserQuestion: intercept and route through the ask_human simulator
+            // (ask_human mode) or deny cleanly (full_info mode, where all information is
+            // provided upfront and no human is present to answer questions).
+            if (isAskUserQuestionTool(_toolName)) {
+              if (humanRouter) {
+                // ask_human mode: route to the LLM-backed human simulator.
+                const answer = await answerClaudeAskUserQuestion({ router: humanRouter, input: _input, permission });
+                // Emit a structured event so extractTrajectorySteps can record the
+                // ask/answer pair in trajectory.json with a clean obs.  We deny the
+                // tool (so it never blocks on stdin) and pass the answer as the deny
+                // message.  If the SDK also injects a synthetic tool_result for the
+                // deny, extractTrajectorySteps will skip it via the handledAskIds set.
+                const q = _input?.question || _input?.questions?.[0]?.question || JSON.stringify(_input || {});
+                pushEvent({
+                  type:        "claude_ask_question",
+                  timestamp:   new Date().toISOString(),
+                  question:    String(q),
+                  answer,
+                  tool_use_id: permission.toolUseID,
+                });
+                return {
+                  behavior: "deny",
+                  toolUseID: permission.toolUseID,
+                  message:   answer,
+                  decisionClassification: "user_temporary",
+                };
+              }
+              // full_info mode: no human is present (all blockers are provided in the prompt).
+              // We cannot let AskUserQuestion execute natively — it would block on stdin in a
+              // non-TTY container.  Return the same UNKNOWN_RESOLUTION ("irrelevant question")
+              // that ask_human_server.py returns for unmatched questions.  This keeps the
+              // trajectory observation clean and consistent across modes: the model sees
+              // "irrelevant question" and understands it should proceed without asking.
+              // We still push a structured event (with question + tool_use_id) so:
+              //   1. extractTrajectorySteps can record the attempt as an ask_human step.
+              //   2. computeTrajectoryStats can increment num_questions_full_info.
+              //   3. handledAskIds suppresses the SDK's synthetic tool_result duplicate.
+              {
+                const q = _input?.question || _input?.questions?.[0]?.question || JSON.stringify(_input || {});
+                pushEvent({
+                  type:        "ask_question_full_info_mode",
+                  timestamp:   new Date().toISOString(),
+                  question:    String(q),
+                  tool_use_id: permission.toolUseID,
+                  toolName:    _toolName,
+                  input:       _input,
+                });
+              }
               return {
                 behavior: "deny",
                 toolUseID: permission.toolUseID,
-                message:   answer,
+                message: UNKNOWN_RESOLUTION,   // "irrelevant question" — canonical ask_human_server.py response
                 decisionClassification: "user_temporary",
               };
             }
-            // full_info mode: no human is present (all blockers are provided in the prompt).
-            // We cannot let AskUserQuestion execute natively — it would block on stdin in a
-            // non-TTY container.  Return the same UNKNOWN_RESOLUTION ("irrelevant question")
-            // that ask_human_server.py returns for unmatched questions.  This keeps the
-            // trajectory observation clean and consistent across modes: the model sees
-            // "irrelevant question" and understands it should proceed without asking.
-            // We still push a structured event (with question + tool_use_id) so:
-            //   1. extractTrajectorySteps can record the attempt as an ask_human step.
-            //   2. computeTrajectoryStats can increment num_questions_full_info.
-            //   3. handledAskIds suppresses the SDK's synthetic tool_result duplicate.
-            {
-              const q = _input?.question || _input?.questions?.[0]?.question || JSON.stringify(_input || {});
-              pushEvent({
-                type:        "ask_question_full_info_mode",
-                timestamp:   new Date().toISOString(),
-                question:    String(q),
-                tool_use_id: permission.toolUseID,
-                toolName:    _toolName,
-                input:       _input,
-              });
-            }
-            return {
-              behavior: "deny",
-              toolUseID: permission.toolUseID,
-              message: UNKNOWN_RESOLUTION,   // "irrelevant question" — canonical ask_human_server.py response
-              decisionClassification: "user_temporary",
-            };
-          }
 
-          // All other tools (Bash, Read, Edit, Glob, …): silently enforce the workspace
-          // boundary and allow everything inside /app.  No approval event is logged — the
-          // container IS the security boundary and tool usage is not an "approval question."
-          const decision = approvalPolicyRouter({
-            registryDecision: { status: "unknown", decision: "unknown" },
-            nativeEventType: "claude.canUseTool",
-            context: { toolName: _toolName, input: _input, blockedPath: permission.blockedPath },
-            workspaceDir: WORKSPACE,
-            policy: "allow",
-          });
-          if (!decision.allowed) {
-            // Log workspace hard-denies for debugging — these are real enforcement events.
-            pushEvent({
-              type: "workspace_hard_deny",
-              timestamp: new Date().toISOString(),
-              toolName: _toolName,
-              reason: decision.reason,
-              blockedPath: permission.blockedPath || null,
+            // All other tools (Bash, Read, Edit, Glob, …): silently enforce the workspace
+            // boundary and allow everything inside /app.  No approval event is logged — the
+            // container IS the security boundary and tool usage is not an "approval question."
+            const decision = approvalPolicyRouter({
+              registryDecision: { status: "unknown", decision: "unknown" },
+              nativeEventType: "claude.canUseTool",
+              context: { toolName: _toolName, input: _input, blockedPath: permission.blockedPath },
+              workspaceDir: WORKSPACE,
+              policy: "allow",
             });
-            return { behavior: "deny", toolUseID: permission.toolUseID, message: `Denied: ${decision.reason}`, decisionClassification: "user_temporary" };
-          }
-          return { behavior: "allow", updatedInput: _input || {}, toolUseID: permission.toolUseID, decisionClassification: "user_temporary" };
-        },
-        systemPrompt: MODE === "ask_human"
-          ? {
-              type: "preset",
-              preset: "claude_code",
-              append: ASK_HUMAN_GUIDANCE,
+            if (!decision.allowed) {
+              // Log workspace hard-denies for debugging — these are real enforcement events.
+              pushEvent({
+                type: "workspace_hard_deny",
+                timestamp: new Date().toISOString(),
+                toolName: _toolName,
+                reason: decision.reason,
+                blockedPath: permission.blockedPath || null,
+              });
+              return { behavior: "deny", toolUseID: permission.toolUseID, message: `Denied: ${decision.reason}`, decisionClassification: "user_temporary" };
             }
-          : { type: "preset", preset: "claude_code" },
-      },
-    })) {
-      pushEvent({ type: "sdk_message", timestamp: new Date().toISOString(), message });
+            return { behavior: "allow", updatedInput: _input || {}, toolUseID: permission.toolUseID, decisionClassification: "user_temporary" };
+          },
+          systemPrompt: MODE === "ask_human"
+            ? {
+                type: "preset",
+                preset: "claude_code",
+                append: ASK_HUMAN_GUIDANCE,
+              }
+            : { type: "preset", preset: "claude_code" },
+        },
+      })) {
+        pushEvent({ type: "sdk_message", timestamp: new Date().toISOString(), message });
+      }
+    } catch (error) {
+      const text = redactString(String(error?.stack || error));
+      sdkError = abortController.signal.aborted
+        ? `Timed out after ${TIMEOUT_MS}ms.\n\n${text}`
+        : text;
+      pushEvent({ type: "sdk_error", timestamp: new Date().toISOString(), error: sdkError });
+    } finally {
+      clearTimeout(timeoutId);
     }
-  } catch (error) {
-    const text = redactString(String(error?.stack || error));
-    sdkError = abortController?.signal.aborted
-      ? `Timed out after ${TIMEOUT_MS}ms.\n\n${text}`
-      : text;
-    pushEvent({ type: "sdk_error", timestamp: new Date().toISOString(), error: sdkError });
-  } finally {
-    if (timeoutId) clearTimeout(timeoutId);
+
+    // Retry only on transient errors (not on timeout — the overall wall-clock budget is exhausted).
+    if (sdkError && !abortController.signal.aborted && _attempt < MAX_RETRIES) {
+      process.stderr.write(
+        `[run_claude] sdk_error on attempt ${_attempt}/${MAX_RETRIES} for ${uid}, retrying: ${sdkError.slice(0, 200)}\n`,
+      );
+      continue;
+    }
+    break;
   }
 
   // 6. Collect patch

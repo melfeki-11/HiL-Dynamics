@@ -76,6 +76,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -175,7 +176,21 @@ SDK_CONFIGS = {
         "model_env_key":        "ADK_MODEL",
         "default_model":        "gemini/gemini-3.1-pro-preview-customtools",
         "executable_env":       "ADK_SUPPRESS_GEMINI_LITELLM_WARNINGS=true",
-        "runtime":              "python3",
+        # python3.adk is a versioned symlink created by Dockerfile.harness that
+        # always points at a Python >=3.9 binary with google-adk[extensions]
+        # installed.  It deliberately avoids overriding the task's own python3
+        # (which may be 3.8) so agent bash tool calls like "python3 -m pytest"
+        # still use the task's expected Python and its installed packages.
+        "runtime":              "python3.adk",
+    },
+    "opencode": {
+        "harness_image_prefix": "hilbench-swe-harness-opencode",
+        "entrypoint":           "/opt/trust_horizon/src/hil_swe/run_opencode.mjs",
+        "model_env_key":        "OPENCODE_MODEL",
+        "default_model":        "fireworks_ai/glm-5p1",
+        # Suppress auto-update banner; belt-and-suspenders with autoupdate:false in config
+        "executable_env":       "OPENCODE_NO_UPDATE=1",
+        # runtime defaults to "node" when absent
     },
 }
 DEFAULT_SDK = "claude"
@@ -201,7 +216,9 @@ FORWARDED_ENV_KEYS = [
     # Agent / run parameters (all optional; harness uses built-in defaults)
     "CLAUDE_MODEL",
     "CODEX_MODEL",
+    "CODEX_REASONING_EFFORT",
     "ADK_MODEL",
+    "OPENCODE_MODEL",
     "MAX_TURNS",
     "ATTEMPT_TIMEOUT_MS",
     "PERMISSION_MODE",
@@ -368,8 +385,27 @@ def output_dir_for(run_id: str, uid: str, mode: str, pass_index: int) -> Path:
     return RUNS_DIR / run_id / uid / mode / f"pass_{pass_index}"
 
 
+_SOLVE_TIMEOUT_RE = re.compile(r"Timed out after|Timed out on host after", re.IGNORECASE)
+
+
+def _result_has_timeout_sdk_error(out_dir: Path) -> bool:
+    result_path = out_dir / "result.json"
+    if not result_path.exists():
+        return False
+    try:
+        result = json.loads(result_path.read_text())
+    except Exception:
+        return False
+    sdk_error = str(result.get("sdk_error") or "")
+    return bool(_SOLVE_TIMEOUT_RE.search(sdk_error))
+
+
 def result_is_complete(out_dir: Path) -> bool:
-    return (out_dir / "result.json").exists()
+    result_path = out_dir / "result.json"
+    if not result_path.exists():
+        return False
+    # A timeout-written result.json is treated as incomplete so the solve is rerun.
+    return not _result_has_timeout_sdk_error(out_dir)
 
 
 def run_attempt(
@@ -759,11 +795,29 @@ def main() -> None:
         for p in range(1, args.passes + 1)
     }
 
+    run_dir = RUNS_DIR / args.run_id
+    pending_pass_keys: set[tuple[str, str, int]] = set()
+    for key in all_pass_keys:
+        uid, mode, pass_idx = key
+        pass_dir = run_dir / uid / mode / f"pass_{pass_idx}"
+        solve_complete = result_is_complete(pass_dir)
+        has_eval = (pass_dir / "eval_result.json").exists()
+        if args.force:
+            pending_pass_keys.add(key)
+        elif args.skip_eval:
+            if not solve_complete:
+                pending_pass_keys.add(key)
+        else:
+            # For normal solve+eval runs, a pass is considered complete only when
+            # both solve and eval artifacts exist.
+            if not (solve_complete and has_eval):
+                pending_pass_keys.add(key)
+
     solve_jobs = build_job_list(
         target_tasks, args.modes, args.passes, args.run_id, skip_if_complete=not args.force
     )
-    total = len(all_pass_keys)
-    skipped_solve = total - len(solve_jobs)
+    total = len(pending_pass_keys)
+    skipped_solve = len(all_pass_keys) - len(solve_jobs)
     completed_runs = 0
     completed_runs_lock = threading.Lock()
     # Protect against 0-worker executor when there are no solve jobs
@@ -858,10 +912,12 @@ def main() -> None:
             # we respect skip_if_complete (force_eval=False) — if their eval is
             # already good, no reason to re-run it.
             if eval_exec is not None:
-                run_dir = RUNS_DIR / args.run_id
-                for uid, mode, pass_idx in sorted(all_pass_keys - submitted_eval_keys):
+                for uid, mode, pass_idx in sorted(pending_pass_keys - submitted_eval_keys):
                     pass_dir = run_dir / uid / mode / f"pass_{pass_idx}"
-                    if (pass_dir / "result.json").exists():
+                    # Only queue eval for passes with a complete solve result.
+                    # Timeout solves write result.json with sdk_error and no patch;
+                    # those must be rerun in solve, not fed to eval.
+                    if result_is_complete(pass_dir):
                         eval_job = {"uid": uid, "mode": mode, "pass_index": pass_idx}
                         ef = eval_exec.submit(eval_one, eval_job, False)
                         eval_futures[ef] = eval_job
@@ -902,6 +958,41 @@ def main() -> None:
         run_dir = RUNS_DIR / args.run_id
         rows = load_pass_rows(run_dir)
         if rows:
+            # Ensure metrics cover the full requested run grid (all targeted
+            # uid/mode/pass combinations), not just the subset that happened to
+            # produce files during this invocation.
+            row_keys = {
+                (str(r.get("uid")), str(r.get("mode")), int(r.get("pass_index", -1)))
+                for r in rows
+                if r.get("uid") is not None and r.get("mode") is not None and r.get("pass_index") is not None
+            }
+            for uid, mode, pass_idx in sorted(all_pass_keys):
+                key = (uid, mode, pass_idx)
+                if key in row_keys:
+                    continue
+                pass_dir = run_dir / uid / mode / f"pass_{pass_idx}"
+                rows.append({
+                    "uid": uid,
+                    "mode": mode,
+                    "agent": args.sdk,
+                    "model": model,
+                    "pass_index": pass_idx,
+                    # Treat missing rows as unresolved so summary coverage is
+                    # over the full run scope rather than only completed rows.
+                    "status": "unresolved",
+                    "resolved": False,
+                    "num_steps": 0,
+                    "num_questions": 0,
+                    "num_questions_approval": 0,
+                    "num_total_questions": 0,
+                    "num_questions_full_info": 0,
+                    "num_blockers_resolved": 0,
+                    "num_blockers_total": 0,
+                    "patch_bytes": None,
+                    "pass_dir": str(pass_dir),
+                })
+
+            rows.sort(key=lambda r: (str(r.get("uid", "")), str(r.get("mode", "")), int(r.get("pass_index", 0))))
             metrics_dir = run_dir / "metrics"
             metrics_dir.mkdir(exist_ok=True)
             (metrics_dir / "pass_level.json").write_text(json.dumps(rows, indent=2))

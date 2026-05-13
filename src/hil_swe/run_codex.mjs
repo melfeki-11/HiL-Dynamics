@@ -61,6 +61,21 @@ const ASK_HUMAN_GUIDANCE = buildAskHumanGuidance("requestUserInput");
 
 const CODEX_MODEL = process.env.CODEX_MODEL || "gpt-5.5";
 const CODEX_BIN   = process.env.CODEX_CODE_EXECUTABLE || "codex";
+// Optional reasoning effort override (none | minimal | low | medium | high | xhigh).
+// When set, plumbed three ways for belt-and-suspenders propagation:
+//   1. injected into CODEX_APP_CONFIG so thread/start.config carries it
+//   2. passed as `-c model_reasoning_effort=...` to codex app-server at spawn
+//   3. logged to stderr so container.log records the effective value
+const CODEX_REASONING_EFFORT = (process.env.CODEX_REASONING_EFFORT || "").trim();
+const VALID_REASONING_EFFORTS = new Set([
+  "none", "minimal", "low", "medium", "high", "xhigh",
+]);
+if (CODEX_REASONING_EFFORT && !VALID_REASONING_EFFORTS.has(CODEX_REASONING_EFFORT)) {
+  throw new Error(
+    `Invalid CODEX_REASONING_EFFORT='${CODEX_REASONING_EFFORT}'. ` +
+    `Must be one of: ${[...VALID_REASONING_EFFORTS].join(", ")}.`,
+  );
+}
 // MAX_TURNS: max completed items (commands + file edits + tool calls) before we interrupt
 // the turn via turn/interrupt.  0 or unset = no limit (wall-clock TIMEOUT_MS still applies).
 // The codex app-server has no native turn limit param, so we implement it by counting
@@ -111,6 +126,16 @@ function codexApiEnv() {
       },
     },
   };
+
+  // When CODEX_REASONING_EFFORT is set, inject it into the config so thread/start
+  // carries the override (path 1 of 3).  Paths 2 and 3 happen in runCodexAppServer.
+  if (CODEX_REASONING_EFFORT) {
+    codexAppConfig.model_reasoning_effort = CODEX_REASONING_EFFORT;
+    process.stderr.write(
+      `[run_codex] CODEX_REASONING_EFFORT='${CODEX_REASONING_EFFORT}' ` +
+      `propagated via CODEX_APP_CONFIG.model_reasoning_effort\n`,
+    );
+  }
 
   return {
     ...process.env,
@@ -213,7 +238,7 @@ class JsonRpcProcess {
 async function handleRequestUserInput({ params, router, pushEvent }) {
   const answers = {};
   for (const question of params.questions || []) {
-    const prompt = `${question.header ? `${question.header}: ` : ""}${question.question || "Clarification request"}`;
+    const prompt = question.question || "Clarification request";
 
     if (router) {
       // ask_human mode: route to the LLM-backed human simulator
@@ -505,9 +530,25 @@ async function runCodexAppServer({ prompt, env, uid, humanRouter, pushEvent, abo
     const abortHandler = () => settle(new Error("Codex SWE attempt aborted by timeout"));
     abortController?.signal.addEventListener("abort", abortHandler, { once: true });
 
+    // Belt-and-suspenders: also pass model_reasoning_effort as a `-c` flag at
+    // app-server spawn time (path 2 of 3).  This overrides ~/.codex/config.toml
+    // and any built-in defaults baked into the codex CLI.
+    const appServerArgs = [
+      "app-server",
+      "--enable", "default_mode_request_user_input",
+    ];
+    if (CODEX_REASONING_EFFORT) {
+      appServerArgs.push("-c", `model_reasoning_effort="${CODEX_REASONING_EFFORT}"`);
+      process.stderr.write(
+        `[run_codex] CODEX_REASONING_EFFORT='${CODEX_REASONING_EFFORT}' ` +
+        `propagated via app-server -c flag\n`,
+      );
+    }
+    appServerArgs.push("--listen", "stdio://");
+
     const rpc = new JsonRpcProcess({
       command: CODEX_BIN,
-      args:    ["app-server", "--enable", "default_mode_request_user_input", "--listen", "stdio://"],
+      args:    appServerArgs,
       cwd:     WORKSPACE,
       env:     serverEnv,
 
@@ -600,6 +641,50 @@ async function runCodexAppServer({ prompt, env, uid, humanRouter, pushEvent, abo
           clientInfo:   { name: "trust-horizon-hil-swe", title: "Trust Horizon HiL-SWE", version: "0.1.0" },
           capabilities: { experimentalApi: true },
         });
+
+        // Path 3 of 3: verify the app-server resolved our reasoning effort
+        // override by reading back the effective config.  This is a runtime
+        // assertion so a silent drop of the setting fails the attempt instead
+        // of silently running with the wrong effort.
+        if (CODEX_REASONING_EFFORT) {
+          try {
+            const cfg = await rpc.request("config/read", {
+              includeLayers: false,
+              cwd: WORKSPACE,
+            });
+            const resolved = cfg?.config?.model_reasoning_effort;
+            const evt = {
+              type:      "codex_reasoning_effort_verification",
+              timestamp: new Date().toISOString(),
+              expected:  CODEX_REASONING_EFFORT,
+              resolved,
+              ok:        resolved === CODEX_REASONING_EFFORT,
+            };
+            pushEvent(evt);
+            process.stderr.write(
+              `[run_codex] config/read: model_reasoning_effort=${resolved} ` +
+              `(expected=${CODEX_REASONING_EFFORT}, ok=${evt.ok})\n`,
+            );
+            if (resolved !== CODEX_REASONING_EFFORT) {
+              throw new Error(
+                `CODEX_REASONING_EFFORT propagation failed: ` +
+                `expected '${CODEX_REASONING_EFFORT}', resolved '${resolved}'`,
+              );
+            }
+          } catch (cfgErr) {
+            // If config/read isn't supported on this codex version, fall back
+            // to logging and continue — the -c flag + thread/start.config still
+            // apply.  Only fail-hard on an explicit mismatch above.
+            if (!String(cfgErr.message || cfgErr).includes("propagation failed")) {
+              process.stderr.write(
+                `[run_codex] WARN: config/read failed (${cfgErr.message || cfgErr}); ` +
+                `continuing with -c flag + thread/start.config propagation only\n`,
+              );
+            } else {
+              throw cfgErr;
+            }
+          }
+        }
 
         const threadStart = await rpc.request("thread/start", {
           cwd:                  WORKSPACE,
@@ -702,28 +787,55 @@ async function main() {
       })
     : null;
 
-  // 5. Run agent with optional timeout
+  // 5. Run agent with up to 3 attempts
+  // Retries occur only on transient SDK errors; timeouts and clean completions
+  // exit immediately.  allEvents is cleared in-place between attempts so only
+  // the successful attempt's events are preserved in the final trajectory.
   let sdkError = null;
-  const abortController = TIMEOUT_MS > 0 ? new AbortController() : null;
-  const timeoutId = abortController
-    ? setTimeout(
-        () => abortController.abort(new Error(`Codex SWE attempt timed out after ${TIMEOUT_MS}ms`)),
-        TIMEOUT_MS,
-      )
-    : null;
+  const MAX_RETRIES = 3;
+  const _runStart = Date.now();
 
   const env = codexApiEnv();
 
-  try {
-    await runCodexAppServer({ prompt, env, uid, humanRouter, pushEvent, abortController });
-  } catch (err) {
-    const text = redactString(String(err?.stack || err));
-    sdkError = abortController?.signal.aborted
-      ? `Timed out after ${TIMEOUT_MS}ms.\n\n${text}`
-      : text;
-    pushEvent({ type: "sdk_error", timestamp: new Date().toISOString(), error: sdkError });
-  } finally {
-    if (timeoutId) clearTimeout(timeoutId);
+  for (let _attempt = 1; _attempt <= MAX_RETRIES; _attempt++) {
+    sdkError = null;
+    allEvents.length = 0;   // clear in-place so pushEvent closure remains valid
+
+    const PER_ATTEMPT_TIMEOUT_MS = 1_200_000; // 1200 s = 20 min per attempt
+    const remainingMs    = TIMEOUT_MS - (Date.now() - _runStart);
+    const attemptTimeout = Math.min(remainingMs, PER_ATTEMPT_TIMEOUT_MS);
+    if (attemptTimeout <= 0) {
+      sdkError = `Timed out after ${TIMEOUT_MS}ms`;
+      pushEvent({ type: "sdk_error", timestamp: new Date().toISOString(), error: sdkError });
+      break;
+    }
+
+    const abortController = new AbortController();
+    const timeoutId = setTimeout(
+      () => abortController.abort(new Error(`Codex SWE attempt timed out after ${PER_ATTEMPT_TIMEOUT_MS}ms`)),
+      attemptTimeout,
+    );
+
+    try {
+      await runCodexAppServer({ prompt, env, uid, humanRouter, pushEvent, abortController });
+    } catch (err) {
+      const text = redactString(String(err?.stack || err));
+      sdkError = abortController.signal.aborted
+        ? `Timed out after ${PER_ATTEMPT_TIMEOUT_MS}ms.\n\n${text}`
+        : text;
+      pushEvent({ type: "sdk_error", timestamp: new Date().toISOString(), error: sdkError });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    // Retry only on transient errors (not on timeout — the overall wall-clock budget is exhausted).
+    if (sdkError && !abortController.signal.aborted && _attempt < MAX_RETRIES) {
+      process.stderr.write(
+        `[run_codex] sdk_error on attempt ${_attempt}/${MAX_RETRIES} for ${uid}, retrying: ${sdkError.slice(0, 200)}\n`,
+      );
+      continue;
+    }
+    break;
   }
 
   // 6. Collect patch

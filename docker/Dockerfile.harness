@@ -102,11 +102,47 @@ RUN npm install -g @anthropic-ai/claude-code@2.1.139 2>&1 || \
 # google-adk[extensions] is required for LiteLlm integration (the [extensions]
 # extra pulls in litellm which is the LLM backend for LiteLlm model class).
 # Python 3 is already present in SWE-agent task images.
-RUN if [ "${SDK}" = "adk" ]; then \
-        python3 -m pip install --no-cache-dir --break-system-packages 'google-adk[extensions]' 2>&1 || \
-        python3 -m pip install --no-cache-dir 'google-adk[extensions]' 2>&1 || \
-        pip3    install --no-cache-dir --break-system-packages 'google-adk[extensions]' 2>&1 || \
-        pip3    install --no-cache-dir 'google-adk[extensions]' 2>&1; \
+#
+# Install strategy:
+#   • This step always creates /usr/local/bin/python3.adk — the dedicated Python
+#     binary used ONLY to launch run_adk.py (via "runtime: python3.adk" in
+#     run_hil_swe.py).  It points at the highest-version Python that has, or can
+#     have, google-adk installed.  The task's own python3 (e.g. 3.8) is NEVER
+#     replaced, so agent bash commands that run "python3 -m pytest" still see the
+#     task's expected Python and its installed packages.
+#   • Test-first: if the system python3 already imports LiteLlm, reuse it.
+#   • If system python3 is <3.9 (e.g. Python 3.8 Ubuntu Focal task images),
+#     install Python 3.11 via the deadsnakes PPA, get-pip, then install google-adk
+#     into that interpreter.  python3.adk → python3.11.
+#   • Install a known-good ADK baseline plus litellm explicitly. Relying on
+#     google-adk[extensions] can trigger very long dependency backtracking on
+#     some base images (notably musl/Python 3.11), causing flaky builds.
+RUN set -e; if [ "${SDK}" = "adk" ]; then \
+        ADK_PY="$(which python3)"; \
+        if python3 -c "from google.adk.models.lite_llm import LiteLlm" 2>/dev/null; then \
+            echo "ADK: google-adk[extensions] already OK in system python3"; \
+        else \
+            PY_MINOR=$(python3 -c "import sys; print(sys.version_info.minor)" 2>/dev/null || echo 0); \
+            PY_MAJOR=$(python3 -c "import sys; print(sys.version_info.major)" 2>/dev/null || echo 0); \
+            if [ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 9 ]; then \
+                echo "ADK: system Python 3.${PY_MINOR} < 3.9 — installing Python 3.11 via uv"; \
+                echo "ADK: (deadsnakes focal PPA dropped Python packages after Ubuntu 20.04 EOL Apr 2025)"; \
+                pip3 install --no-cache-dir uv 2>&1 && \
+                UV_BIN=$(command -v uv) && \
+                "$UV_BIN" python install 3.11 2>&1 && \
+                ADK_PY=$("$UV_BIN" python find cpython-3.11 2>/dev/null || "$UV_BIN" python find 3.11) && \
+                echo "ADK: uv installed python3.11 at ${ADK_PY}"; \
+            fi; \
+            # Old base images (e.g. Python 3.9 + pip 20.x) cannot resolve/use
+            # modern manylinux wheels reliably, so bootstrap packaging tooling first.
+            "${ADK_PY}" -m pip install --no-cache-dir --break-system-packages --upgrade pip setuptools wheel 2>&1 || \
+            "${ADK_PY}" -m pip install --no-cache-dir --upgrade pip setuptools wheel 2>&1; \
+            "${ADK_PY}" -m pip install --no-cache-dir --break-system-packages 'google-adk==1.18.0' 'litellm' 2>&1 || \
+            "${ADK_PY}" -m pip install --no-cache-dir 'google-adk==1.18.0' 'litellm' 2>&1; \
+            "${ADK_PY}" -c "from google.adk.models.lite_llm import LiteLlm; import litellm"; \
+        fi; \
+        ln -sf "${ADK_PY}" /usr/local/bin/python3.adk; \
+        echo "ADK: python3.adk -> ${ADK_PY}  ($(${ADK_PY} --version 2>&1))"; \
     fi
 
 # ── Sanity check ─────────────────────────────────────────────────────────────
@@ -120,7 +156,7 @@ RUN node --version && \
     (codex --version 2>/dev/null || echo 'codex cli version check skipped') && \
     (opencode --version 2>/dev/null || echo 'opencode cli version check skipped') && \
     if [ "${SDK}" = "adk" ]; then \
-        python3 -c "from google.adk.models.lite_llm import LiteLlm; print('google-adk[extensions] ok')"; \
+        python3.adk -c "from google.adk.models.lite_llm import LiteLlm; import litellm; print('google-adk+litellm ok  python3.adk=' + __import__('sys').version.split()[0])"; \
     fi
 
 # SWE-agent base images set ENTRYPOINT ["sleep", "infinity"] so containers can be

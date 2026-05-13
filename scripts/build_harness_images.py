@@ -68,6 +68,10 @@ SDK_REGISTRY: dict[str, tuple[str, Path]] = {
         "hilbench-swe-harness-adk",
         ROOT / "docker" / "Dockerfile.harness",   # shared; google-adk conditional on SDK=adk
     ),
+    "opencode": (
+        "hilbench-swe-harness-opencode",
+        ROOT / "docker" / "Dockerfile.harness",   # shared; opencode CLI already in npm package.json
+    ),
 }
 DEFAULT_SDK = "claude"
 

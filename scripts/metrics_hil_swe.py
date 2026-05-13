@@ -61,6 +61,12 @@ KB_QUERY_ERROR = "Error querying knowledge base"
 TRAJECTORY_RERUN_OCCURRENCE_THRESHOLD_STRICT = 1   # hiccup, kb_query_error, unknown_error
 TRAJECTORY_RERUN_OCCURRENCE_THRESHOLD_LENIENT = 3  # timeout
 
+SOLVE_TIMEOUT_SDK_ERROR_RE = re.compile(r"Timed out after|Timed out on host after", re.IGNORECASE)
+
+
+def _result_has_timeout_sdk_error(result: dict[str, Any]) -> bool:
+    return bool(SOLVE_TIMEOUT_SDK_ERROR_RE.search(str(result.get("sdk_error") or "")))
+
 
 def _load_trajectory_steps(pass_dir: str) -> list[dict]:
     """Load trajectory steps from trajectory.json in pass_dir.
@@ -240,6 +246,7 @@ def load_pass_rows(run_dir: Path) -> list[dict[str, Any]]:
                         result = json.loads(result_json.read_text())
                     except Exception:
                         pass
+                timeout_in_solve = _result_has_timeout_sdk_error(result)
 
                 has_eval = bool(eval_data)
                 resolved = eval_data.get("resolved") if has_eval else None
@@ -260,6 +267,9 @@ def load_pass_rows(run_dir: Path) -> list[dict[str, Any]]:
                         or bool(result.get("sdk_error"))  # SDK crashed
                         or (has_eval and not eval_data.get("test_ran", True))  # test patch failed
                     )
+                # Timeout solves are always rerun-worthy and excluded from metrics.
+                # Keep this explicit even when eval_result.json exists.
+                infra_error = infra_error or timeout_in_solve
 
                 row = {
                     "uid": uid,

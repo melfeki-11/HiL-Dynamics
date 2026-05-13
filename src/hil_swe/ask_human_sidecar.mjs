@@ -57,6 +57,12 @@ const TASK_UID = process.env.TASK_UID || "unknown";  // set by run_adk.py before
 let _eventSink = null;
 let _router    = null;
 
+// Global event accumulator — collects all events across all /ask requests.
+// Used by run_opencode.mjs (and any future harness that cannot read per-request
+// events inline) via GET /events after the agent run completes.
+// ADK harnesses do not use this endpoint; it is strictly additive.
+const _globalEvents = [];
+
 // CANT_ANSWER mirrors the canonical ask_human_server.py CANT_ANSWER constant.
 // It is returned (instead of HTTP 500) when the router fails, so the agent
 // receives a graceful string and can retry on the next turn.
@@ -67,7 +73,12 @@ if (MODE === "ask_human") {
   _router = createHumanInputRouter({
     instanceId:    TASK_UID,
     kbPath,
-    trajectoryFile: (ev) => { if (_eventSink !== null) _eventSink.push(ev); },
+    // Push to both the per-request sink (for inline callers like ADK) and
+    // the global accumulator (for deferred callers like OpenCode via GET /events).
+    trajectoryFile: (ev) => {
+      if (_eventSink !== null) _eventSink.push(ev);
+      _globalEvents.push(ev);
+    },
     workspaceDir:   "/app",
     approvalPolicy: "allow",
     ...(ASK_HUMAN_BASE_URL ? { baseUrl: ASK_HUMAN_BASE_URL } : {}),
@@ -108,6 +119,15 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    // ── Global events snapshot ───────────────────────────────────────────────
+    // Used by run_opencode.mjs (and any future harness) after the agent exits
+    // to retrieve all accumulated human_input_* / ask_question_full_info_mode
+    // events without needing to read them inline per-request.
+    if (req.method === "GET" && req.url === "/events") {
+      sendJson(res, 200, { events: _globalEvents });
+      return;
+    }
+
     // ── Question routing ────────────────────────────────────────────────────
     if (req.method !== "POST" || req.url !== "/ask") {
       sendJson(res, 404, { error: "not found" });
@@ -125,7 +145,7 @@ const server = http.createServer(async (req, res) => {
     } = body;
 
     // ── full_info mode: return "irrelevant question" without calling LLM ────
-    // Emit ask_question_full_info_mode event so run_adk.py can count it in
+    // Emit ask_question_full_info_mode event so any harness can count it in
     // num_questions_full_info (mirrors run_codex.mjs / run_claude.mjs behaviour).
     if (MODE !== "ask_human") {
       const ev = {
@@ -133,6 +153,8 @@ const server = http.createServer(async (req, res) => {
         timestamp: new Date().toISOString(),
         question:  String(question),
       };
+      // Also accumulate globally so GET /events captures full_info calls too.
+      _globalEvents.push(ev);
       sendJson(res, 200, {
         resolution:      UNKNOWN_RESOLUTION,
         selected_labels: [UNKNOWN_RESOLUTION],

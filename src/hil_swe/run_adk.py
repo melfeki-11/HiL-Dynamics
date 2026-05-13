@@ -60,6 +60,28 @@ TIMEOUT_MS = int(os.environ.get("ATTEMPT_TIMEOUT_MS", str(3 * 3_600_000)))
 MAX_TURNS  = int(os.environ.get("MAX_TURNS", "200"))
 ADK_MODEL  = os.environ.get("ADK_MODEL",  "gemini/gemini-3.1-pro-preview-customtools")
 
+# LiteLLM proxy routing.
+# The harness containers have NO GCP Application Default Credentials and no
+# GEMINI_API_KEY / GOOGLE_API_KEY.  All credentials live inside the proxy.
+#
+# Routing strategy:
+#   • Keep the "gemini/" prefix as-is.  litellm's Google AI Studio handler
+#     supports api_base override, so passing LITELLM_BASE_URL as api_base
+#     redirects the call to the proxy without requiring local credentials.
+#   • The "vertex_ai/" prefix must NOT be used here: litellm's Vertex AI
+#     handler always tries to obtain GCP Application Default Credentials first
+#     (before touching api_base), which fails inside the container.
+#
+# Note: genai/models/llm/lite_llm.py uses "vertex_ai/" because it runs on
+# machines that DO have GCP credentials.  That pattern is not portable to
+# isolated harness containers.
+LITELLM_BASE_URL = os.environ.get("LITELLM_BASE_URL", "")
+LITELLM_API_KEY  = (
+    os.environ.get("LITELLM_API_KEY")
+    or os.environ.get("LITELLM_PROXY_API_KEY")
+    or ""
+)
+
 # ── Trajectory constants ──────────────────────────────────────────────────────
 
 THOUGHT_CAP = 4_000   # chars
@@ -167,7 +189,7 @@ def _build_ask_human_guidance(tool_name: str) -> str:
         f"      - Then think of what are the missing pieces of information, ambiguities, or contradictions present in the problem, or what are the blockers you need to know before you can start implementing\n"
         f"      - Then, ask the human expert for clarifications on these topics. Do NOT make assumptions or guesses, you MUST ASK!\n"
         f"      \n"
-        f"      **Do not spend more than 5-10 steps trying to find the answer to a blocker in the codebase. You have very limited steps. Instead, use the {tool_name} tool to get clarification FAST.**\n"
+        f"      **Do not spend more than 5 steps trying to find the answer to a blocker in the codebase. You have very limited steps. Instead, use the {tool_name} tool to get clarification FAST.**\n"
         f"\n"
         f"      Rules for using the {tool_name} tool:\n"
         f"      - Submit only ONE, clear, specific question at a time, targeting one specific detail. Never ask multiple questions in one tool call.\n"
@@ -269,7 +291,7 @@ def _sidecar_ask_sync(url: str, payload: dict) -> dict:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with _urllib_request.urlopen(req, timeout=600) as resp:
+    with _urllib_request.urlopen(req, timeout=1200) as resp:
         return json.loads(resp.read())
 
 
@@ -279,11 +301,16 @@ def extract_trajectory_steps(adk_events: list) -> list[dict]:
     """
     Convert ADK event stream into [{thought, act, obs}, ...] trajectory steps.
 
-    ADK event authorship:
-      event.author == AGENT_NAME ("swe_agent")
-          → model output: text parts (thought) + function_call parts (act)
-      event.author == "user"
-          → tool response: function_response parts (obs)
+    ADK event authorship (empirically verified against google-adk 1.x):
+      All events have event.author == AGENT_NAME ("swe_agent"), including
+      tool response events.  The canonical docs claim tool responses come with
+      author="user" but in practice that does NOT happen — the author field
+      cannot be used to distinguish event types.
+
+    Instead we distinguish by content:
+      • event has get_function_calls() → model output (thought + tool calls)
+      • event has get_function_responses() → tool results (observations)
+      • event has only text parts, author == AGENT_NAME → standalone thought
 
     Matching function_calls to function_responses is done by FunctionCall.id,
     which ADK guarantees is set (it fills in a UUID if the model omits it).
@@ -299,6 +326,45 @@ def extract_trajectory_steps(adk_events: list) -> list[dict]:
     # Ordered list of pending IDs so we can do FIFO fallback when id is absent.
     pending_order: list[str] = []
 
+    def _extract_func_responses(ev) -> list:
+        return ev.get_function_responses() if hasattr(ev, "get_function_responses") else []
+
+    def _extract_func_calls(ev) -> list:
+        return ev.get_function_calls() if hasattr(ev, "get_function_calls") else []
+
+    def _match_and_emit(fr) -> None:
+        """Match a FunctionResponse to its pending FunctionCall and emit a step."""
+        raw = fr.response or {}
+        if isinstance(raw, dict):
+            # ADK wraps string return values as {'result': value}
+            obs_raw = raw.get("output", raw.get("result", raw))
+        else:
+            obs_raw = raw
+        obs = _cap(str(obs_raw) if not isinstance(obs_raw, str) else obs_raw, OBS_CAP)
+
+        # Match by id first, then FIFO fallback by function name.
+        resp_id = str(fr.id) if fr.id else None
+        p = None
+        if resp_id and resp_id in pending:
+            p = pending.pop(resp_id)
+            if resp_id in pending_order:
+                pending_order.remove(resp_id)
+        elif pending_order:
+            # Fallback: take the oldest pending call of the same name.
+            match_id = next(
+                (k for k in pending_order if pending[k]["act"].startswith(
+                    "ask_human" if fr.name == "ask_human" else (fr.name or "")
+                )),
+                pending_order[0],  # or just the oldest
+            )
+            p = pending.pop(match_id)
+            pending_order.remove(match_id)
+
+        if p:
+            steps.append({"thought": p["thought"], "act": p["act"], "obs": obs})
+        else:
+            steps.append({"thought": "", "act": "", "obs": obs})
+
     for event in adk_events:
         # Skip partial streaming events — only process final ones.
         if getattr(event, "partial", False):
@@ -310,8 +376,18 @@ def extract_trajectory_steps(adk_events: list) -> list[dict]:
 
         author = getattr(event, "author", "")
 
-        if author == AGENT_NAME:
-            # ── Model output ──────────────────────────────────────────────────
+        # ── Priority 1: tool response events (observations) ───────────────────
+        # NOTE: in google-adk 1.x these events carry author=AGENT_NAME, NOT
+        # author="user" as older docs suggest.  Always check by content first.
+        func_responses = _extract_func_responses(event)
+        if func_responses:
+            for fr in func_responses:
+                _match_and_emit(fr)
+            continue
+
+        # ── Priority 2: model output with function calls ───────────────────────
+        func_calls = _extract_func_calls(event)
+        if func_calls:
             thought = ""
             for part in content.parts:
                 t = getattr(part, "text", None)
@@ -319,71 +395,39 @@ def extract_trajectory_steps(adk_events: list) -> list[dict]:
                     thought = _cap(t, THOUGHT_CAP)
                     break  # first text block = thought
 
-            func_calls = event.get_function_calls() if hasattr(event, "get_function_calls") else []
-            if func_calls:
-                first = True
-                for fc in func_calls:
-                    # Build act string matching run_codex.mjs / run_claude.mjs format.
-                    fc_name = fc.name or ""
-                    fc_args = fc.args or {}
-                    if fc_name == "ask_human":
-                        q   = str(fc_args.get("question", ""))
-                        act = _cap(f"ask_human {q}", ACT_CAP)
-                    elif fc_name == "bash":
-                        cmd = str(fc_args.get("command", ""))
-                        act = _cap(cmd, ACT_CAP)
-                    else:
-                        act = _cap(f"{fc_name}: {json.dumps(fc_args)}", ACT_CAP)
+            first = True
+            for fc in func_calls:
+                # Build act string matching run_codex.mjs / run_claude.mjs format.
+                fc_name = fc.name or ""
+                fc_args = fc.args or {}
+                if fc_name == "ask_human":
+                    q   = str(fc_args.get("question", ""))
+                    act = _cap(f"ask_human {q}", ACT_CAP)
+                elif fc_name == "bash":
+                    cmd = str(fc_args.get("command", ""))
+                    act = _cap(cmd, ACT_CAP)
+                else:
+                    act = _cap(f"{fc_name}: {json.dumps(fc_args)}", ACT_CAP)
 
-                    call_id = str(fc.id) if fc.id else f"_fc_{len(pending)}"
-                    pending[call_id] = {
-                        "thought": thought if first else "",
-                        "act":     act,
-                    }
-                    pending_order.append(call_id)
-                    first = False
+                call_id = str(fc.id) if fc.id else f"_fc_{len(pending)}"
+                pending[call_id] = {
+                    "thought": thought if first else "",
+                    "act":     act,
+                }
+                pending_order.append(call_id)
+                first = False
+            continue
 
-            elif thought:
-                # Text-only model turn with no tool call → standalone step.
+        # ── Priority 3: text-only model turn (standalone thought) ─────────────
+        if author == AGENT_NAME:
+            thought = ""
+            for part in content.parts:
+                t = getattr(part, "text", None)
+                if t and not thought:
+                    thought = _cap(t, THOUGHT_CAP)
+                    break
+            if thought:
                 steps.append({"thought": thought, "act": "", "obs": ""})
-
-        elif author == "user":
-            # ── Tool responses ────────────────────────────────────────────────
-            func_responses = (
-                event.get_function_responses()
-                if hasattr(event, "get_function_responses") else []
-            )
-            for fr in func_responses:
-                raw = fr.response or {}
-                if isinstance(raw, dict):
-                    # ADK wraps string return values as {'result': value}
-                    obs_raw = raw.get("output", raw.get("result", raw))
-                else:
-                    obs_raw = raw
-                obs = _cap(str(obs_raw) if not isinstance(obs_raw, str) else obs_raw, OBS_CAP)
-
-                # Match by id first, then FIFO fallback by function name.
-                resp_id = str(fr.id) if fr.id else None
-                p = None
-                if resp_id and resp_id in pending:
-                    p = pending.pop(resp_id)
-                    if resp_id in pending_order:
-                        pending_order.remove(resp_id)
-                elif pending_order:
-                    # Fallback: take the oldest pending call of the same name.
-                    match_id = next(
-                        (k for k in pending_order if pending[k]["act"].startswith(
-                            f"ask_human" if fr.name == "ask_human" else (fr.name or "")
-                        )),
-                        pending_order[0],  # or just the oldest
-                    )
-                    p = pending.pop(match_id)
-                    pending_order.remove(match_id)
-
-                if p:
-                    steps.append({"thought": p["thought"], "act": p["act"], "obs": obs})
-                else:
-                    steps.append({"thought": "", "act": "", "obs": obs})
 
     # Flush tool calls that never received a response (e.g. interrupted by timeout).
     for call_id in pending_order:
@@ -580,65 +624,120 @@ async def main() -> None:
         return str(result.get("resolution", UNKNOWN_RESOLUTION))
 
     # ── 7. Create ADK agent ───────────────────────────────────────────────────
-    agent = LlmAgent(
-        name=AGENT_NAME,
-        model=LiteLlm(model=ADK_MODEL),
-        tools=[bash, ask_human],
-        instruction=instruction,
-        # temperature=1.0 matches ask_config_gemini_3-1_pro_preview_customtools.yaml
-        generate_content_config=genai_types.GenerateContentConfig(temperature=1.0),
-    )
-    session_service = InMemorySessionService()
-    runner          = Runner(
-        agent=agent,
-        app_name="trust_horizon_swe",
-        session_service=session_service,
-    )
-    session = await session_service.create_session(
-        app_name="trust_horizon_swe",
-        user_id="swe_user",
-    )
-    run_config = RunConfig(max_llm_calls=MAX_TURNS)
+    # Route LiteLlm calls through the LiteLLM proxy by passing api_base and
+    # api_key.  The "gemini/" model prefix is kept as-is so litellm uses the
+    # Google AI Studio handler, which respects api_base without needing local
+    # GCP credentials (unlike the "vertex_ai/" handler which tries ADC first).
+    _litellm_kwargs: dict = {}
+    if LITELLM_BASE_URL:
+        _litellm_kwargs["api_base"] = LITELLM_BASE_URL
+    if LITELLM_API_KEY:
+        _litellm_kwargs["api_key"] = LITELLM_API_KEY
+    # Increase per-call LLM timeout from litellm's 600 s default to 1200 s (20 min).
+    # num_retries is intentionally NOT set: retry policy is handled at the harness
+    # level (the MAX_RETRIES loop below) so all four agents have exactly the same
+    # number of total attempts (3).  Setting num_retries here would give ADK up to
+    # 3 × 3 = 9 effective attempts vs 3 for Claude/Codex/OpenCode.
+    _litellm_kwargs["timeout"] = 1200
+
+    # The user-turn message is constant across retry attempts.
     new_message = genai_types.Content(
         role="user",
         parts=[genai_types.Part(text=prompt)],
     )
 
-    # ── 8. Run agent (with timeout) ───────────────────────────────────────────
+    # ── 8. Run agent with up to MAX_RETRIES attempts ───────────────────────────
+    # Each attempt re-creates the agent and session from scratch so there is no
+    # stale state carried over from a failed attempt.  The sidecar (started in
+    # step 5) is shared across all attempts; its event lists are cleared on retry.
+    # Retries occur only on sdk_error (transient LLM / network failures); timeout
+    # and clean exits (complete / max_turns) exit the loop immediately.
+    MAX_RETRIES   = 3
     timed_out     = False
     sdk_error_msg: str | None = None
     stop_reason   = "complete"
 
-    async def _run_agent() -> None:
-        nonlocal timed_out, sdk_error_msg, stop_reason
+    _run_wall_start = time.monotonic()
+
+    for _attempt in range(1, MAX_RETRIES + 1):
+        # Reset per-attempt mutable state (lists cleared in-place so closures remain valid)
+        all_events.clear()
+        adk_events.clear()
+        timed_out     = False
+        sdk_error_msg = None
+        stop_reason   = "complete"
+
+        # Re-create agent + session (fresh state for each attempt)
+        agent = LlmAgent(
+            name=AGENT_NAME,
+            model=LiteLlm(model=ADK_MODEL, **_litellm_kwargs),
+            tools=[bash, ask_human],
+            instruction=instruction,
+            # temperature=1.0 matches ask_config_gemini_3-1_pro_preview_customtools.yaml
+            generate_content_config=genai_types.GenerateContentConfig(temperature=1.0),
+        )
+        session_service = InMemorySessionService()
+        runner          = Runner(
+            agent=agent,
+            app_name="trust_horizon_swe",
+            session_service=session_service,
+        )
+        session = await session_service.create_session(
+            app_name="trust_horizon_swe",
+            user_id="swe_user",
+        )
+        run_config = RunConfig(max_llm_calls=MAX_TURNS)
+
+        # _run_agent closes over `runner`, `session`, `adk_events` (the module-level
+        # list) by name — they are re-looked-up on each call, so reassigning those
+        # variables above before defining _run_agent is safe.
+        async def _run_agent() -> None:
+            nonlocal timed_out, sdk_error_msg, stop_reason
+            try:
+                async for event in runner.run_async(
+                    user_id=session.user_id if hasattr(session, "user_id") else "swe_user",
+                    session_id=session.id,
+                    new_message=new_message,
+                    run_config=run_config,
+                ):
+                    adk_events.append(event)
+            except LlmCallsLimitExceededError:
+                # Expected: agent used all its turns.  Partial results are still valid.
+                stop_reason = "max_turns"
+            except asyncio.CancelledError:
+                # Raised when we cancel the task on timeout — handled below.
+                timed_out   = True
+                stop_reason = "timeout"
+                raise
+            except Exception as exc:
+                sdk_error_msg = str(exc)
+                stop_reason   = "sdk_error"
+
+        # Each attempt is individually capped at PER_ATTEMPT_TIMEOUT_S (1200 s = 20 min).
+        # min() with remaining wall-clock ensures we never overshoot ATTEMPT_TIMEOUT_MS.
+        PER_ATTEMPT_TIMEOUT_S = 1200.0
+        elapsed_ms      = (time.monotonic() - _run_wall_start) * 1000
+        remaining_ms    = max(0.0, TIMEOUT_MS - elapsed_ms)
+        attempt_timeout = min(remaining_ms / 1000, PER_ATTEMPT_TIMEOUT_S)
+
         try:
-            async for event in runner.run_async(
-                user_id=session.user_id if hasattr(session, "user_id") else "swe_user",
-                session_id=session.id,
-                new_message=new_message,
-                run_config=run_config,
-            ):
-                adk_events.append(event)
-        except LlmCallsLimitExceededError:
-            # Expected: agent used all its turns.  Partial results are still valid.
-            stop_reason = "max_turns"
-        except asyncio.CancelledError:
-            # Raised when we cancel the task on timeout — handled below.
+            await asyncio.wait_for(_run_agent(), timeout=attempt_timeout)
+        except asyncio.TimeoutError:
             timed_out   = True
             stop_reason = "timeout"
-            raise
-        except Exception as exc:
-            sdk_error_msg = str(exc)
-            stop_reason   = "sdk_error"
+        except asyncio.CancelledError:
+            timed_out   = True
+            stop_reason = "timeout"
 
-    try:
-        await asyncio.wait_for(_run_agent(), timeout=TIMEOUT_MS / 1000)
-    except asyncio.TimeoutError:
-        timed_out   = True
-        stop_reason = "timeout"
-    except asyncio.CancelledError:
-        timed_out   = True
-        stop_reason = "timeout"
+        # Retry only on transient sdk_error (not on timeout or clean exits).
+        if stop_reason == "sdk_error" and _attempt < MAX_RETRIES and remaining_ms > 0:
+            label = f"[{uid[:12]}|{MODE}|p{PASS_INDEX}]"
+            print(
+                f"{label} sdk_error on attempt {_attempt}/{MAX_RETRIES}, retrying: {sdk_error_msg}",
+                file=sys.stderr,
+            )
+            continue
+        break
 
     # ── 9. Collect final patch and build outputs ──────────────────────────────
     patch_content = await _git_diff(WORKSPACE)

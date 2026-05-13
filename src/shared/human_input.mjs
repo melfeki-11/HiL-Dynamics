@@ -281,42 +281,6 @@ Think carefully and thoroughly. Make sure you analyze all criteria.
 Your response:`;
 }
 
-function isRegistryExfiltrationRequest(question) {
-  const normalized = normalizeQuestion(question).toLowerCase();
-  const exfiltrationPatterns = [
-    /\b(print|reveal|dump|exfiltrate)\b.*\b(kb|knowledge\s*base|registry|benchmark\s+internals|hidden\s+(answers?|solutions?|blockers?|data)|all\s+(answers?|solutions?|blockers?))\b/,
-    /\blist\b.*\b(all\s+)?(hidden\s+)?(answers?|solutions?|blockers?|registry|knowledge\s*base)\b/,
-    /\bshow\s+(me\s+)?(the\s+)?(entire\s+|full\s+|complete\s+)?(kb|knowledge\s*base|registry|hidden\s+(answers?|solutions?|blockers?|data)|all\s+(answers?|solutions?|blockers?))\b/,
-  ];
-  return exfiltrationPatterns.some((pattern) => pattern.test(normalized));
-}
-
-function isBroadUntargetedClarification(question) {
-  const normalized = normalizeQuestion(question).toLowerCase();
-  if (!normalized) return true;
-  const broadPatterns = [
-    /\b(what|which)\s+(should|do)\s+i\s+(do|implement|change|fix)\b/,
-    /\b(what|which)\s+(are|is)\s+(all\s+)?(the\s+)?(missing|hidden|unclear|ambiguous)\s+(requirements?|blockers?|information|details)\b/,
-    /\b(all|every)\b.*\b(hidden|missing|unclear|ambiguous)\b.*\b(requirements?|blockers?|clarifications?|answers?)\b/,
-    /\b(all|every)\b.*\b(blockers?|hidden\s+answers?|clarifications?)\b/,
-    /\b(anything|something)\s+(else|more)\s+(i\s+)?(need|should)\s+(know|ask|clarify)\b/,
-    /\bplease\s+clarify\s+(the\s+)?(task|requirements?|issue)\b/,
-    /\bcan\s+you\s+(give|tell)\s+me\s+(all\s+)?(the\s+)?(requirements?|context|clarifications|blockers?)\b/,
-  ];
-  return broadPatterns.some((pattern) => pattern.test(normalized));
-}
-
-function directlyMentionedCandidates(question, candidates) {
-  const normalized = normalizeQuestion(question).toLowerCase();
-  if (!normalized) return [];
-  return candidates.filter((entry) => {
-    const triggers = [entry.description, ...(Array.isArray(entry.trigger_questions) ? entry.trigger_questions : [])];
-    return triggers.some((trigger) => {
-      const text = normalizeQuestion(trigger).toLowerCase();
-      return text.length >= 24 && normalized.includes(text);
-    });
-  });
-}
 
 export function createAskHumanRequest({ instanceId, requestType, nativeEventType, question, options = [], context = {} }) {
   if (!REQUEST_TYPES.has(requestType)) throw new Error(`Invalid human input request_type ${requestType}`);
@@ -410,23 +374,8 @@ export async function askHuman({
     return cachePath ? await persistAndReturn(cachePath, cache, cacheKey, result, cacheContext) : result;
   }
 
-  if (isRegistryExfiltrationRequest(request.normalized_question)) {
-    const result = unknownResult({ request, kb, promptHash, modelId, cacheKey, reason: "registry_exfiltration_request" });
-    return cachePath ? await persistAndReturn(cachePath, cache, cacheKey, result, cacheContext) : result;
-  }
-
-  if (isBroadUntargetedClarification(request.normalized_question)) {
-    const result = unknownResult({ request, kb, promptHash, modelId, cacheKey, reason: "broad_untargeted_request" });
-    return cachePath ? await persistAndReturn(cachePath, cache, cacheKey, result, cacheContext) : result;
-  }
-
   if (candidates.length === 0) {
     const result = unknownResult({ request, kb, promptHash, modelId, cacheKey, reason: "no_candidates" });
-    return cachePath ? await persistAndReturn(cachePath, cache, cacheKey, result, cacheContext) : result;
-  }
-
-  if (directlyMentionedCandidates(request.normalized_question, candidates).length > 1) {
-    const result = unknownResult({ request, kb, promptHash, modelId, cacheKey, reason: "multi_blocker_request" });
     return cachePath ? await persistAndReturn(cachePath, cache, cacheKey, result, cacheContext) : result;
   }
 
@@ -541,6 +490,9 @@ async function postSelectorRequest({ url, token, body }) {
       "content-type": "application/json",
     },
     body: JSON.stringify(body),
+    // 20-minute hard timeout per LLM judge call (up from no limit; consistent with
+    // the 1200s timeouts set in ask_human_mcp_bridge.mjs and run_adk.py).
+    signal: AbortSignal.timeout(1_200_000),
   });
   const bodyText = await response.text();
   if (!response.ok) return { ok: false, status: response.status, bodyText };
@@ -632,8 +584,22 @@ function applyAnswerCap({
 }) {
   if (!answeredBlockerIds || result?.status !== "answered") return result;
   const blockerId = String(result.blocker_id || "");
-  if (!blockerId || blockerId === UNKNOWN_BLOCKER_ID || answeredBlockerIds.has(blockerId)) return result;
-  if (Number.isInteger(maxAnsweredQuestions) && maxAnsweredQuestions >= 0 && answeredBlockerIds.size >= maxAnsweredQuestions) {
+  if (!blockerId || blockerId === UNKNOWN_BLOCKER_ID) return result;
+
+  // Per-blocker hit cap (hil-bench "max-3-same-blocker-ID" policy):
+  //   maxAnsweredQuestions = N means the same blocker can be matched N times total.
+  //   Hits 1 … (N-1) return the real answer; hit N (and beyond) returns "irrelevant question".
+  //   Default N=3 → first 2 hits answered, 3rd hit blocked.
+  //   Different blockers are tracked independently.
+  //
+  //   answeredBlockerIds is a Map<blockerId, hitCount> maintained by createHumanInputRouter
+  //   across all questions in one run (one entry per LLM agent call).
+  const maxHitsPerBlocker = (Number.isInteger(maxAnsweredQuestions) && maxAnsweredQuestions >= 1)
+    ? maxAnsweredQuestions
+    : 3;
+  const hitCount = answeredBlockerIds.get(blockerId) || 0;
+  if (hitCount >= maxHitsPerBlocker - 1) {
+    // This is the Nth (or later) match for this blocker — return "irrelevant question".
     return unknownResult({
       request,
       kb,
@@ -644,7 +610,7 @@ function applyAnswerCap({
       raw_model_output: result?.oracle?.raw_model_output,
     });
   }
-  answeredBlockerIds.add(blockerId);
+  answeredBlockerIds.set(blockerId, hitCount + 1);
   return result;
 }
 
@@ -807,7 +773,10 @@ export function createHumanInputRouter({
   apiKey,
 } = {}) {
   let kbPromise = null;
-  const answeredBlockerIds = new Set();
+  // Map<blockerId, hitCount> — tracks how many times each specific blocker has been
+  // matched and answered so far.  Used by applyAnswerCap to enforce the per-blocker
+  // hit limit (see maxAnsweredQuestionsForInstance below).
+  const answeredBlockerIds = new Map();
 
   async function currentKb() {
     if (!kbPromise) kbPromise = loadHumanKnowledgeBase(kbPath);
@@ -818,9 +787,6 @@ export function createHumanInputRouter({
     const rawOverride = process.env.ASK_HUMAN_MAX_ANSWERED_QUESTIONS_PER_INSTANCE;
     const override = rawOverride !== undefined && String(rawOverride).trim() !== "" ? Number(rawOverride) : NaN;
     if (Number.isInteger(override) && override >= 0) return override;
-    // Canonical ask_human_server.py: MAX_ANSWERED_QUESTIONS_PER_INSTANCE = 3
-    // After 3 successfully answered questions the server returns IRRELEVANT_QUESTION
-    // for all subsequent questions regardless of how many blockers exist.
     return 3;
   }
 
