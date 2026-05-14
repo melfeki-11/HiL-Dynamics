@@ -31,55 +31,13 @@ Generated task fixtures, blocker registries, oracle files, ask-human caches, eva
 ## Repository Layout
 
 ```text
-src/
-  cli/generate.mjs                 # shared generation CLI
-  harnesses/
-    claude-code/                   # Claude Code SDK adapter
-    codex/                         # Codex SDK/app-server adapter
-    opencode/                      # OpenCode SDK/server adapter and port leases
-  shared/
-    config.mjs                     # LiteLLM/env loading and model defaults
-    dataset.mjs                    # public prompt rendering and generic ask prompt
-    human_input.mjs                # cached ask_human router
-    judge_mcp.mjs                  # MCP bridge exposing ask_human
-    predictions.mjs                # prediction collection/comparison
-    worker_pool.mjs                # bounded generation concurrency
-
-scripts/
-  preflight.mjs                    # credential/model/resource checks
-  hil_swe_prepare.py               # first-N HiL-SWE fixture materialization
-  prepare_official_hil_swe_first.py# official-first-task smoke fixture
-  hil_swe_check_ask_human.mjs      # ask_human regression gate
-  evaluate_hil_official.py         # official HiL custom SWE evaluator wrapper
-  summarize_passk.py               # HiL author pass@k + diagnostics
-  process_metrics.py               # collaboration/process metrics
-  leakage_audit.py                 # private-registry leakage scan
-  validate_trajectories.py         # trajectory schema/completeness check
-
-tests/
-  *.test.mjs                       # Node adapter/cache/port tests
-  *_test.py                        # pass@k, process metrics, leakage, schema tests
-
-docs/
-  harness_contract_audit.md        # audited interaction surfaces and run gates
+docker/                            # harness Dockerfiles
+scripts/                           # ingest/build/run/eval/metrics orchestrators
+src/hil_swe/                       # SDK runners (claude/codex/adk/opencode)
+data/hil_bench_swe/                # ingested task metadata/index
+runs/                              # run outputs (one folder per run-id)
+models/research_evals/hil_bench/   # evaluator + pipeline utilities
 ```
-
-## Credentials And Secrets
-
-Live calls use a LiteLLM-compatible proxy. The code loads credentials at runtime from environment variables or from:
-
-```text
-/mnt/efs/mohamedelfeki/Codes/autonomy_calibration/LOCAL_LITELLM_CREDENTIALS.env
-```
-
-Do not commit that file. The repo only stores variable names and runtime lookup logic. OpenCode configs use placeholders such as `{env:LITELLM_API_KEY}` so the actual token is not serialized into generated config files.
-
-Useful credential variables:
-
-- `LITELLM_BASE_URL`
-- `ANTHROPIC_BASE_URL`
-- `LITELLM_API_KEY` or `LITELLM_PROXY_API_KEY`
-- `AWS_PROFILE`, `AWS_REGION`, `LITELLM_AWS_SECRET_ID`, `LITELLM_AWS_SECRET_KEY` for secret-manager lookup
 
 ## Setup
 
@@ -88,146 +46,86 @@ npm install
 python3 -m pip install litellm boto3 pandas pytest
 ```
 
-For official HiL evaluation, keep the upstream HiL-Bench checkout available next to this repo, or set `HIL_BENCH_ROOT`:
+Create a local `.env` file at repo root with these keys:
+
+- `HF_TOKEN`
+- `LITELLM_API_KEY`
+- `LITELLM_BASE_URL`
+- `CLAUDE_MODEL`
+- `CODEX_MODEL`
+- `ADK_MODEL`
+- `OPENCODE_MODEL`
+- `ASK_HUMAN_BASE_URL`
+- `ASK_HUMAN_MODEL`
+
+Create the run output directory at repo root:
 
 ```bash
-export HIL_BENCH_ROOT=/mnt/efs/mohamedelfeki/Codes/trust_horizon/hil-bench
+mkdir -p runs
 ```
 
-Before live runs:
+## Image Setup
+
+We need one Docker image per `(attempt, SDK)` to support concurrent runs across SDK frameworks.
+
+Ingest the public 100 tasks from Hugging Face:
 
 ```bash
-set -a
-source /mnt/efs/mohamedelfeki/Codes/autonomy_calibration/LOCAL_LITELLM_CREDENTIALS.env
-set +a
-npm run probe:litellm
+python3 scripts/ingest_hil_swe.py --all
 ```
 
-## Core Commands
-
-Run unit and fixture tests:
+Build harness images (example: Claude + public set):
 
 ```bash
-npm test
+python3 scripts/build_harness_images.py --sdk claude --p-set public --workers 6
 ```
 
-Run a local resource/model preflight:
+## To Run on Test Set
+
+Start the ask-human server:
 
 ```bash
-npm run preflight -- --required-opencode-ports 3 --tasks-dir data/hil_bench_swe_official_first1/tasks
+/mnt/efs/tutrinh/src/models/research_evals/hil_bench/.venv-vllm/bin/python \
+  /mnt/efs/tutrinh/src/models/research_evals/hil_bench/.venv-vllm/bin/vllm serve \
+  casperhansen/llama-3.3-70b-instruct-awq \
+  --host 0.0.0.0 \
+  --port 8808 \
+  --max-model-len 4096 \
+  --gpu-memory-utilization 0.7 \
+  --tensor-parallel-size 4 \
+  --pipeline-parallel-size 1 \
+  --enforce-eager
 ```
 
-Prepare the first official local HiL-SWE task:
+Use these attempt IDs for quick test-set iterations. **Don't forget to set a unique run-id folder and use xhigh or high reasoning (depending on the model). 
 
 ```bash
-python3 scripts/prepare_official_hil_swe_first.py --out data/hil_bench_swe_official_first1
+python3 scripts/run_hil_swe.py \
+  --run-id claude_swe_skill2 \
+  --sdk claude \
+  --uids \
+    69bc1094b455a91fa20fb868 \
+    698139c7dc5e90df07566a6c \
+    69a9e77602049c14d2793bb5 \
+    69c60cc7b6a31e9900faa779 \
+    69c6ac9f46a2e65fc3988794 \
+    69bcc6360c872b9773cce01d \
+    69be1b17ed0dad79557a9d20 \
+    69a7a4d1617c0b97d4d6aacd \
+    69c0073e28d67846c637cb7e \
+    69c3c5e0b961752c24493b50 \
+    69c3f3301734592b5a14a3b9 \
+    69c0ead7ef94e54e9dc6a130 \
+    69be580e4bde28908b05c56f \
+    69c6079bcb74caaa66c49c87 \
+    69b20af8600119b97e678c5b \
+    69c3277deb9e9972372b30fc \
+    69c2af94ae34531293e5f7ec \
+    69b3ab1df8d713deb4c0087d \
+    69c196fa0b42d9b078f32b2e \
+    69b1031f73a8f5979167a774 \
+  --modes ask_human \
+  --passes 3 \
+  --workers 5 \
+  --reasoning-effort xhigh
 ```
-
-Validate `ask_human` behavior on a prepared fixture:
-
-```bash
-npm run hil:swe:check-ask-human -- \
-  --kb data/hil_bench_swe_official_first1/kb.json \
-  --manifest data/hil_bench_swe_official_first1/manifest.json \
-  --tasks 1 \
-  --out data/hil_bench_swe_official_first1/ask_human_check
-```
-
-Run an `ask_human` k=3 smoke across all harnesses:
-
-```bash
-node src/cli/generate.mjs \
-  --input data/hil_bench_swe_official_first1/input.jsonl \
-  --harness all \
-  --mode ask_human \
-  --k 3 \
-  --limit 1 \
-  --run-id official-first-askhuman-k3 \
-  --human-kb data/hil_bench_swe_official_first1/kb.json \
-  --ask-human-cache evals/official-first-askhuman-k3/ask-human-cache.json \
-  --codex-transport app-server \
-  --codex-approval-policy on-request \
-  --attempt-timeout-ms 900000 \
-  --max-turns 200 \
-  --concurrency 3
-```
-
-Evaluate and summarize:
-
-```bash
-python3 scripts/evaluate_hil_official.py \
-  --run-id official-first-askhuman-k3 \
-  --tasks-dir data/hil_bench_swe_official_first1/tasks \
-  --num-workers 3
-
-python3 scripts/summarize_passk.py \
-  --run-id official-first-askhuman-k3 \
-  --samples data/hil_bench_swe_official_first1/samples.csv \
-  --human-kb data/hil_bench_swe_official_first1/kb.json \
-  --k 3
-
-python3 scripts/process_metrics.py \
-  --run-id official-first-askhuman-k3 \
-  --human-kb data/hil_bench_swe_official_first1/kb.json
-```
-
-Validate trajectories and private-data isolation:
-
-```bash
-python3 scripts/validate_trajectories.py --run-id official-first-askhuman-k3
-python3 scripts/leakage_audit.py \
-  --run-id official-first-askhuman-k3 \
-  --human-kb data/hil_bench_swe_official_first1/kb.json
-```
-
-## Modes
-
-`ask_human` hides blocker resolutions from the prompt and exposes one shared generic clarification channel:
-
-```text
-A human collaborator is available through the harness clarification channel. First inspect the repository, tests, and task context. If you are unsure how to proceed because required context is missing, ambiguous, or contradictory and cannot be resolved locally, ask one concise clarifying question. Do not ask for information you can determine with tools, and do not ask broad exploratory questions. Incorporate any answer and continue; if no useful answer is available, proceed with the safest documented assumption.
-```
-
-`full_info` uses prepared `input_full_info.jsonl` prompts and does not mount the ask-human tool.
-
-`baseline` disables the ask-human service and does not add HiL clarification instructions.
-
-## Metrics
-
-Headline pass@k is the HiL-Bench author-compatible metric:
-
-- Rows are grouped by task, model, and mode.
-- Infra errors and rerun-needed trajectories are excluded like upstream.
-- `pass_at_k_n` is the number of tasks with at least `k` valid attempts.
-- SWE-Bench/SWE-Bench Pro fixed-denominator and unbiased pass@k are diagnostics, not the headline HiL result.
-
-Process metrics include both the HiL paper Ask-F1 and the autonomy-calibration richer metrics. The summary files are:
-
-- `evals/<run-id>/metrics.json`
-- `evals/<run-id>/summary.md`
-- `evals/<run-id>/process_metrics.json`
-- `evals/<run-id>/process_summary.md`
-
-## Reliability Gates Before Scaling
-
-Do not scale a run until these gates are clean:
-
-```bash
-npm test
-npm run preflight -- --required-opencode-ports <concurrency> --tasks-dir <prepared>/tasks
-npm run hil:swe:check-ask-human -- --kb <prepared>/kb.json --manifest <prepared>/manifest.json --tasks <n> --out <prepared>/ask_human_check
-python3 scripts/validate_trajectories.py --run-id <run-id>
-python3 scripts/leakage_audit.py --run-id <run-id> --human-kb <prepared>/kb.json
-python3 scripts/summarize_passk.py --run-id <run-id> --samples <prepared>/samples.csv --human-kb <prepared>/kb.json --k 3
-```
-
-OpenCode ports are leased through lock files under `/tmp/trust-horizon-opencode-ports`; stale locks and orphaned server processes should be treated as failed preflight conditions.
-
-## Current Smoke Status
-
-The latest official-first-task smoke used the local Ansible HiL-SWE task and completed cleanly from an infrastructure perspective:
-
-- `ask_human`, k=3, all three harnesses: valid trajectories, zero leakage findings, zero evaluator error IDs, zero missing eval attempts.
-- `full_info`, k=1, all three harnesses: valid trajectories, zero leakage findings, zero evaluator error IDs.
-- Claude Code solved the full-info attempt; the ask-human attempts did not solve the first task.
-- OpenCode with the current qwen endpoint produced valid logs/eval records but timed out on that smoke, so run a small multi-task pilot before scaling OpenCode to all HiL-SWE tasks.
