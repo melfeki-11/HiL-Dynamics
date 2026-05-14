@@ -40,6 +40,10 @@ export async function installAgentsSkill(workspaceDir, toolName) {
   return installSkillAt(path.join(workspaceDir, ".agents", "skills"), toolName);
 }
 
+export async function installOpenCodeSkill(workspaceDir, toolName) {
+  return installSkillAt(path.join(workspaceDir, ".opencode", "skills"), toolName);
+}
+
 export async function installClaudeSkill(workspaceDir, toolName) {
   return installSkillAt(path.join(workspaceDir, ".claude", "skills"), toolName);
 }

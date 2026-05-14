@@ -60,23 +60,24 @@ Environment variables (read from host env, forwarded into each container):
     LITELLM_BASE_URL       LiteLLM proxy base URL
 
   Optional:
-    LITELLM_API_KEY        fallback API key
-    LITELLM_PROXY_API_KEY  fallback API key
-    ASK_HUMAN_BASE_URL     override URL for ask_human vLLM judge
-    ASK_HUMAN_MODEL        override ask_human judge model slug
-    CLAUDE_MODEL           model slug for the agent when --sdk claude (default: claude-sonnet-4-6)
-    CODEX_MODEL            model slug for the agent when --sdk codex  (default: gpt-5.5)
-    ADK_MODEL              model slug for the agent when --sdk adk    (default: gemini/gemini-3.1-pro-preview-customtools)
-    OPENCODE_MODEL         model slug for the agent when --sdk opencode (default: fireworks_ai/glm-5p1)
-    CLAUDE_REASONING_EFFORT reasoning effort for Claude SDK query options (low|medium|high|xhigh|max)
-    CODEX_REASONING_EFFORT reasoning effort for Codex app-server (none|minimal|low|medium|high|xhigh)
-    ADK_REASONING_EFFORT   best-effort reasoning effort forwarded to LiteLLM (string)
-    OPENCODE_REASONING_EFFORT reasoning effort for OpenCode provider config (low|medium|high|xhigh|max)
-    LITELLM_CALL_TIMEOUT_MS  per-LiteLLM-call timeout in ms (default: 1200000 / 20 min)
-    STEP_LITELLM_TRIES       retries per agent step/call budget (default: 3)
-    MAX_TURNS              max agent turns (default: 200)
-    ATTEMPT_TIMEOUT_MS     per-attempt timeout in ms (default: 10800000)
-    PERMISSION_MODE        claude permissionMode (default: acceptEdits)
+    LITELLM_API_KEY             fallback API key
+    LITELLM_PROXY_API_KEY       fallback API key
+    ASK_HUMAN_BASE_URL          override URL for ask_human LiteLLM judge
+    ASK_HUMAN_MODEL             override ask_human judge model slug
+    CLAUDE_MODEL                model slug for the agent when --sdk claude (default: claude-sonnet-4-6)
+    CODEX_MODEL                 model slug for the agent when --sdk codex  (default: gpt-5.5)
+    ADK_MODEL                   model slug for the agent when --sdk adk    (default: gemini/gemini-3.1-pro-preview-customtools)
+    OPENCODE_MODEL              model slug for the agent when --sdk opencode (default: fireworks_ai/glm-5p1)
+    CLAUDE_REASONING_EFFORT     reasoning effort for Claude SDK query options (low|medium|high|xhigh|max)
+    CODEX_REASONING_EFFORT      reasoning effort for Codex app-server (none|minimal|low|medium|high|xhigh)
+    ADK_REASONING_EFFORT        best-effort reasoning effort forwarded to LiteLLM (string)
+    OPENCODE_REASONING_EFFORT   reasoning effort for OpenCode provider config (low|medium|high|xhigh|max)
+    OPENCODE_STARTUP_TIMEOUT_MS startup watchdog before first OpenCode stdout event (default: 300000)
+    LITELLM_CALL_TIMEOUT_MS     per-LiteLLM-call timeout in ms (default: 1200000 / 20 min)
+    STEP_LITELLM_TRIES          retries per agent step/call budget (default: 3)
+    MAX_TURNS                   max agent turns (default: 200)
+    ATTEMPT_TIMEOUT_MS          per-attempt timeout in ms (default: 10800000)
+    PERMISSION_MODE             claude permissionMode (default: acceptEdits)
 """
 
 from __future__ import annotations
@@ -187,8 +188,9 @@ SDK_CONFIGS = {
         "default_model":        "gemini/gemini-3.1-pro-preview-customtools",
         "executable_env":       "ADK_SUPPRESS_GEMINI_LITELLM_WARNINGS=true",
         # python3.adk is a versioned symlink created by Dockerfile.harness that
-        # always points at a Python >=3.9 binary with google-adk[extensions]
-        # installed.  It deliberately avoids overriding the task's own python3
+        # points to an isolated ADK virtualenv (Python >=3.10) with
+        # google-adk/litellm/skills dependencies installed. It deliberately
+        # avoids overriding the task's own python3
         # (which may be 3.8) so agent bash tool calls like "python3 -m pytest"
         # still use the task's expected Python and its installed packages.
         "runtime":              "python3.adk",
@@ -234,6 +236,7 @@ FORWARDED_ENV_KEYS = [
     "OPENCODE_MODEL",
     "OPENCODE_REASONING_EFFORT",
     "OPENCODE_REASONING",  # backward-compat alias
+    "OPENCODE_STARTUP_TIMEOUT_MS",
     "LITELLM_CALL_TIMEOUT_MS",
     "STEP_LITELLM_TRIES",
     "MAX_TURNS",

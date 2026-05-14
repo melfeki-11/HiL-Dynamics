@@ -687,14 +687,14 @@ async def main() -> None:
                 cwd=WORKSPACE,
             )
             try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
             except asyncio.TimeoutError:
                 try:
                     proc.kill()
                     await proc.wait()
                 except Exception:
                     pass
-                return "[command timed out after 120 seconds]"
+                return "[command timed out after 300 seconds]"
             output = (stdout + stderr).decode("utf-8", errors="replace")
             return output[:OBS_CAP] if len(output) > OBS_CAP else output
         except Exception as exc:

@@ -20,6 +20,9 @@
  *   RUN_ID                  run identifier string
  *   MAX_TURNS               max agent steps (default: 200)
  *   ATTEMPT_TIMEOUT_MS      hard timeout in ms (default: 10800000 = 3 h)
+ *   OPENCODE_STARTUP_TIMEOUT_MS
+ *                           startup watchdog in ms before first stdout line
+ *                           (default: 300000 = 5 min)
  *   TASK_DIR                path to mounted task dir (default: /task)
  *   OUTPUT_DIR              path to mounted output dir (default: /output)
  *   ASK_HUMAN_BASE_URL      override base URL for ask_human judge
@@ -36,19 +39,20 @@
  *                     in num_questions_full_info (same rule as Claude + Codex + ADK)
  *
  * Tool approvals:
- *   --dangerously-skip-permissions auto-approves all permission.asked events inside run.ts
- *   before they are emitted to our stdout. We never see or mis-count them as questions.
+ *   In SDK/server mode we set agent.build.permission edit/bash to "allow" in
+ *   opencodeConfig, so no interactive permission round-trip is required.
  */
 
 import path     from "node:path";
 import fs       from "node:fs/promises";
 import http     from "node:http";
+import net      from "node:net";
 import { spawn } from "node:child_process";
-import readline from "node:readline";
 import { fileURLToPath } from "node:url";
+import { createOpencode } from "@opencode-ai/sdk";
 
 import { buildSwePrompt } from "./prompt.mjs";
-import { installAgentsSkill, SKILL_TOOL_REF } from "./skills.mjs";
+import { installOpenCodeSkill, SKILL_TOOL_REF } from "./skills.mjs";
 import {
   WORKSPACE, TASK_DIR, OUTPUT_DIR,
   MODE, PASS_INDEX, RUN_ID, TIMEOUT_MS,
@@ -60,7 +64,7 @@ import {
 
 import { writeJson, writeText, ensureDir } from "../shared/io.mjs";
 import {
-  UNKNOWN_RESOLUTION, CANT_ANSWER, UNKNOWN_BLOCKER_ID,
+  UNKNOWN_RESOLUTION, UNKNOWN_BLOCKER_ID,
   ASK_HUMAN_REQUEST_TYPES, APPROVAL_REQUEST_TYPES,
 } from "../shared/human_input.mjs";
 
@@ -74,6 +78,7 @@ const OPENCODE_REASONING_EFFORT = (
   ""
 ).trim().toLowerCase();
 const OPENCODE_REASONING = !["", "0", "false", "no", "off", "none", "minimal", "low"].includes(OPENCODE_REASONING_EFFORT);
+const OPENCODE_STARTUP_TIMEOUT_MS = Number(process.env.OPENCODE_STARTUP_TIMEOUT_MS || "300000");
 
 // Strip any leading "litellm/" the caller may have included, keep the bare model name.
 // This is re-added as the config key: "model": "litellm/<modelId>".
@@ -303,110 +308,83 @@ function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
   };
 }
 
-// ── Trajectory extraction from OpenCode --format json events ──────────────────
+// ── Trajectory extraction from OpenCode server events ─────────────────────────
 //
-// OpenCode's `opencode run --format json` emits JSON lines to stdout.
-// Each line is: { type, timestamp, sessionID, ...data }
+// In SDK/server mode we collect SSE events from client.event.subscribe() and
+// convert message.part.updated events into SWE-compatible trajectory steps.
 //
-// Event types (from packages/opencode/src/cli/cmd/run.ts):
-//   "step_start"  — step boundary start; part: { type: "step-start", ... }
-//   "step_finish" — step boundary end;   part: { type: "step-finish", tokens, cost, ... }
-//   "text"        — completed assistant text block; part: { type: "text", text, time: { start, end } }
-//   "reasoning"   — thinking block (only when --thinking is set; we don't set it → safe to ignore)
-//   "tool_use"    — completed (or error) tool call; part: { type: "tool", tool, state, ... }
-//   "error"       — session.error event; error: { name, data?: { message } }
+// Relevant event shape:
+//   { type: "message.part.updated", properties: { sessionID, part: {...} } }
 //
-// The tool_use event for our ask_human MCP tool has:
-//   part.tool  = "ask_human"  (the MCP tool name as registered)
-//   part.state.input = { question: "..." }
-//   part.state.output = resolution string (e.g. "irrelevant question" or an actual answer)
-//
-// We do NOT see permission.asked events — run.ts handles them internally before emitting
-// to stdout. With --dangerously-skip-permissions they are auto-approved as "once".
-// They are never miscounted as questions.
-//
-// Trajectory algorithm:
-//   • Track current step using step_start / step_finish boundaries.
-//   • Within a step, the first "text" event becomes the "thought" for any tool calls
-//     in that step (subsequent tools get thought="").
-//   • Each "tool_use" event → one trajectory step {thought, act, obs}.
-//   • A step that has text but no tool_use → standalone {thought, act:"", obs:""} step.
-//   • An "error" event sets sdkError.
-
-function extractTrajectory(opencodeEvents) {
+// Part variants we care about:
+//   • text/reasoning  → thought
+//   • tool            → {thought, act, obs}
+//   • patch / command → treated as actions so steps remain informative even if
+//                       OpenCode emits non-tool action parts for edits/commands.
+function extractTrajectory(serverEvents) {
   const steps = [];
+  const seenPartIds = new Set();
   let pendingThought = "";
-  let stepHadTool    = false;
 
-  for (const ev of opencodeEvents) {
-    const { type } = ev;
+  for (const ev of serverEvents) {
+    if (ev?.type !== "message.part.updated") continue;
+    const part = ev?.properties?.part || {};
+    const partType = String(part.type || "").toLowerCase();
+    const partId = part.id || part.partID || part.partId || null;
+    if (partId && seenPartIds.has(partId)) continue;
+    if (partId) seenPartIds.add(partId);
 
-    if (type === "step_start") {
-      pendingThought = "";
-      stepHadTool    = false;
+    if (partType === "text" || partType === "reasoning") {
+      const text = String(part.text || part.content || "");
+      if (!pendingThought && text.trim()) pendingThought = cap(text, THOUGHT_CAP);
       continue;
     }
 
-    if (type === "text") {
-      const text = ev.part?.text || "";
-      // Only capture the first text in a step as the thought
-      if (!pendingThought && text.trim()) {
-        pendingThought = cap(text, THOUGHT_CAP);
-      }
-      continue;
-    }
-
-    if (type === "tool_use") {
-      const part     = ev.part || {};
-      const toolName = String(part.tool || "");
+    if (partType === "tool") {
+      const toolName = String(part.tool?.name || part.tool || part.name || "");
       const state    = part.state || {};
-      const input    = state.input  || {};
-      const isError  = state.status === "error";
-      const output   = isError ? (state.error || "") : (state.output || "");
+      const input    = state.input || part.input || part.args || {};
+      const isError  = state.status === "error" || part.status === "error";
+      const output   = isError
+        ? (state.error || part.error || "")
+        : (state.output || part.output || part.result || "");
 
-      // Build act string
       let act;
       if (toolName === "ask_human") {
-        // MCP ask_human tool — same format as ADK / Claude AskUserQuestion / Codex requestUserInput
         const q = String(input.question || "");
         act = cap(`ask_human ${q}`, ACT_CAP);
       } else if (toolName === "shell" || toolName === "bash") {
         const cmd = String(input.command || input.cmd || "");
         act = cap(cmd || JSON.stringify(input), ACT_CAP);
       } else {
-        // glob, read, write, edit, webfetch, websearch, task, todowrite, or any MCP tool
         let inputStr;
         try { inputStr = JSON.stringify(input); } catch { inputStr = String(input); }
         act = cap(`${toolName}: ${inputStr}`, ACT_CAP);
       }
 
-      const obs = cap(String(output), OBS_CAP);
-
-      steps.push({ thought: pendingThought, act, obs });
-      // Subsequent tools in the same step get an empty thought
+      steps.push({ thought: pendingThought, act, obs: cap(String(output), OBS_CAP) });
       pendingThought = "";
-      stepHadTool    = true;
       continue;
     }
 
-    if (type === "step_finish") {
-      // If the step had only text (no tool call), emit as a thought-only step
-      if (pendingThought && !stepHadTool) {
-        steps.push({ thought: pendingThought, act: "", obs: "" });
-      }
+    if (partType === "patch") {
+      const files = Array.isArray(part.files) ? part.files.filter(Boolean) : [];
+      const act = files.length ? `Edit: ${files.join(", ")}` : "Edit";
+      steps.push({ thought: pendingThought, act: cap(act, ACT_CAP), obs: "" });
       pendingThought = "";
-      stepHadTool    = false;
       continue;
     }
 
-    // "reasoning" and "error" are handled at the caller level
+    if (partType === "command") {
+      const cmd = String(part.command || "");
+      const output = String(part.output || part.result || "");
+      steps.push({ thought: pendingThought, act: cap(cmd, ACT_CAP), obs: cap(output, OBS_CAP) });
+      pendingThought = "";
+      continue;
+    }
   }
 
-  // Edge-case: run ended mid-step (e.g. timeout interrupted between step_start and step_finish)
-  if (pendingThought) {
-    steps.push({ thought: pendingThought, act: "", obs: "" });
-  }
-
+  if (pendingThought) steps.push({ thought: pendingThought, act: "", obs: "" });
   return steps;
 }
 
@@ -418,6 +396,25 @@ function sleep(ms) {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function unwrapSdkResponse(value) {
+  return value && typeof value === "object" && "data" in value ? value.data : value;
+}
+
+async function allocateLoopbackPort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.once("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const addr = srv.address();
+      const port = typeof addr === "object" && addr ? addr.port : 0;
+      srv.close((err) => {
+        if (err) reject(err);
+        else resolve(port);
+      });
+    });
+  });
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -451,7 +448,7 @@ async function main() {
   // 3. Build prompt and system instruction
   const prompt      = buildSwePrompt({ problemStatement, mode: MODE, blockers });
   const instruction = buildInstruction(MODE);
-  await installAgentsSkill(WORKSPACE, SKILL_TOOL_REF.opencode);
+  await installOpenCodeSkill(WORKSPACE, SKILL_TOOL_REF.opencode);
 
   // 4. Write attempt metadata
   await writeJson(path.join(OUTPUT_DIR, "attempt.json"), {
@@ -576,8 +573,11 @@ async function main() {
         mode:   "primary",
         steps:  MAX_TURNS,
         permission: {
-          edit:               "ask",
-          bash:               "ask",
+          // SDK/server mode does not use --dangerously-skip-permissions, so allow
+          // edit/bash directly inside the container sandbox (same trust boundary
+          // rationale used by Claude/Codex harnesses).
+          edit:               "allow",
+          bash:               "allow",
           webfetch:           "deny",
           external_directory: "deny",
         },
@@ -595,88 +595,37 @@ async function main() {
       },
     },
   };
-  const configJson = JSON.stringify(opencodeConfig);
+  // 7. Configure OpenCode runtime behavior for SDK/server mode.
+  //
+  // We no longer wrap `opencode run` CLI output.  Instead we drive OpenCode via
+  // its SDK/server APIs. These env flags still matter because the SDK starts the
+  // same OpenCode runtime under the hood.
+  process.env.OPENCODE_NO_UPDATE = "1";
+  process.env.HOME = "/tmp";
+  process.env.OPENAI_API_KEY = LITELLM_API_KEY;
+  process.env.OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER = "1";
+  process.env.OPENCODE_DISABLE_MODELS_FETCH = "1";
+  process.env.OPENCODE_DISABLE_LSP_DOWNLOAD = "1";
+  process.env.OPENCODE_FAST_BOOT = "1";
 
-  // 7. Spawn `opencode run --format json --dangerously-skip-permissions`
-  //
-  //    opencode is on PATH via the container's ENV PATH=/opt/trust_horizon/node_modules/.bin:...
-  //    The environment inherits all of process.env so TASK_UID, MODE, LITELLM_* etc. are all
-  //    available to the sidecar if OpenCode forks any child process.
-  //
-  //    OPENCODE_NO_UPDATE=1 suppresses any auto-update banner (belt-and-suspenders with autoupdate:false).
-  //    HOME=/tmp prevents OpenCode from reading/writing ~/.opencode config which could interfere.
-  //
-  //    PROMPT DELIVERY via stdin (not positional CLI arg):
-  //    run.ts wraps any positional arg containing spaces in double-quotes:
-  //      .map((arg) => (arg.includes(" ") ? `"${arg.replace(/"/g, '\\"')}"` : arg))
-  //    This would cause the agent to receive `"<prompt>"` with literal surrounding quotes.
-  //    Instead, we pass no positional args and pipe the prompt via stdin.  run.ts reads stdin
-  //    when process.stdin.isTTY is falsy (it is, for a pipe) via Bun.stdin.text(), then
-  //    appends it to message.  The agent receives "\n<prompt>" (the leading \n is harmless).
-  const ocEnv = {
-    ...process.env,
-    OPENCODE_CONFIG_CONTENT:     configJson,
-    OPENCODE_NO_UPDATE:          "1",
-    HOME:                        "/tmp",
-    // Ensure the LiteLLM API key is available under all names OpenCode might look for
-    OPENAI_API_KEY:              LITELLM_API_KEY,
-    // Prevent hang when --dir points to a large git repo.
-    //
-    // Root cause (discovered via binary analysis + --print-logs tracing):
-    //
-    // OpenCode initialises an inotify file watcher for the --dir workspace.  On a
-    // large git repository like /app (thousands of files), the inotify init blocks
-    // the Effect async scheduler indefinitely — the log stalls at:
-    //   service=file.watcher directory=/app backend=inotify
-    // and never reaches "server backend selected" or any LLM call.
-    //
-    // OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER=1 skips the watcher entirely.
-    // We don't need live file-change notifications: the agent issues explicit
-    // read/write/bash commands; it doesn't rely on reactive file watching.
-    //
-    // DISABLE_MODELS_FETCH prevents OpenCode from fetching the models catalog from
-    // models.dev on startup (60-minute refresh timer + initial fetch).  This avoids
-    // network I/O that times out in isolated harness containers.
-    //
-    // DISABLE_LSP_DOWNLOAD prevents downloading language-server binaries (clangd,
-    // jdtls, kotlin-ls, etc.) over the network.
-    //
-    // FAST_BOOT skips a "loading" readiness gate (makes app.ready return true
-    // immediately) to speed up session initialisation.
-    OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER: "1",
-    OPENCODE_DISABLE_MODELS_FETCH:             "1",
-    OPENCODE_DISABLE_LSP_DOWNLOAD:             "1",
-    OPENCODE_FAST_BOOT:                        "1",
-    // ENABLE_QUESTION_TOOL activates OpenCode's native ask_human/question tool (PR #5958).
-    // NOTE: Intentionally NOT set.  Our MCP-based ask_human bridge (registered via
-    // config.mcp.ask_human) is the question-asking mechanism.
-    // OPENCODE_ENABLE_QUESTION_TOOL: "1",
-  };
-
-  // 8. Spawn opencode and run with up to 3 attempts.
-  //
-  // Retries re-spawn the opencode process from scratch; they occur only on
-  // sdk_error (non-zero exit, session error event) and NOT on timeout — the
-  // overall TIMEOUT_MS wall-clock budget is shared across all attempts.
-  const opencodeEvents = [];  // raw JSON events from opencode stdout
+  // 8. Run OpenCode via SDK/server with up to 3 attempts.
+  const opencodeEvents = [];  // normalized server events for trajectory extraction
   let sdkError   = null;
   let timedOut   = false;
   let stopReason = "complete";
-  let stderrBuf  = "";
 
   const MAX_RETRIES = STEP_LITELLM_TRIES;
   const _runStart = Date.now();
 
   for (let _attempt = 1; _attempt <= MAX_RETRIES; _attempt++) {
-    // Reset per-attempt state (opencodeEvents cleared in-place so no outer ref breaks)
+    // Reset per-attempt state
     opencodeEvents.length = 0;
     sdkError   = null;
     timedOut   = false;
     stopReason = "complete";
-    stderrBuf  = "";
 
     const PER_ATTEMPT_TIMEOUT_MS = LITELLM_CALL_TIMEOUT_MS;
-    const remainingMs    = TIMEOUT_MS - (Date.now() - _runStart);
+    const remainingMs = TIMEOUT_MS - (Date.now() - _runStart);
     const attemptTimeout = Math.min(remainingMs, PER_ATTEMPT_TIMEOUT_MS);
     if (attemptTimeout <= 0) {
       timedOut   = true;
@@ -684,107 +633,103 @@ async function main() {
       break;
     }
 
-    const ocProc = spawn(
-      "opencode",
-      ["run", "--format", "json", "--dangerously-skip-permissions",
-       "--dir", WORKSPACE, "--agent", "build"],
-      {
-        env:   ocEnv,
-        stdio: ["pipe", "pipe", "pipe"],
-      },
-    );
+    let opencodeInstance = null;
+    let sessionId = null;
+    let stopEventReader = false;
+    let eventReaderPromise = null;
 
-    // Write system instruction + task prompt to stdin and close immediately.
-    //
-    // We prepend the system instruction here (not via agent.build.prompt) because
-    // agent.build.prompt triggers a hang with --dir /app (large repo) — see config comment.
-    // The model sees the instruction first in the user turn, which is standard practice
-    // for models that support chat/completions without a dedicated system-prompt field.
-    //
-    // Format: "<instruction>\n\n<task prompt>"
-    // Bun.stdin.text() in run.ts reads until EOF, gets the full string, and sends it
-    // as the initial user message.  The leading newline that run.ts prepends is harmless.
-    //
-    // Suppress EPIPE in the unlikely event the process crashes before reading stdin.
-    ocProc.stdin.on("error", () => {});
-    ocProc.stdin.end(`${instruction}\n\n${prompt}`, "utf8");
+    try {
+      const sdkPort = await allocateLoopbackPort();
+      opencodeInstance = await createOpencode({
+        port: sdkPort,
+        timeout: OPENCODE_STARTUP_TIMEOUT_MS,
+        config: opencodeConfig,
+      });
+      const client = opencodeInstance.client;
 
-    // Accumulate stderr for debugging — print on error/timeout only
-    ocProc.stderr.on("data", (chunk) => {
-      stderrBuf += chunk.toString();
-      // Bound the stderr buffer to avoid memory blowup on very chatty runs
-      if (stderrBuf.length > 64_000) {
-        stderrBuf = stderrBuf.slice(-32_000);
-      }
-    });
+      // Create a dedicated session for this attempt.
+      const createdSessionResp = await client.session.create({
+        body: { title: `hil_swe_${uid.slice(0, 12)}_${MODE}_p${PASS_INDEX}_a${_attempt}` },
+      });
+      const createdSession = unwrapSdkResponse(createdSessionResp);
+      sessionId = String(createdSession?.id || createdSession?.session?.id || "");
+      if (!sessionId) throw new Error("OpenCode SDK did not return a valid session id");
 
-    // Parse stdout line-by-line as JSON events
-    const ocRl = readline.createInterface({ input: ocProc.stdout, terminal: false });
-    ocRl.on("line", (line) => {
-      const trimmed = line.trim();
-      if (!trimmed) return;
-      try {
-        const ev = JSON.parse(trimmed);
-        opencodeEvents.push(ev);
-        // Capture session errors immediately
-        if (ev.type === "error") {
-          const errData = ev.error || {};
-          let errMsg = String(errData.name || "opencode error");
-          if (errData.data?.message) errMsg = String(errData.data.message);
-          if (!sdkError) sdkError = errMsg;
+      // Collect server events for this session in the background while prompt runs.
+      const subscription = await client.event.subscribe();
+      const stream = subscription?.stream || subscription;
+      eventReaderPromise = (async () => {
+        for await (const raw of stream) {
+          if (stopEventReader) break;
+          const ev = unwrapSdkResponse(raw);
+          const type = String(ev?.type || "");
+          const properties = ev?.properties || {};
+          const eventSessionId = String(
+            properties?.sessionID ||
+            properties?.sessionId ||
+            properties?.session?.id ||
+            ""
+          );
+          if (!eventSessionId || eventSessionId !== sessionId) continue;
+          opencodeEvents.push({ type, properties });
+
+          // Capture explicit session error events early.
+          if (type === "session.error") {
+            const message = String(
+              properties?.error?.message ||
+              properties?.message ||
+              "opencode session error"
+            );
+            if (!sdkError) sdkError = message;
+          }
         }
-      } catch {
-        // Non-JSON lines on stdout (e.g. banner, warning) — ignore
-      }
-    });
+      })();
 
-    await new Promise((resolve) => {
-      let settled = false;
-      const settle = (reason) => {
-        if (settled) return;
-        settled = true;
-        stopReason = reason;
-        resolve();
-      };
+      const promptText = `${instruction}\n\n${prompt}`;
+      const runPromise = client.session.prompt({
+        path: { id: sessionId },
+        body: {
+          agent: "build",
+          parts: [{ type: "text", text: promptText }],
+        },
+      });
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error(`OpenCode attempt timed out after ${attemptTimeout}ms`)), attemptTimeout);
+      });
 
-      // Hard timeout: each attempt is individually capped at attemptTimeout.
-      const timer = setTimeout(() => {
-        timedOut   = true;
+      await Promise.race([runPromise, timeoutPromise]);
+
+      // Treat session.error (captured via stream) as sdk_error even if prompt resolved.
+      if (sdkError) stopReason = "sdk_error";
+      else stopReason = "complete";
+    } catch (err) {
+      const msg = String(err?.message || err);
+      sdkError = msg;
+      if (/timed out/i.test(msg)) {
+        timedOut = true;
         stopReason = "timeout";
-        process.stderr.write(`[run_opencode] timeout after ${PER_ATTEMPT_TIMEOUT_MS}ms — killing opencode\n`);
-        try { ocProc.kill("SIGTERM"); } catch { /* ignore */ }
-        // Give it 5 s to exit cleanly before SIGKILL
-        setTimeout(() => {
-          try { ocProc.kill("SIGKILL"); } catch { /* ignore */ }
-          settle("timeout");
-        }, 5_000);
-      }, attemptTimeout);
-
-      ocProc.on("close", (code) => {
-        clearTimeout(timer);
-        if (timedOut) { settle("timeout"); return; }
-        if (code !== 0 && !sdkError) sdkError = `opencode exited with code ${code}`;
-        settle(sdkError ? "sdk_error" : "complete");
-      });
-
-      ocProc.on("error", (err) => {
-        clearTimeout(timer);
-        if (!sdkError) sdkError = `spawn error: ${err.message}`;
-        settle("sdk_error");
-      });
-    });
-
-    // Flush any remaining readline buffer for this attempt
-    ocRl.close();
+      } else {
+        stopReason = "sdk_error";
+      }
+      // Abort current session on failure/timeout to prevent leaked tasks.
+      if (sessionId && opencodeInstance?.client?.session?.abort) {
+        try { await opencodeInstance.client.session.abort({ path: { id: sessionId } }); } catch { /* ignore */ }
+      }
+    } finally {
+      stopEventReader = true;
+      if (eventReaderPromise) {
+        try { await Promise.race([eventReaderPromise, sleep(2000)]); } catch { /* ignore */ }
+      }
+      if (opencodeInstance?.server?.close) {
+        try { await opencodeInstance.server.close(); } catch { /* ignore */ }
+      }
+    }
 
     // Retry transient failures and timeout-aborted turns up to STEP_LITELLM_TRIES.
     if ((stopReason === "sdk_error" || stopReason === "timeout") && _attempt < MAX_RETRIES) {
       process.stderr.write(
-        `[run_opencode] ${stopReason} on attempt ${_attempt}/${MAX_RETRIES}, retrying: ${String(sdkError || "").slice(0, 200)}\n`,
+        `[run_opencode] ${stopReason} on attempt ${_attempt}/${MAX_RETRIES}, retrying: ${String(sdkError || "").slice(0, 300)}\n`,
       );
-      if (stderrBuf.trim()) {
-        process.stderr.write(`[run_opencode] stderr tail:\n${stderrBuf.slice(-2048)}\n`);
-      }
       continue;
     }
     break;
@@ -826,14 +771,8 @@ async function main() {
   const label = `[${uid.slice(0, 12)}|${MODE}|p${PASS_INDEX}]`;
   if (sdkError && !timedOut) {
     process.stderr.write(`${label} opencode error: ${sdkError}\n`);
-    if (stderrBuf.trim()) {
-      process.stderr.write(`${label} stderr tail:\n${stderrBuf.slice(-4096)}\n`);
-    }
   } else if (timedOut) {
     process.stderr.write(`${label} timed out (max ${TIMEOUT_MS / 1000}s)\n`);
-    if (stderrBuf.trim()) {
-      process.stderr.write(`${label} stderr tail:\n${stderrBuf.slice(-4096)}\n`);
-    }
   } else {
     process.stdout.write(
       `${label} done  steps=${stats.num_steps}  ` +
