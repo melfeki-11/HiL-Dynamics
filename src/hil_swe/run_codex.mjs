@@ -47,9 +47,11 @@ import {
 import { ensureDir, writeJson, writeText } from "../shared/io.mjs";
 import { redactString } from "../shared/redact.mjs";
 import { buildSwePrompt } from "./prompt.mjs";
+import { installAgentsSkill, SKILL_TOOL_REF } from "./skills.mjs";
 import {
   WORKSPACE, TASK_DIR, OUTPUT_DIR,
   MODE, PASS_INDEX, RUN_ID, TIMEOUT_MS,
+  LITELLM_CALL_TIMEOUT_MS, STEP_LITELLM_TRIES,
   ASK_HUMAN_BASE_URL, ASK_HUMAN_MODEL, buildAskHumanGuidance,
   THOUGHT_CAP, ACT_CAP, OBS_CAP, cap, gitDiff,
 } from "./constants.mjs";
@@ -504,9 +506,13 @@ function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
  */
 async function runCodexAppServer({ prompt, env, uid, humanRouter, pushEvent, abortController }) {
   // Isolate codex state to avoid polluting /root in the container
-  const tmpBase = path.join(os.tmpdir(), `codex-${uid.slice(0, 12)}-p${PASS_INDEX}`);
-  const codexHome = path.join(tmpBase, "codex-home");
-  const homeDir   = path.join(tmpBase, "home");
+  // Keep CODEX_HOME out of /tmp. Codex warns when helper binaries would be
+  // created under temporary directories ("/tmp"), which is noisy and can
+  // disable PATH helper setup. Per-attempt /opt paths remain isolated while
+  // avoiding the temporary-dir restriction.
+  const runBase   = path.join("/opt", `codex-${uid.slice(0, 12)}-p${PASS_INDEX}`);
+  const codexHome = path.join(runBase, "codex-home");
+  const homeDir   = path.join(runBase, "home");
   await ensureDir(codexHome);
   await ensureDir(homeDir);
 
@@ -755,6 +761,7 @@ async function main() {
     }));
   }
   const prompt = buildSwePrompt({ problemStatement, mode: MODE, blockers });
+  await installAgentsSkill(WORKSPACE, SKILL_TOOL_REF.codex);
 
   // 3. Write attempt metadata
   await writeJson(path.join(OUTPUT_DIR, "attempt.json"), {
@@ -792,7 +799,7 @@ async function main() {
   // exit immediately.  allEvents is cleared in-place between attempts so only
   // the successful attempt's events are preserved in the final trajectory.
   let sdkError = null;
-  const MAX_RETRIES = 3;
+  const MAX_RETRIES = STEP_LITELLM_TRIES;
   const _runStart = Date.now();
 
   const env = codexApiEnv();
@@ -801,7 +808,7 @@ async function main() {
     sdkError = null;
     allEvents.length = 0;   // clear in-place so pushEvent closure remains valid
 
-    const PER_ATTEMPT_TIMEOUT_MS = 1_200_000; // 1200 s = 20 min per attempt
+    const PER_ATTEMPT_TIMEOUT_MS = LITELLM_CALL_TIMEOUT_MS;
     const remainingMs    = TIMEOUT_MS - (Date.now() - _runStart);
     const attemptTimeout = Math.min(remainingMs, PER_ATTEMPT_TIMEOUT_MS);
     if (attemptTimeout <= 0) {
@@ -828,8 +835,8 @@ async function main() {
       clearTimeout(timeoutId);
     }
 
-    // Retry only on transient errors (not on timeout — the overall wall-clock budget is exhausted).
-    if (sdkError && !abortController.signal.aborted && _attempt < MAX_RETRIES) {
+    // Retry transient failures, including timeout-aborted turns, up to STEP_LITELLM_TRIES.
+    if (sdkError && _attempt < MAX_RETRIES) {
       process.stderr.write(
         `[run_codex] sdk_error on attempt ${_attempt}/${MAX_RETRIES} for ${uid}, retrying: ${sdkError.slice(0, 200)}\n`,
       );

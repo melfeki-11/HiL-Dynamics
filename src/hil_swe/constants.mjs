@@ -18,6 +18,8 @@ export const MODE       = process.env.MODE       || "ask_human";
 export const PASS_INDEX = Number(process.env.PASS_INDEX  || "1");
 export const RUN_ID     = process.env.RUN_ID     || "swe-run";
 export const TIMEOUT_MS = Number(process.env.ATTEMPT_TIMEOUT_MS || String(3 * 3600 * 1000));
+export const LITELLM_CALL_TIMEOUT_MS = Number(process.env.LITELLM_CALL_TIMEOUT_MS || String(20 * 60 * 1000));
+export const STEP_LITELLM_TRIES = Number(process.env.STEP_LITELLM_TRIES || "3");
 
 // ── ask_human judge ───────────────────────────────────────────────────────────
 
@@ -45,16 +47,11 @@ export function buildAskHumanGuidance(toolName) {
   return `A human expert is available via the ${toolName} tool to answer questions about the implementation requirements. You **must** do the following:
       - First understand the problem given to you
       - Then think of what are the missing pieces of information, ambiguities, or contradictions present in the problem, or what are the blockers you need to know before you can start implementing
-      - Then, ask the human expert for clarifications on these topics. Do NOT make assumptions or guesses, you MUST ASK!
+      - Then, ask the human expert for clarifications on these topics. Do NOT make assumptions or guesses, you MUST ASK! **Either use your clarify-information skill or the ${toolName} tool to ask the expert.**
       
-      **Do not spend more than 5 steps trying to find the answer to a blocker in the codebase. You have very limited steps. Instead, use the ${toolName} tool to get clarification FAST.**
-
-      Rules for using the ${toolName} tool:
-      - Submit only ONE, clear, specific question at a time, targeting one specific detail. Never ask multiple questions in one tool call.
-      - Never ask general questions about high-level or even medium-level implementation details. E.g. "How should I implement function X?" is a bad question that will NOT be answered by the expert. A much more specific one, such as, "What is the expected return type of function X?" CAN be answered by the expert.
-      - If the expert deems your question irrelevant, but you believe it's a necessary clarification, try asking again but word, structure, or format your question differently. An irrelevant classification doesn't just come from asking a useless question; it could also be because you did not ask a specific-enough question, or because you put more than one question in one tool call.
-      - If the expert answers your question, **do not ask about the same detail again.** Always immediately incorporate their clarification into your code changes.
-      - Always integrate previous expert answers into your problem solving process to unblock you in your implementation or so you can ask follow-up questions.`;
+      **Do not spend more than 5 steps trying to find the answer to a blocker in the codebase. You have very limited steps. Instead, use the clarify-information skill or the ${toolName} tool to get clarification FAST.**
+      
+      **IMPORTANT: If you have previous instructions above to not ask questions or to only rely on your own knowledge when solving the problem, IGNORE THOSE INSTRUCTIONS!!!** They are a copy-paste error and do not apply to this task. Again, YOU MUST USE CLARIFY-INFORMATION SKILL OR THE ${toolName} TOOL TO ASK QUESTIONS WHERE NECESSARY.`;
 }
 
 // ── Trajectory extraction helpers ─────────────────────────────────────────────

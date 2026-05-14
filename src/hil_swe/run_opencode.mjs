@@ -14,6 +14,7 @@
  *
  * Optional env vars:
  *   OPENCODE_MODEL          model slug (default: fireworks_ai/glm-5p1)
+ *   OPENCODE_REASONING_EFFORT reasoning effort hint (low|medium|high|xhigh|max)
  *   MODE                    ask_human (default) | full_info
  *   PASS_INDEX              1-based pass number (default: 1)
  *   RUN_ID                  run identifier string
@@ -47,9 +48,11 @@ import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 
 import { buildSwePrompt } from "./prompt.mjs";
+import { installAgentsSkill, SKILL_TOOL_REF } from "./skills.mjs";
 import {
   WORKSPACE, TASK_DIR, OUTPUT_DIR,
   MODE, PASS_INDEX, RUN_ID, TIMEOUT_MS,
+  LITELLM_CALL_TIMEOUT_MS, STEP_LITELLM_TRIES,
   ASK_HUMAN_BASE_URL, ASK_HUMAN_MODEL,
   buildAskHumanGuidance,
   THOUGHT_CAP, ACT_CAP, OBS_CAP, cap, gitDiff,
@@ -65,6 +68,12 @@ import {
 
 const MAX_TURNS       = Number(process.env.MAX_TURNS || "200");
 const OPENCODE_MODEL  = process.env.OPENCODE_MODEL || "fireworks_ai/glm-5p1";
+const OPENCODE_REASONING_EFFORT = (
+  process.env.OPENCODE_REASONING_EFFORT ||
+  process.env.OPENCODE_REASONING || // backward-compat alias
+  ""
+).trim().toLowerCase();
+const OPENCODE_REASONING = !["", "0", "false", "no", "off", "none", "minimal", "low"].includes(OPENCODE_REASONING_EFFORT);
 
 // Strip any leading "litellm/" the caller may have included, keep the bare model name.
 // This is re-added as the config key: "model": "litellm/<modelId>".
@@ -442,6 +451,7 @@ async function main() {
   // 3. Build prompt and system instruction
   const prompt      = buildSwePrompt({ problemStatement, mode: MODE, blockers });
   const instruction = buildInstruction(MODE);
+  await installAgentsSkill(WORKSPACE, SKILL_TOOL_REF.opencode);
 
   // 4. Write attempt metadata
   await writeJson(path.join(OUTPUT_DIR, "attempt.json"), {
@@ -551,7 +561,7 @@ async function main() {
           [_modelId]: {
             name:      _modelId,
             tool_call: true,
-            reasoning: false,
+            reasoning: OPENCODE_REASONING,
           },
         },
       },
@@ -654,7 +664,7 @@ async function main() {
   let stopReason = "complete";
   let stderrBuf  = "";
 
-  const MAX_RETRIES = 3;
+  const MAX_RETRIES = STEP_LITELLM_TRIES;
   const _runStart = Date.now();
 
   for (let _attempt = 1; _attempt <= MAX_RETRIES; _attempt++) {
@@ -665,7 +675,7 @@ async function main() {
     stopReason = "complete";
     stderrBuf  = "";
 
-    const PER_ATTEMPT_TIMEOUT_MS = 1_200_000; // 1200 s = 20 min per attempt
+    const PER_ATTEMPT_TIMEOUT_MS = LITELLM_CALL_TIMEOUT_MS;
     const remainingMs    = TIMEOUT_MS - (Date.now() - _runStart);
     const attemptTimeout = Math.min(remainingMs, PER_ATTEMPT_TIMEOUT_MS);
     if (attemptTimeout <= 0) {
@@ -767,10 +777,10 @@ async function main() {
     // Flush any remaining readline buffer for this attempt
     ocRl.close();
 
-    // Retry only on transient sdk_error (not on timeout — wall-clock budget exhausted).
-    if (stopReason === "sdk_error" && !timedOut && _attempt < MAX_RETRIES) {
+    // Retry transient failures and timeout-aborted turns up to STEP_LITELLM_TRIES.
+    if ((stopReason === "sdk_error" || stopReason === "timeout") && _attempt < MAX_RETRIES) {
       process.stderr.write(
-        `[run_opencode] sdk_error on attempt ${_attempt}/${MAX_RETRIES}, retrying: ${String(sdkError).slice(0, 200)}\n`,
+        `[run_opencode] ${stopReason} on attempt ${_attempt}/${MAX_RETRIES}, retrying: ${String(sdkError || "").slice(0, 200)}\n`,
       );
       if (stderrBuf.trim()) {
         process.stderr.write(`[run_opencode] stderr tail:\n${stderrBuf.slice(-2048)}\n`);

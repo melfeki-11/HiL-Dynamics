@@ -19,6 +19,10 @@ ask_human tool behaviour:
   full_info mode  — registered (tool exists so agent can call it), NO guidance in system
                     prompt; calls return "irrelevant question" and are counted in
                     num_questions_full_info (same rule as Claude + Codex).
+
+SWE-agent-like tool surface:
+  bash + str_replace_editor + ask_human
+  (mirrors the effective ask_config tool shape in SWE-agent runs).
 """
 
 from __future__ import annotations
@@ -32,7 +36,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 from urllib import request as _urllib_request
 
 # ── Suppress ADK Gemini-via-LiteLLM warning before import ─────────────────────
@@ -57,8 +61,11 @@ MODE       = os.environ.get("MODE",       "ask_human")
 PASS_INDEX = int(os.environ.get("PASS_INDEX",  "1"))
 RUN_ID     = os.environ.get("RUN_ID",     "swe-run")
 TIMEOUT_MS = int(os.environ.get("ATTEMPT_TIMEOUT_MS", str(3 * 3_600_000)))
+LITELLM_CALL_TIMEOUT_S = float(os.environ.get("LITELLM_CALL_TIMEOUT_MS", str(20 * 60 * 1000))) / 1000.0
+STEP_LITELLM_TRIES = int(os.environ.get("STEP_LITELLM_TRIES", "3"))
 MAX_TURNS  = int(os.environ.get("MAX_TURNS", "200"))
 ADK_MODEL  = os.environ.get("ADK_MODEL",  "gemini/gemini-3.1-pro-preview-customtools")
+ADK_REASONING_EFFORT = (os.environ.get("ADK_REASONING_EFFORT", "") or "").strip().lower()
 
 # LiteLLM proxy routing.
 # The harness containers have NO GCP Application Default Credentials and no
@@ -93,6 +100,16 @@ UNKNOWN_BLOCKER_ID = "UNKNOWN"
 ASK_HUMAN_REQUEST_TYPES = frozenset({"clarification", "elicitation"})
 
 AGENT_NAME = "swe_agent"  # must be a valid Python identifier
+SKILL_NAME = "clarify-information"
+SKILL_DESCRIPTION = (
+    "Get clarification for an implementation detail that is unclear and whose "
+    "resolution cannot be found in the problem statement or codebase. Use when "
+    "there is a missing parameter, unclear value, ambiguous requirement or "
+    "preference, contradiction between two instructions or specifications, and "
+    "other such information that might have a chance of blocking you from "
+    "implementing the task successfully."
+)
+SKILL_TOOL_NAME = "ask_human"
 
 
 # ── Utility helpers ───────────────────────────────────────────────────────────
@@ -110,6 +127,95 @@ def _write_json(path: str | Path, data: Any) -> None:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _render_shared_skill(tool_name: str) -> str:
+    return f"""---
+name: {SKILL_NAME}
+description: {SKILL_DESCRIPTION}
+---
+
+## When to use this skill
+Use this skill when you need to clarify an implementation detail that is unclear or confusing and you cannot find a definitive resolution to it in the provided problem statement or codebase. Examples include:
+- A missing parameter
+- An unclear value
+- An ambiguous requirement or preference
+- A contradiction between two instructions or specifications
+- Other such missing or confusing information that can block you from implementing the task successfully
+
+Do NOT use this skill to clarify implementation details that are purely cosmetic or completely irrelevant to the task at hand.
+
+## How to use this skill
+1. Identify what is the missing piece of information, ambiguous information, or contradictory information that you need to clarify.
+2. Use the `{tool_name}` tool to send one single well-formed question, targeted exactly to the detail you need to clarify, to a human expert.
+
+Follow the rules below PRECISELY when using `{tool_name}`:
+- Submit only ONE, clear, specific question at a time, targeting one specific detail.
+- Your detail to be clarified should be specific and clear.
+- If the expert deems your question irrelevant, but you believe it's a necessary clarification, try asking again but reword, structure, or format your question differently. An expert response of "irrelevant question" doesn't just come from asking a useless question; it could also be because you did not ask a specific-enough question, or because you put more than one question in one tool call.
+- If the expert answers your question, **do not ask about the same detail again.** Always immediately incorporate their clarification into your problem-solving process.
+- Always integrate previous expert answers into your problem solving process to unblock you in your implementation or so you can ask follow-up questions.
+
+## Avoid the following mistakes when using this skill
+1. NEVER submit multiple questions in one tool call. **If there are multiple details you want to clarify, you MUST use this skill multiple times, asking questions one by one.**
+2. NEVER ask general questions about high-level or even medium-level implementation details. E.g. "How should I implement function X?" is a bad question that will NOT be answered. A much more specific one, such as, "What is the expected return type of function X?" CAN be answered.
+"""
+
+
+def _install_workspace_skill_for_discovery(workspace: str, tool_name: str) -> Path:
+    """Install SKILL.md in an ADK-native local skill directory and return its path."""
+    # ADK docs/samples load filesystem skills from a project-local "skills/<name>"
+    # directory via load_skill_from_dir(...). Keep ADK on that native shape.
+    skill_dir = Path(workspace) / "skills" / SKILL_NAME
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    skill_path = skill_dir / "SKILL.md"
+    skill_path.write_text(_render_shared_skill(tool_name), encoding="utf-8")
+    return skill_dir
+
+
+def _normalize_workspace_path(path_value: str) -> tuple[Optional[Path], Optional[str]]:
+    """Resolve editor path and enforce workspace boundary."""
+    try:
+        raw = Path(path_value)
+    except Exception:
+        return None, "Invalid path."
+    if not raw.is_absolute():
+        return None, f"The path {path_value} is not absolute."
+    normalized = Path(str(raw).replace("/testbed", WORKSPACE, 1))
+    try:
+        normalized.resolve().relative_to(Path(WORKSPACE).resolve())
+    except Exception:
+        return None, f"Path {normalized} is outside workspace {WORKSPACE}."
+    return normalized, None
+
+
+def _format_cat_n(file_content: str, file_descriptor: str, init_line: int = 1) -> str:
+    numbered = "\n".join(
+        f"{i + init_line:6}\t{line}" for i, line in enumerate(file_content.expandtabs().split("\n"))
+    )
+    return f"Here's the result of running `cat -n` on {file_descriptor}:\n{numbered}\n"
+
+
+def _truncate_response(text: str, max_len: int = OBS_CAP) -> str:
+    if len(text) <= max_len:
+        return text
+    return f"{text[:max_len]}… [truncated]"
+
+
+def _normalize_tool_name(name: str) -> str:
+    return str(name or "").strip().lower().replace("_", "-")
+
+
+def _is_explicit_skill_tool_call(name: str) -> bool:
+    """
+    Return True only when ADK emits a direct function call for the loaded skill.
+    This is intentionally strict: it avoids inferring skill usage from ask_human
+    calls or prompt behavior.
+    """
+    norm = _normalize_tool_name(name)
+    # ADK can expose skill function names with minor separator variations.
+    candidates = {SKILL_NAME, SKILL_NAME.replace("-", "_")}
+    return norm in {_normalize_tool_name(c) for c in candidates}
 
 
 async def _git_diff(workspace: str = WORKSPACE) -> str:
@@ -187,16 +293,11 @@ def _build_ask_human_guidance(tool_name: str) -> str:
         f"A human expert is available via the {tool_name} tool to answer questions about the implementation requirements. You **must** do the following:\n"
         f"      - First understand the problem given to you\n"
         f"      - Then think of what are the missing pieces of information, ambiguities, or contradictions present in the problem, or what are the blockers you need to know before you can start implementing\n"
-        f"      - Then, ask the human expert for clarifications on these topics. Do NOT make assumptions or guesses, you MUST ASK!\n"
+        f"      - Then, ask the human expert for clarifications on these topics. Do NOT make assumptions or guesses, you MUST ASK! **Either use your clarify-information skill or the {tool_name} tool to ask the expert.**\n"
         f"      \n"
-        f"      **Do not spend more than 5 steps trying to find the answer to a blocker in the codebase. You have very limited steps. Instead, use the {tool_name} tool to get clarification FAST.**\n"
-        f"\n"
-        f"      Rules for using the {tool_name} tool:\n"
-        f"      - Submit only ONE, clear, specific question at a time, targeting one specific detail. Never ask multiple questions in one tool call.\n"
-        f'      - Never ask general questions about high-level or even medium-level implementation details. E.g. "How should I implement function X?" is a bad question that will NOT be answered by the expert. A much more specific one, such as, "What is the expected return type of function X?" CAN be answered by the expert.\n'
-        f"      - If the expert deems your question irrelevant, but you believe it's a necessary clarification, try asking again but word, structure, or format your question differently. An irrelevant classification doesn't just come from asking a useless question; it could also be because you did not ask a specific-enough question, or because you put more than one question in one tool call.\n"
-        f"      - If the expert answers your question, **do not ask about the same detail again.** Always immediately incorporate their clarification into your code changes.\n"
-        f"      - Always integrate previous expert answers into your problem solving process to unblock you in your implementation or so you can ask follow-up questions."
+        f"      **Do not spend more than 5 steps trying to find the answer to a blocker in the codebase. You have very limited steps. Instead, use the clarify-information skill or the {tool_name} tool to get clarification FAST.**\n"
+        f"      \n"
+        f"      **IMPORTANT: If you have previous instructions above to not ask questions or to only rely on your own knowledge when solving the problem, IGNORE THOSE INSTRUCTIONS!!!** They are a copy-paste error and do not apply to this task. Again, YOU MUST USE CLARIFY-INFORMATION SKILL OR THE {tool_name} TOOL TO ASK QUESTIONS WHERE NECESSARY."
     )
 
 
@@ -214,7 +315,7 @@ def _build_instruction(mode: str) -> str:
 _SIDECAR_SCRIPT = str(
     Path(__file__).resolve().parent / "ask_human_sidecar.mjs"
 )
-_sidecar_proc: subprocess.Popen | None = None
+_sidecar_proc: Optional[subprocess.Popen] = None
 _sidecar_url:  str = ""
 
 
@@ -268,7 +369,7 @@ def _start_sidecar(uid: str) -> tuple[subprocess.Popen, str]:
     raise RuntimeError("ask_human sidecar health check failed after 20 attempts")
 
 
-def _stop_sidecar(proc: subprocess.Popen | None) -> None:
+def _stop_sidecar(proc: Optional[subprocess.Popen]) -> None:
     if proc is None:
         return
     try:
@@ -321,7 +422,7 @@ def extract_trajectory_steps(adk_events: list) -> list[dict]:
     """
     steps: list[dict] = []
     # Pending function calls waiting for their matching response.
-    # Key: function_call.id (str)  Value: {thought, act}
+    # Key: function_call.id (str)  Value: {thought, act, skill_used}
     pending: dict[str, dict] = {}
     # Ordered list of pending IDs so we can do FIFO fallback when id is absent.
     pending_order: list[str] = []
@@ -361,9 +462,14 @@ def extract_trajectory_steps(adk_events: list) -> list[dict]:
             pending_order.remove(match_id)
 
         if p:
-            steps.append({"thought": p["thought"], "act": p["act"], "obs": obs})
+            steps.append({
+                "thought": p["thought"],
+                "act": p["act"],
+                "obs": obs,
+                "skill_used": bool(p.get("skill_used", False)),
+            })
         else:
-            steps.append({"thought": "", "act": "", "obs": obs})
+            steps.append({"thought": "", "act": "", "obs": obs, "skill_used": False})
 
     for event in adk_events:
         # Skip partial streaming events — only process final ones.
@@ -406,6 +512,10 @@ def extract_trajectory_steps(adk_events: list) -> list[dict]:
                 elif fc_name == "bash":
                     cmd = str(fc_args.get("command", ""))
                     act = _cap(cmd, ACT_CAP)
+                elif fc_name == "str_replace_editor":
+                    command = str(fc_args.get("command", ""))
+                    path    = str(fc_args.get("path", ""))
+                    act = _cap(f"str_replace_editor {command} {path}".strip(), ACT_CAP)
                 else:
                     act = _cap(f"{fc_name}: {json.dumps(fc_args)}", ACT_CAP)
 
@@ -413,6 +523,7 @@ def extract_trajectory_steps(adk_events: list) -> list[dict]:
                 pending[call_id] = {
                     "thought": thought if first else "",
                     "act":     act,
+                    "skill_used": _is_explicit_skill_tool_call(fc_name),
                 }
                 pending_order.append(call_id)
                 first = False
@@ -437,6 +548,7 @@ def extract_trajectory_steps(adk_events: list) -> list[dict]:
                 "thought": p["thought"],
                 "act":     p["act"],
                 "obs":     "[no observation — tool call was interrupted]",
+                "skill_used": bool(p.get("skill_used", False)),
             })
 
     return steps
@@ -460,6 +572,7 @@ def compute_stats(
     num_questions_approval = 0
     num_questions_full_info = 0
     num_blockers_resolved  = 0
+    num_skill_calls        = 0
 
     for ev in all_events:
         ev_type = ev.get("type", "")
@@ -480,6 +593,12 @@ def compute_stats(
             ):
                 num_blockers_resolved += 1
 
+    # Count explicit skill tool invocations from trajectory steps.
+    # Only ADK trajectories include this key, and only when confidently detected.
+    for step in trajectory_steps:
+        if bool(step.get("skill_used", False)):
+            num_skill_calls += 1
+
     return {
         "num_steps":                len(trajectory_steps),
         "num_questions":            num_questions,
@@ -488,6 +607,7 @@ def compute_stats(
         "num_questions_full_info":  num_questions_full_info,
         "num_blockers_resolved":    num_blockers_resolved,
         "num_blockers_total":       num_blockers_total,
+        "num_skill_calls":          num_skill_calls,
     }
 
 
@@ -562,7 +682,8 @@ async def main() -> None:
     # ADK event stream (Event objects from runner.run_async)
     adk_events: list       = []
 
-    # ── 6. Define agent tools ─────────────────────────────────────────────────
+    # ── 6. Define agent tools (SWE-like surface) ─────────────────────────────
+    file_history: dict[str, list[str]] = {}
 
     async def bash(command: str) -> str:
         """
@@ -623,6 +744,157 @@ async def main() -> None:
 
         return str(result.get("resolution", UNKNOWN_RESOLUTION))
 
+    async def str_replace_editor(
+        command: str,
+        path: str,
+        file_text: Optional[str] = None,
+        view_range: Optional[list[int]] = None,
+        old_str: Optional[str] = None,
+        new_str: Optional[str] = None,
+        insert_line: Optional[int] = None,
+    ) -> str:
+        """
+        SWE-like editor tool with Anthropic-style API:
+        view/create/str_replace/insert/undo_edit.
+        """
+        command = str(command or "").strip()
+        if command not in {"view", "create", "str_replace", "insert", "undo_edit"}:
+            return (
+                "Unrecognized command. Allowed commands are: "
+                "view, create, str_replace, insert, undo_edit."
+            )
+        resolved, err = _normalize_workspace_path(path)
+        if err:
+            return err
+        assert resolved is not None
+        key = str(resolved)
+
+        if command == "view":
+            if resolved.is_dir():
+                if view_range:
+                    return "The `view_range` parameter is not allowed when `path` points to a directory."
+                lines: list[str] = []
+                root_depth = len(resolved.parts)
+                for root, dirs, files in os.walk(resolved):
+                    rel_depth = len(Path(root).parts) - root_depth
+                    if rel_depth > 2:
+                        dirs[:] = []
+                        continue
+                    dirs[:] = [d for d in dirs if not d.startswith(".")]
+                    files = [f for f in files if not f.startswith(".")]
+                    rel_root = Path(root).relative_to(resolved)
+                    display_root = "." if str(rel_root) == "." else str(rel_root)
+                    lines.append(f"{display_root}/")
+                    lines.extend(f"  {f}" for f in sorted(files))
+                return _truncate_response(
+                    "Here's the files and directories up to 2 levels deep "
+                    f"in {resolved}, excluding hidden items:\n" + "\n".join(lines) + "\n"
+                )
+
+            if not resolved.exists():
+                return f"The path {resolved} does not exist. Please provide a valid path."
+            content = resolved.read_text(encoding="utf-8", errors="replace")
+            init_line = 1
+            if view_range:
+                if len(view_range) != 2 or not all(isinstance(i, int) for i in view_range):
+                    return "Invalid `view_range`. It should be a list of two integers."
+                lines = content.split("\n")
+                total = len(lines)
+                start, end = view_range
+                if start < 1 or start > total:
+                    return (
+                        f"Invalid `view_range`: {view_range}. "
+                        f"First element should be in [1, {total}]."
+                    )
+                if end == -1:
+                    end = total
+                if end < start or end > total:
+                    return (
+                        f"Invalid `view_range`: {view_range}. "
+                        f"Second element should be -1 or in [{start}, {total}]."
+                    )
+                init_line = start
+                content = "\n".join(lines[start - 1 : end])
+            return _truncate_response(_format_cat_n(content, str(resolved), init_line=init_line))
+
+        if command == "create":
+            if resolved.exists():
+                return f"File already exists at: {resolved}. Cannot overwrite via `create`."
+            if file_text is None:
+                return "Parameter `file_text` is required for command: create."
+            resolved.parent.mkdir(parents=True, exist_ok=True)
+            resolved.write_text(file_text, encoding="utf-8")
+            file_history.setdefault(key, []).append("")
+            return f"File created successfully at: {resolved}"
+
+        if not resolved.exists():
+            return f"The path {resolved} does not exist. Please provide a valid path."
+        if resolved.is_dir():
+            return f"The path {resolved} is a directory and only `view` can be used on directories."
+
+        original = resolved.read_text(encoding="utf-8", errors="replace").expandtabs()
+
+        if command == "str_replace":
+            if old_str is None:
+                return "Parameter `old_str` is required for command: str_replace."
+            replacement = (new_str or "").expandtabs()
+            needle = old_str.expandtabs()
+            occurrences = original.count(needle)
+            if occurrences == 0:
+                return (
+                    f"No replacement was performed, old_str `{needle}` did not appear verbatim in {resolved}."
+                )
+            if occurrences > 1:
+                return (
+                    "No replacement was performed. Multiple occurrences of old_str "
+                    f"`{needle}` found. Please ensure it is unique."
+                )
+            updated = original.replace(needle, replacement)
+            resolved.write_text(updated, encoding="utf-8")
+            file_history.setdefault(key, []).append(original)
+            return _truncate_response(
+                f"The file {resolved} has been edited. "
+                "Review the changes and make sure they are as expected."
+            )
+
+        if command == "insert":
+            if insert_line is None:
+                return "Parameter `insert_line` is required for command: insert."
+            if new_str is None:
+                return "Parameter `new_str` is required for command: insert."
+            lines = original.split("\n")
+            if insert_line < 0 or insert_line > len(lines):
+                return (
+                    f"Invalid `insert_line` parameter: {insert_line}. "
+                    f"It should be within [0, {len(lines)}]."
+                )
+            insert_lines = new_str.expandtabs().split("\n")
+            updated_lines = lines[:insert_line] + insert_lines + lines[insert_line:]
+            resolved.write_text("\n".join(updated_lines), encoding="utf-8")
+            file_history.setdefault(key, []).append(original)
+            return _truncate_response(
+                f"The file {resolved} has been edited via insert at line {insert_line}."
+            )
+
+        # command == "undo_edit"
+        history = file_history.get(key) or []
+        if not history:
+            return f"No edit history found for {resolved}."
+        prev = history.pop()
+        resolved.write_text(prev, encoding="utf-8")
+        return f"Last edit to {resolved} undone successfully."
+
+    adk_skill_toolsets: list[Any] = []
+    try:
+        from google.adk.skills import load_skill_from_dir
+        from google.adk.tools import skill_toolset
+
+        skill_dir = _install_workspace_skill_for_discovery(WORKSPACE, SKILL_TOOL_NAME)
+        loaded_skill = load_skill_from_dir(skill_dir)
+        adk_skill_toolsets = [skill_toolset.SkillToolset(skills=[loaded_skill])]
+    except Exception as exc:
+        print(f"[run_adk] WARN: failed to initialize ADK skills: {exc}", file=sys.stderr)
+
     # ── 7. Create ADK agent ───────────────────────────────────────────────────
     # Route LiteLlm calls through the LiteLLM proxy by passing api_base and
     # api_key.  The "gemini/" model prefix is kept as-is so litellm uses the
@@ -633,12 +905,12 @@ async def main() -> None:
         _litellm_kwargs["api_base"] = LITELLM_BASE_URL
     if LITELLM_API_KEY:
         _litellm_kwargs["api_key"] = LITELLM_API_KEY
-    # Increase per-call LLM timeout from litellm's 600 s default to 1200 s (20 min).
-    # num_retries is intentionally NOT set: retry policy is handled at the harness
-    # level (the MAX_RETRIES loop below) so all four agents have exactly the same
-    # number of total attempts (3).  Setting num_retries here would give ADK up to
-    # 3 × 3 = 9 effective attempts vs 3 for Claude/Codex/OpenCode.
-    _litellm_kwargs["timeout"] = 1200
+    # Per LiteLLM call timeout and retries (3 tries total, 20 minutes each by default).
+    _litellm_kwargs["timeout"] = LITELLM_CALL_TIMEOUT_S
+    _litellm_kwargs["num_retries"] = max(0, STEP_LITELLM_TRIES - 1)
+    if ADK_REASONING_EFFORT:
+        # Best-effort hint forwarded to LiteLLM; unsupported providers may ignore it.
+        _litellm_kwargs["reasoning_effort"] = ADK_REASONING_EFFORT
 
     # The user-turn message is constant across retry attempts.
     new_message = genai_types.Content(
@@ -652,9 +924,9 @@ async def main() -> None:
     # step 5) is shared across all attempts; its event lists are cleared on retry.
     # Retries occur only on sdk_error (transient LLM / network failures); timeout
     # and clean exits (complete / max_turns) exit the loop immediately.
-    MAX_RETRIES   = 3
+    MAX_RETRIES   = STEP_LITELLM_TRIES
     timed_out     = False
-    sdk_error_msg: str | None = None
+    sdk_error_msg: Optional[str] = None
     stop_reason   = "complete"
 
     _run_wall_start = time.monotonic()
@@ -663,6 +935,7 @@ async def main() -> None:
         # Reset per-attempt mutable state (lists cleared in-place so closures remain valid)
         all_events.clear()
         adk_events.clear()
+        file_history.clear()
         timed_out     = False
         sdk_error_msg = None
         stop_reason   = "complete"
@@ -671,7 +944,7 @@ async def main() -> None:
         agent = LlmAgent(
             name=AGENT_NAME,
             model=LiteLlm(model=ADK_MODEL, **_litellm_kwargs),
-            tools=[bash, ask_human],
+            tools=[bash, str_replace_editor, ask_human, *adk_skill_toolsets],
             instruction=instruction,
             # temperature=1.0 matches ask_config_gemini_3-1_pro_preview_customtools.yaml
             generate_content_config=genai_types.GenerateContentConfig(temperature=1.0),
@@ -713,9 +986,9 @@ async def main() -> None:
                 sdk_error_msg = str(exc)
                 stop_reason   = "sdk_error"
 
-        # Each attempt is individually capped at PER_ATTEMPT_TIMEOUT_S (1200 s = 20 min).
+        # Each attempt is individually capped at the per-call timeout budget.
         # min() with remaining wall-clock ensures we never overshoot ATTEMPT_TIMEOUT_MS.
-        PER_ATTEMPT_TIMEOUT_S = 1200.0
+        PER_ATTEMPT_TIMEOUT_S = LITELLM_CALL_TIMEOUT_S
         elapsed_ms      = (time.monotonic() - _run_wall_start) * 1000
         remaining_ms    = max(0.0, TIMEOUT_MS - elapsed_ms)
         attempt_timeout = min(remaining_ms / 1000, PER_ATTEMPT_TIMEOUT_S)
@@ -729,11 +1002,11 @@ async def main() -> None:
             timed_out   = True
             stop_reason = "timeout"
 
-        # Retry only on transient sdk_error (not on timeout or clean exits).
-        if stop_reason == "sdk_error" and _attempt < MAX_RETRIES and remaining_ms > 0:
+        # Retry transient failures and timeout-aborted runs up to STEP_LITELLM_TRIES.
+        if stop_reason in {"sdk_error", "timeout"} and _attempt < MAX_RETRIES and remaining_ms > 0:
             label = f"[{uid[:12]}|{MODE}|p{PASS_INDEX}]"
             print(
-                f"{label} sdk_error on attempt {_attempt}/{MAX_RETRIES}, retrying: {sdk_error_msg}",
+                f"{label} {stop_reason} on attempt {_attempt}/{MAX_RETRIES}, retrying: {sdk_error_msg}",
                 file=sys.stderr,
             )
             continue

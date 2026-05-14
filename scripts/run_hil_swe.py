@@ -66,6 +66,14 @@ Environment variables (read from host env, forwarded into each container):
     ASK_HUMAN_MODEL        override ask_human judge model slug
     CLAUDE_MODEL           model slug for the agent when --sdk claude (default: claude-sonnet-4-6)
     CODEX_MODEL            model slug for the agent when --sdk codex  (default: gpt-5.5)
+    ADK_MODEL              model slug for the agent when --sdk adk    (default: gemini/gemini-3.1-pro-preview-customtools)
+    OPENCODE_MODEL         model slug for the agent when --sdk opencode (default: fireworks_ai/glm-5p1)
+    CLAUDE_REASONING_EFFORT reasoning effort for Claude SDK query options (low|medium|high|xhigh|max)
+    CODEX_REASONING_EFFORT reasoning effort for Codex app-server (none|minimal|low|medium|high|xhigh)
+    ADK_REASONING_EFFORT   best-effort reasoning effort forwarded to LiteLLM (string)
+    OPENCODE_REASONING_EFFORT reasoning effort for OpenCode provider config (low|medium|high|xhigh|max)
+    LITELLM_CALL_TIMEOUT_MS  per-LiteLLM-call timeout in ms (default: 1200000 / 20 min)
+    STEP_LITELLM_TRIES       retries per agent step/call budget (default: 3)
     MAX_TURNS              max agent turns (default: 200)
     ATTEMPT_TIMEOUT_MS     per-attempt timeout in ms (default: 10800000)
     PERMISSION_MODE        claude permissionMode (default: acceptEdits)
@@ -77,6 +85,7 @@ import argparse
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import threading
@@ -86,6 +95,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 # Allow importing sibling scripts without installation
 _SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -215,10 +225,17 @@ FORWARDED_ENV_KEYS = [
     "PAPER_ASK_HUMAN_MODEL",
     # Agent / run parameters (all optional; harness uses built-in defaults)
     "CLAUDE_MODEL",
+    "CLAUDE_REASONING_EFFORT",
+    "CLAUDE_EFFORT",  # backward-compat alias
     "CODEX_MODEL",
     "CODEX_REASONING_EFFORT",
     "ADK_MODEL",
+    "ADK_REASONING_EFFORT",
     "OPENCODE_MODEL",
+    "OPENCODE_REASONING_EFFORT",
+    "OPENCODE_REASONING",  # backward-compat alias
+    "LITELLM_CALL_TIMEOUT_MS",
+    "STEP_LITELLM_TRIES",
     "MAX_TURNS",
     "ATTEMPT_TIMEOUT_MS",
     "PERMISSION_MODE",
@@ -229,6 +246,47 @@ FORWARDED_ENV_KEYS = [
     "AWS_SECRET_ACCESS_KEY",
     "AWS_SESSION_TOKEN",
 ]
+
+MODEL_REASONING_DEFAULTS = [
+    # Claude Code models
+    ("claude-opus-4-7", {"CLAUDE_REASONING_EFFORT": "max"}),
+    # Codex models
+    ("gpt-5.5", {"CODEX_REASONING_EFFORT": "xhigh"}),
+    # ADK model (routed through LiteLLM)
+    ("gemini/gemini-3.1-pro-preview-customtools", {"ADK_REASONING_EFFORT": "high"}),
+    # OpenCode model
+    ("fireworks_ai/glm-5p1", {"OPENCODE_REASONING_EFFORT": "xhigh"}),
+]
+
+
+def default_reasoning_env_for_model(model: str) -> dict[str, str]:
+    """Return default reasoning env override for exact model ids."""
+    m = (model or "").strip()
+    if not m:
+        return {}
+    lower = m.lower()
+
+    # Exact matches only
+    for model_id, envs in MODEL_REASONING_DEFAULTS:
+        if lower == model_id.lower():
+            return dict(envs)
+    return {}
+
+
+def reasoning_env_for_sdk(sdk: str, effort: str) -> dict[str, str]:
+    """Map a generic effort level to SDK-specific env vars."""
+    eff = effort.strip().lower()
+    if sdk == "claude":
+        return {"CLAUDE_REASONING_EFFORT": eff}
+    if sdk == "codex":
+        # Codex supports up to xhigh (no "max" literal).
+        return {"CODEX_REASONING_EFFORT": "xhigh" if eff == "max" else eff}
+    if sdk == "adk":
+        # Forward as a provider hint; run_adk.py applies this best-effort via LiteLLM kwargs.
+        return {"ADK_REASONING_EFFORT": eff}
+    if sdk == "opencode":
+        return {"OPENCODE_REASONING_EFFORT": eff}
+    return {}
 
 _print_lock = threading.Lock()
 
@@ -385,27 +443,39 @@ def output_dir_for(run_id: str, uid: str, mode: str, pass_index: int) -> Path:
     return RUNS_DIR / run_id / uid / mode / f"pass_{pass_index}"
 
 
-_SOLVE_TIMEOUT_RE = re.compile(r"Timed out after|Timed out on host after", re.IGNORECASE)
+SYSTEM_ERROR_STOP_REASONS = {
+    "sdk_error",
+    "timeout",
+    "sidecar_start_failed",
+    "proxy_start_failed",
+}
 
 
-def _result_has_timeout_sdk_error(out_dir: Path) -> bool:
+def _load_result_json(out_dir: Path) -> dict | None:
     result_path = out_dir / "result.json"
     if not result_path.exists():
-        return False
+        return None
     try:
-        result = json.loads(result_path.read_text())
+        data = json.loads(result_path.read_text())
     except Exception:
-        return False
-    sdk_error = str(result.get("sdk_error") or "")
-    return bool(_SOLVE_TIMEOUT_RE.search(sdk_error))
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _result_has_system_error(result: dict) -> bool:
+    sdk_error = str(result.get("sdk_error") or "").strip()
+    if sdk_error:
+        return True
+    stop_reason = str(result.get("stop_reason") or "").strip().lower()
+    return stop_reason in SYSTEM_ERROR_STOP_REASONS
 
 
 def result_is_complete(out_dir: Path) -> bool:
-    result_path = out_dir / "result.json"
-    if not result_path.exists():
+    result = _load_result_json(out_dir)
+    if result is None:
         return False
-    # A timeout-written result.json is treated as incomplete so the solve is rerun.
-    return not _result_has_timeout_sdk_error(out_dir)
+    # Any harness/system error means this pass must be rerun.
+    return not _result_has_system_error(result)
 
 
 def run_attempt(
@@ -524,6 +594,7 @@ def _run_attempt_inner(
         # configs/swe/ask_config_claude_opus_4-6.yaml).  Clients should use
         # http://host.docker.internal:PORT rather than http://localhost:PORT.
         "--add-host=host.docker.internal:host-gateway",
+        *_resolve_litellm_add_host_args(extra_env),
         # task data (read-only)
         "-v", f"{task_dir.resolve()}:/task:ro",
         # harness source (read-only) — changes don't need image rebuilds
@@ -603,6 +674,23 @@ def _tail(path: Path, n: int) -> str:
         return "\n".join(lines[-n:])
     except Exception:
         return ""
+
+
+def _resolve_litellm_add_host_args(extra_env: dict[str, str]) -> list[str]:
+    """Return docker --add-host args for LITELLM_BASE_URL when needed."""
+    base_url = (extra_env.get("LITELLM_BASE_URL") or os.environ.get("LITELLM_BASE_URL") or "").strip()
+    if not base_url:
+        return []
+    try:
+        host = (urlparse(base_url).hostname or "").strip()
+        if not host or host in {"localhost", "127.0.0.1", "host.docker.internal"}:
+            return []
+        _, _, ips = socket.gethostbyname_ex(host)
+        if not ips:
+            return []
+        return [f"--add-host={host}:{ips[0]}"]
+    except Exception:
+        return []
 
 
 def build_job_list(
@@ -699,6 +787,25 @@ def main() -> None:
              "Equivalent to passing --env MAX_TURNS=N.",
     )
     parser.add_argument(
+        "--max-reasoning",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Enable highest-supported reasoning defaults for the selected SDK "
+            "(default: enabled; use --no-max-reasoning to disable)."
+        ),
+    )
+    parser.add_argument(
+        "--reasoning-effort",
+        choices=["low", "medium", "high", "xhigh", "max"],
+        default=None,
+        help=(
+            "Override reasoning effort tier for the selected SDK. "
+            "Takes precedence over --max-reasoning unless the SDK-specific env var "
+            "is explicitly set via --env."
+        ),
+    )
+    parser.add_argument(
         "--include-partial",
         action="store_true",
         default=False,
@@ -736,16 +843,41 @@ def main() -> None:
             effective_env[k] = val
 
     # 3. Explicit --env KEY=VALUE overrides win over everything
+    explicit_env_override_keys: set[str] = set()
     for item in args.env or []:
         if "=" in item:
             k, v = item.split("=", 1)
             effective_env[k] = v
+            explicit_env_override_keys.add(k)
 
     # 4. --max-turns shorthand (equivalent to --env MAX_TURNS=N)
     if args.max_turns is not None:
         effective_env["MAX_TURNS"] = str(args.max_turns)
 
-    # 4. Validate the minimum required vars
+    # 5. Reasoning defaults/overrides (unless SDK-specific key explicitly set via --env)
+    sdk_cfg_for_reasoning = SDK_CONFIGS[args.sdk]
+    model_for_reasoning = effective_env.get(
+        sdk_cfg_for_reasoning["model_env_key"],
+        sdk_cfg_for_reasoning["default_model"],
+    )
+    if args.reasoning_effort is not None:
+        requested = reasoning_env_for_sdk(args.sdk, args.reasoning_effort)
+        for k, v in requested.items():
+            if k not in explicit_env_override_keys:
+                effective_env[k] = v
+    elif args.max_reasoning:
+        for k, v in default_reasoning_env_for_model(model_for_reasoning).items():
+            if k not in explicit_env_override_keys and not effective_env.get(k):
+                effective_env[k] = v
+
+    # Backward-compat aliases for previously used names.
+    if "CLAUDE_REASONING_EFFORT" not in effective_env and effective_env.get("CLAUDE_EFFORT"):
+        effective_env["CLAUDE_REASONING_EFFORT"] = effective_env["CLAUDE_EFFORT"]
+    if "OPENCODE_REASONING_EFFORT" not in effective_env and effective_env.get("OPENCODE_REASONING"):
+        old = str(effective_env["OPENCODE_REASONING"]).strip().lower()
+        effective_env["OPENCODE_REASONING_EFFORT"] = "max" if old in {"1", "true", "yes", "on"} else "low"
+
+    # 6. Validate the minimum required vars
     api_key = (
         effective_env.get("LITELLM_API_KEY") or
         effective_env.get("LITELLM_PROXY_API_KEY") or
@@ -772,6 +904,13 @@ def main() -> None:
     sdk_cfg = SDK_CONFIGS[args.sdk]
     model = effective_env.get(sdk_cfg["model_env_key"], sdk_cfg["default_model"])
     log(f"Proxy: {base_url}  Model: {model}")
+    reasoning_cfg = {
+        "claude": effective_env.get("CLAUDE_REASONING_EFFORT", "(default)"),
+        "codex": effective_env.get("CODEX_REASONING_EFFORT", "(default)"),
+        "adk": effective_env.get("ADK_REASONING_EFFORT", "(default)"),
+        "opencode": effective_env.get("OPENCODE_REASONING_EFFORT", "(default)"),
+    }
+    log(f"Reasoning config [{args.sdk}]: {reasoning_cfg.get(args.sdk, '(default)')}")
 
     tasks = load_tasks_index()
     by_uid = {t["uid"]: t for t in tasks}

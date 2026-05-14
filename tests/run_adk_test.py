@@ -173,6 +173,21 @@ class TestExtractTrajectorySteps(unittest.TestCase):
         self.assertIn("What is the expected output format?", steps[0]["act"])
         self.assertEqual(steps[0]["obs"], "JSON with a 'data' key")
 
+    def test_str_replace_editor_tool_call_has_swe_like_act(self):
+        events = [
+            _make_model_tool_call_event(
+                "str_replace_editor",
+                {"command": "view", "path": "/app/foo.py"},
+                call_id="c4b",
+            ),
+            _make_tool_response_event(
+                "str_replace_editor", {"result": "Here's the result of running `cat -n`..."}, call_id="c4b"
+            ),
+        ]
+        steps = extract_trajectory_steps(events)
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0]["act"], "str_replace_editor view /app/foo.py")
+
     def test_multi_step_sequence(self):
         events = [
             _make_model_text_event("Look at the tests first."),

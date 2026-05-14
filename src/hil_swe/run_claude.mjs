@@ -18,6 +18,7 @@
  *   PASS_INDEX            1-based pass number (default: 1)
  *   RUN_ID                run identifier string
  *   CLAUDE_MODEL          model slug (default: claude-sonnet-4-6)
+ *   CLAUDE_REASONING_EFFORT reasoning effort (low|medium|high|xhigh|max), optional
  *   MAX_TURNS             max agent turns (default: 200)
  *   ATTEMPT_TIMEOUT_MS    hard timeout in ms (default: 10800000 = 3 h)
  *   PERMISSION_MODE       claude permissionMode (default: acceptEdits)
@@ -37,9 +38,11 @@ import { createHumanInputRouter, approvalPolicyRouter, UNKNOWN_RESOLUTION, CANT_
 import { ensureDir, writeJson, writeText } from "../shared/io.mjs";
 import { redactString } from "../shared/redact.mjs";
 import { buildSwePrompt } from "./prompt.mjs";
+import { installClaudeSkill, SKILL_TOOL_REF } from "./skills.mjs";
 import {
   WORKSPACE, TASK_DIR, OUTPUT_DIR,
   MODE, PASS_INDEX, RUN_ID, TIMEOUT_MS,
+  LITELLM_CALL_TIMEOUT_MS, STEP_LITELLM_TRIES,
   ASK_HUMAN_BASE_URL, ASK_HUMAN_MODEL, buildAskHumanGuidance,
   THOUGHT_CAP, ACT_CAP, OBS_CAP, cap, gitDiff,
 } from "./constants.mjs";
@@ -50,12 +53,24 @@ const ASK_HUMAN_GUIDANCE = buildAskHumanGuidance("AskUserQuestion");
 // ── Configuration from env ──────────────────────────────────────────────────
 
 const CLAUDE_MODEL    = process.env.CLAUDE_MODEL  || "claude-sonnet-4-6";
+const CLAUDE_REASONING_EFFORT = (
+  process.env.CLAUDE_REASONING_EFFORT ||
+  process.env.CLAUDE_EFFORT || // backward-compat alias
+  ""
+).trim().toLowerCase();
 const MAX_TURNS       = Number(process.env.MAX_TURNS || "200");
 // "acceptEdits" auto-approves file edits while still letting canUseTool fire for
 // shell/MCP/AskUserQuestion calls so we can intercept them.  bypassPermissions would
 // skip the canUseTool callback for some tool types entirely.
 const PERMISSION_MODE = process.env.PERMISSION_MODE || "acceptEdits";
 const CLAUDE_BIN      = process.env.CLAUDE_CODE_EXECUTABLE || "claude";
+const VALID_CLAUDE_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
+if (CLAUDE_REASONING_EFFORT && !VALID_CLAUDE_EFFORTS.has(CLAUDE_REASONING_EFFORT)) {
+  throw new Error(
+    `Invalid CLAUDE_REASONING_EFFORT='${CLAUDE_REASONING_EFFORT}'. ` +
+    `Must be one of: ${[...VALID_CLAUDE_EFFORTS].join(", ")}.`,
+  );
+}
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -114,9 +129,13 @@ function parseResolutionJson(resolution) {
 
 async function answerClaudeAskUserQuestion({ router, input, permission }) {
   const questions = Array.isArray(input?.questions) ? input.questions : [input];
-  const answers = [];
+  const answerParts = [];
+  // AskUserQuestionOutput.answers is keyed by question text (not header).
+  // This is the structured map passed back via updatedInput so Claude Code
+  // formats the tool result as "question=answer" pairs for the model.
+  const answersMap = {};
   for (const question of questions) {
-    const prompt = `${question?.header ? `${question.header}: ` : ""}${question?.question || "Clarification request"}`;
+    const prompt = question?.question || "Clarification request";
     const result = await router.route({
       requestType: "clarification",
       nativeEventType: "claude.AskUserQuestion.canUseTool",
@@ -125,9 +144,11 @@ async function answerClaudeAskUserQuestion({ router, input, permission }) {
       options: question?.options || [],
       context: { source: "claude_builtin_AskUserQuestion" },
     });
-    answers.push(`${prompt}\n${result.resolution || UNKNOWN_RESOLUTION}`);
+    const answerStr = result.resolution || UNKNOWN_RESOLUTION;
+    answerParts.push(`${prompt}\n${answerStr}`);
+    answersMap[prompt] = answerStr;
   }
-  return answers.join("\n\n");
+  return { answerText: answerParts.join("\n\n"), answers: answersMap, questions };
 }
 
 // ── Trajectory extraction ────────────────────────────────────────────────────
@@ -186,7 +207,7 @@ function formatObs(content, isError) {
  *       • If the turn has tool_use blocks, register each in a pending map with the shared thought.
  *       • If the turn has NO tool_use blocks but has text/thinking content, emit a text-only step.
  *   - For each user turn with tool_result blocks, match by tool_use_id → emit step.
- *   - At the end, flush any unmatched pending calls (e.g. AskUserQuestion denied with no result).
+ *   - At the end, flush any unmatched pending calls (e.g. interrupted before result arrived).
  */
 function extractTrajectorySteps(events) {
   const steps = [];
@@ -198,11 +219,12 @@ function extractTrajectorySteps(events) {
 
   for (const event of events) {
     // ── Ask/answer pairs from AskUserQuestion handling (ask_human mode) ──────
-    // AskUserQuestion is denied (behavior:"deny") so the SDK never executes it
-    // natively.  The claude_ask_question event is pushed by canUseTool after the
-    // LLM judge returns the answer, giving us a clean question + answer pair.
-    // We consume the pending entry here so the deny's synthetic tool_result (if
-    // the SDK emits one) is suppressed by the handledAskIds guard below.
+    // AskUserQuestion is handled via behavior:"allow" + pre-filled updatedInput.answers
+    // so the model receives a proper tool-success result, not a deny error.
+    // The claude_ask_question event is pushed by canUseTool after the LLM judge
+    // returns the answer, giving us a clean question + answer pair.
+    // We consume the pending entry here and add its id to handledAskIds so the
+    // SDK's real tool_result for AskUserQuestion is skipped below (no duplicate).
     if (event.type === "claude_ask_question") {
       const p = pending.get(event.tool_use_id);
       steps.push({
@@ -269,9 +291,9 @@ function extractTrajectorySteps(events) {
       const content = Array.isArray(msg.message?.content) ? msg.message.content : [];
       for (const block of content) {
         if (block.type === "tool_result") {
-          // Skip tool_results that were already captured via claude_ask_question.
-          // The SDK may inject a synthetic tool_result when canUseTool denies a
-          // tool; without this guard we would emit a second, duplicate step.
+          // Skip tool_results already captured via claude_ask_question.
+          // AskUserQuestion allow+answers produces a real tool_result; without
+          // this guard we would emit a duplicate trajectory step.
           if (handledAskIds.has(block.tool_use_id)) continue;
           const obs = formatObs(block.content, block.is_error === true);
           const p = pending.get(block.tool_use_id);
@@ -286,7 +308,7 @@ function extractTrajectorySteps(events) {
     }
   }
 
-  // Flush tool calls that never got a result (e.g. AskUserQuestion denied by canUseTool).
+  // Flush tool calls that never got a result (e.g. interrupted mid-run).
   for (const [, p] of pending) {
     steps.push({ thought: p.thought, act: p.act, obs: "[no observation — tool call was denied or interrupted]" });
   }
@@ -370,6 +392,7 @@ async function main() {
     }));
   }
   const prompt = buildSwePrompt({ problemStatement, mode: MODE, blockers });
+  await installClaudeSkill(WORKSPACE, SKILL_TOOL_REF.claude);
 
   // 3. Write attempt metadata
   const attemptMeta = {
@@ -413,7 +436,8 @@ async function main() {
   // callback but clears allEvents so only the successful attempt's events are
   // preserved in the final trajectory.
   let sdkError = null;
-  const MAX_RETRIES = 3;
+  let stopReason = "complete";
+  const MAX_RETRIES = STEP_LITELLM_TRIES;
   const _runStart = Date.now();
 
   const env = claudeApiEnv();
@@ -422,7 +446,7 @@ async function main() {
     sdkError = null;
     allEvents.length = 0;   // clear in-place so pushEvent closure remains valid
 
-    const PER_ATTEMPT_TIMEOUT_MS = 1_200_000; // 1200 s = 20 min per attempt
+    const PER_ATTEMPT_TIMEOUT_MS = LITELLM_CALL_TIMEOUT_MS;
     const remainingMs    = TIMEOUT_MS - (Date.now() - _runStart);
     const attemptTimeout = Math.min(remainingMs, PER_ATTEMPT_TIMEOUT_MS);
     if (attemptTimeout <= 0) {
@@ -445,6 +469,7 @@ async function main() {
           pathToClaudeCodeExecutable: CLAUDE_BIN,
           cwd: WORKSPACE,
           model: CLAUDE_MODEL,
+          ...(CLAUDE_REASONING_EFFORT ? { effort: CLAUDE_REASONING_EFFORT } : {}),
           maxTurns: MAX_TURNS,
           permissionMode: PERMISSION_MODE,
           env,
@@ -456,24 +481,31 @@ async function main() {
             if (isAskUserQuestionTool(_toolName)) {
               if (humanRouter) {
                 // ask_human mode: route to the LLM-backed human simulator.
-                const answer = await answerClaudeAskUserQuestion({ router: humanRouter, input: _input, permission });
-                // Emit a structured event so extractTrajectorySteps can record the
-                // ask/answer pair in trajectory.json with a clean obs.  We deny the
-                // tool (so it never blocks on stdin) and pass the answer as the deny
-                // message.  If the SDK also injects a synthetic tool_result for the
-                // deny, extractTrajectorySteps will skip it via the handledAskIds set.
+                const { answerText, answers, questions: qs } = await answerClaudeAskUserQuestion({
+                  router: humanRouter, input: _input, permission,
+                });
+                // Emit a structured event so extractTrajectorySteps records the
+                // ask/answer pair in trajectory.json with a clean obs.
                 const q = _input?.question || _input?.questions?.[0]?.question || JSON.stringify(_input || {});
                 pushEvent({
                   type:        "claude_ask_question",
                   timestamp:   new Date().toISOString(),
                   question:    String(q),
-                  answer,
+                  answer:      answerText,
                   tool_use_id: permission.toolUseID,
                 });
+                // Return behavior:"allow" with pre-filled answers so the model receives
+                // a proper AskUserQuestion tool-success result:
+                //   "User has answered your questions: \"q?\"=\"answer\". You can now continue..."
+                // This is the correct SDK pattern (allow + updatedInput.answers keyed by
+                // question text).  It does NOT block on stdin — the answers are already
+                // supplied, so Claude Code returns the tool result immediately.
+                // The handledAskIds guard in extractTrajectorySteps suppresses the SDK's
+                // real tool_result so we don't emit a duplicate trajectory step.
                 return {
-                  behavior: "deny",
-                  toolUseID: permission.toolUseID,
-                  message:   answer,
+                  behavior:    "allow",
+                  updatedInput: { questions: qs, answers },
+                  toolUseID:   permission.toolUseID,
                   decisionClassification: "user_temporary",
                 };
               }
@@ -542,16 +574,26 @@ async function main() {
       }
     } catch (error) {
       const text = redactString(String(error?.stack || error));
-      sdkError = abortController.signal.aborted
-        ? `Timed out after ${TIMEOUT_MS}ms.\n\n${text}`
-        : text;
-      pushEvent({ type: "sdk_error", timestamp: new Date().toISOString(), error: sdkError });
+      const maxTurnsReached = /Reached maximum number of turns/i.test(text);
+      if (maxTurnsReached) {
+        // Claude SDK surfaces maxTurns as an error result string. In this harness,
+        // reaching MAX_TURNS is an expected stop condition, not an infra failure.
+        sdkError = null;
+        stopReason = "max_turns";
+        pushEvent({ type: "max_turns_reached", timestamp: new Date().toISOString(), detail: text });
+      } else {
+        sdkError = abortController.signal.aborted
+          ? `Timed out after ${attemptTimeout}ms.\n\n${text}`
+          : text;
+        stopReason = abortController.signal.aborted ? "timeout" : "sdk_error";
+        pushEvent({ type: "sdk_error", timestamp: new Date().toISOString(), error: sdkError });
+      }
     } finally {
       clearTimeout(timeoutId);
     }
 
-    // Retry only on transient errors (not on timeout — the overall wall-clock budget is exhausted).
-    if (sdkError && !abortController.signal.aborted && _attempt < MAX_RETRIES) {
+    // Retry transient failures, including timeout-aborted turns, up to STEP_LITELLM_TRIES.
+    if (sdkError && _attempt < MAX_RETRIES) {
       process.stderr.write(
         `[run_claude] sdk_error on attempt ${_attempt}/${MAX_RETRIES} for ${uid}, retrying: ${sdkError.slice(0, 200)}\n`,
       );
@@ -565,7 +607,14 @@ async function main() {
   await writeText(path.join(OUTPUT_DIR, "patch.diff"), patch);
 
   // 6b. Post-process trajectory: extract {act, obs, thought} steps and compute stats.
-  pushEvent({ type: "attempt_end", timestamp: new Date().toISOString(), uid, patch_bytes: Buffer.byteLength(patch), sdk_error: sdkError || null });
+  pushEvent({
+    type: "attempt_end",
+    timestamp: new Date().toISOString(),
+    uid,
+    patch_bytes: Buffer.byteLength(patch),
+    sdk_error: sdkError || null,
+    stop_reason: stopReason,
+  });
   const trajectorySteps = extractTrajectorySteps(allEvents);
 
   // Load actual blocker count from blocker_registry.json for ask metrics
@@ -588,6 +637,7 @@ async function main() {
     pass_index: PASS_INDEX,
     harness: "claude-code",
     model: CLAUDE_MODEL,
+    stop_reason: stopReason,
     sdk_error: sdkError || null,
     patch_bytes: Buffer.byteLength(patch),
     ended_at: new Date().toISOString(),
