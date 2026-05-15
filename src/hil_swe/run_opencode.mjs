@@ -553,6 +553,10 @@ async function main() {
         options: {
           apiKey:  LITELLM_API_KEY,
           baseURL: `${llmProxyUrl}/v1`,
+          // OpenCode defaults provider request timeout to 300000ms (5 min).
+          // Long tool-heavy turns can exceed this and surface as generic "fetch failed".
+          // Harness-level timeout/retry already governs total runtime, so disable provider timeout.
+          timeout: false,
         },
         models: {
           [_modelId]: {
@@ -634,12 +638,31 @@ async function main() {
     }
 
     let opencodeInstance = null;
+    let sdkPort = 0;
     let sessionId = null;
     let stopEventReader = false;
     let eventReaderPromise = null;
+    let eventAbort = null;
+    let runDoneResolve = null;
+    let runDoneReject = null;
+    const runDonePromise = new Promise((resolve, reject) => {
+      runDoneResolve = resolve;
+      runDoneReject = reject;
+    });
+    let runDoneSettled = false;
+    const resolveRunDone = (value) => {
+      if (runDoneSettled) return;
+      runDoneSettled = true;
+      runDoneResolve(value);
+    };
+    const rejectRunDone = (reason) => {
+      if (runDoneSettled) return;
+      runDoneSettled = true;
+      runDoneReject(reason instanceof Error ? reason : new Error(String(reason || "unknown run error")));
+    };
 
     try {
-      const sdkPort = await allocateLoopbackPort();
+      sdkPort = await allocateLoopbackPort();
       opencodeInstance = await createOpencode({
         port: sdkPort,
         timeout: OPENCODE_STARTUP_TIMEOUT_MS,
@@ -656,7 +679,12 @@ async function main() {
       if (!sessionId) throw new Error("OpenCode SDK did not return a valid session id");
 
       // Collect server events for this session in the background while prompt runs.
-      const subscription = await client.event.subscribe();
+      eventAbort = new AbortController();
+      const subscription = await client.event.subscribe({
+        signal: eventAbort.signal,
+        // Prevent infinite reconnect loops after shutdown; we own retry at harness level.
+        sseMaxRetryAttempts: 0,
+      });
       const stream = subscription?.stream || subscription;
       eventReaderPromise = (async () => {
         for await (const raw of stream) {
@@ -681,12 +709,42 @@ async function main() {
               "opencode session error"
             );
             if (!sdkError) sdkError = message;
+            rejectRunDone(new Error(message));
+            continue;
+          }
+
+          if (type === "session.idle") {
+            resolveRunDone("idle");
+            continue;
+          }
+
+          if (type === "session.status") {
+            const status = String(properties?.status || "").toLowerCase();
+            if (!status) continue;
+            if (status === "idle" || status === "completed" || status === "done") {
+              resolveRunDone(status);
+              continue;
+            }
+            if (status === "error" || status === "failed" || status === "aborted") {
+              const message = String(properties?.error?.message || properties?.message || `session status ${status}`);
+              if (!sdkError) sdkError = message;
+              rejectRunDone(new Error(message));
+              continue;
+            }
           }
         }
       })();
 
       const promptText = `${instruction}\n\n${prompt}`;
-      const runPromise = client.session.prompt({
+      // Use promptAsync + event-driven completion so long turns do not fail on
+      // long-held HTTP request timeouts from the sync prompt endpoint.
+      const runPromise = client.session.promptAsync ? client.session.promptAsync({
+        path: { id: sessionId },
+        body: {
+          agent: "build",
+          parts: [{ type: "text", text: promptText }],
+        },
+      }) : client.session.prompt({
         path: { id: sessionId },
         body: {
           agent: "build",
@@ -697,13 +755,20 @@ async function main() {
         setTimeout(() => reject(new Error(`OpenCode attempt timed out after ${attemptTimeout}ms`)), attemptTimeout);
       });
 
-      await Promise.race([runPromise, timeoutPromise]);
+      await runPromise;
+      await Promise.race([runDonePromise, timeoutPromise]);
 
       // Treat session.error (captured via stream) as sdk_error even if prompt resolved.
       if (sdkError) stopReason = "sdk_error";
       else stopReason = "complete";
     } catch (err) {
-      const msg = String(err?.message || err);
+      const cause = err && typeof err === "object" ? err.cause : null;
+      const causeText = cause
+        ? String(cause?.code || cause?.message || cause)
+        : "";
+      const msg = causeText
+        ? `${String(err?.message || err)} (cause: ${causeText})`
+        : String(err?.message || err);
       sdkError = msg;
       if (/timed out/i.test(msg)) {
         timedOut = true;
@@ -717,11 +782,17 @@ async function main() {
       }
     } finally {
       stopEventReader = true;
+      if (eventAbort) {
+        try { eventAbort.abort(); } catch { /* ignore */ }
+      }
       if (eventReaderPromise) {
         try { await Promise.race([eventReaderPromise, sleep(2000)]); } catch { /* ignore */ }
       }
+      if (sessionId && opencodeInstance?.client?.instance?.dispose) {
+        try { await opencodeInstance.client.instance.dispose(); } catch { /* ignore */ }
+      }
       if (opencodeInstance?.server?.close) {
-        try { await opencodeInstance.server.close(); } catch { /* ignore */ }
+        try { opencodeInstance.server.close(); } catch { /* ignore */ }
       }
     }
 
@@ -783,7 +854,12 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  process.stderr.write(`[run_opencode] FATAL: ${err.stack || err}\n`);
-  process.exit(1);
-});
+main()
+  .then(() => {
+    // Ensure container exits even if OpenCode SDK/server leaves open handles.
+    process.exit(0);
+  })
+  .catch((err) => {
+    process.stderr.write(`[run_opencode] FATAL: ${err.stack || err}\n`);
+    process.exit(1);
+  });

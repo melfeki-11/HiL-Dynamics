@@ -145,6 +145,7 @@ function createCustomAskHumanMcpServer({ router, pushEvent }) {
         },
         async (input) => {
           const question = String(input?.question || "");
+          const requestType = input?.request_type || "clarification";
           try {
             if (!router) {
               // full_info mode: keep tool exposed but always return irrelevant_question.
@@ -152,11 +153,12 @@ function createCustomAskHumanMcpServer({ router, pushEvent }) {
                 type: "ask_question_full_info_mode",
                 timestamp: new Date().toISOString(),
                 question,
+                source: "custom_mcp",
               });
               return { content: [{ type: "text", text: UNKNOWN_RESOLUTION }] };
             }
             const result = await router.route({
-              requestType: input.request_type || "clarification",
+              requestType,
               nativeEventType: "claude.mcp.ask_human",
               rawEvent: input,
               question,
@@ -167,6 +169,33 @@ function createCustomAskHumanMcpServer({ router, pushEvent }) {
           } catch (err) {
             // Best-effort tool failure handling: keep the agent loop alive and
             // return the canonical retryable answer text.
+            const requestId = `claude_customtool_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+            // Record a synthetic ask attempt so num_questions reflects the tool
+            // usage even when the router call fails before emitting normal events.
+            pushEvent({
+              type: "human_input_raw_event",
+              timestamp: new Date().toISOString(),
+              request_id: requestId,
+              request_type: requestType,
+              native_event_type: "claude.mcp.ask_human",
+              question,
+              options: input.options || [],
+              context: { source: "claude_mcp_tool_error_fallback" },
+              raw_event: input,
+            });
+            pushEvent({
+              type: "human_input_result",
+              timestamp: new Date().toISOString(),
+              request_id: requestId,
+              request_type: requestType,
+              native_event_type: "claude.mcp.ask_human",
+              result: {
+                resolution: CANT_ANSWER,
+                selected_labels: [CANT_ANSWER],
+                blocker_id: UNKNOWN_BLOCKER_ID,
+                status: "error",
+              },
+            });
             pushEvent({
               type: "custom_ask_human_tool_error",
               timestamp: new Date().toISOString(),
@@ -221,11 +250,10 @@ async function answerClaudeAskUserQuestion({ router, input, permission }) {
 function formatAct(toolName, toolInput) {
   const name = String(toolName || "");
   if (!name) return "";
-  const isAskHuman = /ask_human|AskUserQuestion|askUserQuestion/i.test(name);
-  if (isAskHuman) {
-    const q = toolInput?.question || toolInput?.questions?.[0]?.question || JSON.stringify(toolInput || {});
-    return `ask_human ${q}`;
-  }
+  const q = toolInput?.question || toolInput?.questions?.[0]?.question || JSON.stringify(toolInput || {});
+  if (isCustomAskHumanTool(name)) return `ask_human [custom_mcp] ${q}`;
+  if (isAskUserQuestionTool(name)) return `ask_human [native] ${q}`;
+  if (/ask_human/i.test(name)) return `ask_human [other] ${q}`;
   try {
     const inputStr = typeof toolInput === "string" ? toolInput : JSON.stringify(toolInput || {});
     return `${name}: ${inputStr.slice(0, 4000)}`;
@@ -287,11 +315,18 @@ function extractTrajectorySteps(events) {
     // SDK's real tool_result for AskUserQuestion is skipped below (no duplicate).
     if (event.type === "claude_ask_question") {
       const p = pending.get(event.tool_use_id);
-      steps.push({
-        thought: p?.thought ?? "",
-        act:     cap(`ask_human ${event.question}`, ACT_CAP),
-        obs:     cap(String(event.answer ?? ""), OBS_CAP),
-      });
+      const pairs = Array.isArray(event.qa_pairs) && event.qa_pairs.length
+        ? event.qa_pairs
+        : [{ question: event.question, answer: event.answer }];
+      let first = true;
+      for (const pair of pairs) {
+        steps.push({
+          thought: first ? (p?.thought ?? "") : "",
+          act:     cap(`ask_human [native] ${pair?.question || ""}`, ACT_CAP),
+          obs:     cap(String(pair?.answer ?? ""), OBS_CAP),
+        });
+        first = false;
+      }
       pending.delete(event.tool_use_id);
       handledAskIds.add(event.tool_use_id);
       continue;
@@ -305,9 +340,10 @@ function extractTrajectorySteps(events) {
     // not create a duplicate trajectory step.
     if (event.type === "ask_question_full_info_mode") {
       const p = pending.get(event.tool_use_id);
+      const source = event.source || "unknown";
       steps.push({
         thought: p?.thought ?? "",
-        act:     cap(`ask_human ${event.question || ""}`, ACT_CAP),
+        act:     cap(`ask_human [${source}] ${event.question || ""}`, ACT_CAP),
         obs:     UNKNOWN_RESOLUTION,
       });
       if (event.tool_use_id) {
@@ -397,17 +433,46 @@ function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
   let numQuestionsApproval = 0;
   let numQuestionsFullInfo = 0;
   let numBlockersResolved  = 0;
+  const seenRawEventIds    = new Set();
+  const seenResultEventIds = new Set();
+  const requestMetaById    = new Map();
+
+  // One native AskUserQuestion use should count as one question regardless of
+  // how many sub-questions were bundled in that single tool call.
+  for (const ev of events) {
+    if (ev.type === "claude_ask_question") numQuestions++;
+    if (ev.type === "ask_question_full_info_mode") numQuestionsFullInfo++;
+  }
 
   for (const ev of events) {
     if (ev.type === "human_input_raw_event") {
-      if (ASK_HUMAN_REQUEST_TYPES.has(ev.request_type)) {
+      const rid = String(ev.request_id || "");
+      if (rid && seenRawEventIds.has(rid)) continue;
+      if (rid) seenRawEventIds.add(rid);
+      if (rid) {
+        requestMetaById.set(rid, {
+          request_type: ev.request_type,
+          native_event_type: ev.native_event_type,
+        });
+      }
+
+      // Count custom MCP ask_human usage (one raw event = one tool use).
+      if (ev.native_event_type === "claude.mcp.ask_human") {
         numQuestions++;
       } else if (APPROVAL_REQUEST_TYPES.has(ev.request_type)) {
         numQuestionsApproval++;
       }
     }
-    if (ev.type === "ask_question_full_info_mode") numQuestionsFullInfo++;
+
     if (ev.type === "human_input_result") {
+      const rid = String(ev.request_id || "");
+      if (rid && seenResultEventIds.has(rid)) continue;
+      if (rid) seenResultEventIds.add(rid);
+
+      // Ignore any non-clarification result types in core ask metrics.
+      const meta = rid ? requestMetaById.get(rid) : null;
+      if (meta?.request_type && !ASK_HUMAN_REQUEST_TYPES.has(meta.request_type)) continue;
+
       const bid = ev.result?.blocker_id;
       if (bid && bid !== UNKNOWN_BLOCKER_ID && ev.result?.status === "answered") {
         numBlockersResolved++;
@@ -562,12 +627,18 @@ async function main() {
                 // Emit a structured event so extractTrajectorySteps records the
                 // ask/answer pair in trajectory.json with a clean obs.
                 const q = _input?.question || _input?.questions?.[0]?.question || JSON.stringify(_input || {});
+                const qaPairs = (Array.isArray(qs) ? qs : []).map((qq) => {
+                  const prompt = qq?.question || "Clarification request";
+                  return { question: prompt, answer: answers[prompt] || UNKNOWN_RESOLUTION };
+                });
                 pushEvent({
                   type:        "claude_ask_question",
                   timestamp:   new Date().toISOString(),
                   question:    String(q),
                   answer:      answerText,
+                  qa_pairs:    qaPairs,
                   tool_use_id: permission.toolUseID,
+                  source:      "native",
                 });
                 // Return behavior:"allow" with pre-filled answers so the model receives
                 // a proper AskUserQuestion tool-success result:
@@ -601,6 +672,7 @@ async function main() {
                   timestamp:   new Date().toISOString(),
                   question:    String(q),
                   tool_use_id: permission.toolUseID,
+                  source:      "native",
                   toolName:    _toolName,
                   input:       _input,
                 });
