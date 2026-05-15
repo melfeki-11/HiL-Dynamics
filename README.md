@@ -4,9 +4,10 @@ Trust Horizon is a HiL-Bench SWE replication harness for measuring how far real 
 
 The repo runs the same prepared task through three pluggable harnesses:
 
-- Claude Code, default `claude-sonnet-4-6`
-- Codex, default `gpt-5.5` with reasoning effort `low`
-- OpenCode, default `bedrock/qwen.qwen3-32b-v1:0`
+- Claude Code: `claude-opus-4-7` with reasoning effort `xhigh`
+- Codex, `gpt-5.5` with reasoning effort `xhigh`
+- ADK, `gemini/gemini-3.1-pro-preview-customtools` with reasoning effort `high`
+- OpenCode, `fireworks_ai/glm-5p1` with reasoning effort `high`
 
 The default benchmark mode is `ask_human`. The separate `full_info` mode is explicit and uses paper-style prompts where blocker information is included up front.
 
