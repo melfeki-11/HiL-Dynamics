@@ -66,6 +66,7 @@ const ASK_HUMAN_GUIDANCE = buildAskHumanGuidance("requestUserInput");
 const CODEX_MODEL = process.env.CODEX_MODEL || "gpt-5.5";
 const CODEX_BIN   = process.env.CODEX_CODE_EXECUTABLE || "codex";
 const WITH_CUSTOM_TOOL = /^(1|true|yes|on)$/i.test(String(process.env.WITH_CUSTOM_TOOL || ""));
+const CODEX_APPROVAL_POLICY = "on-request";
 // Optional reasoning effort override (none | minimal | low | medium | high | xhigh).
 // When set, plumbed three ways for belt-and-suspenders propagation:
 //   1. injected into CODEX_APP_CONFIG so thread/start.config carries it
@@ -207,7 +208,7 @@ function codexApiEnv({ sidecarUrl = "" } = {}) {
   //   model_providers.litellm.base_url = responsesBaseUrl
   //   wire_api: "responses"   (OpenAI Responses API, not chat completions)
   const codexAppConfig = {
-    approval_policy:  "on-request",
+    approval_policy:  CODEX_APPROVAL_POLICY,
     model_provider:   "litellm",
     model_providers: {
       litellm: {
@@ -376,6 +377,7 @@ async function handleRequestUserInput({ params, router, pushEvent }) {
         question:    prompt,
         answer:      selected.join("; "),
         question_id: question.id,
+        source:      "native_requestUserInput",
       });
     } else {
       // full_info mode: no human present — deny with canonical "irrelevant question".
@@ -393,11 +395,91 @@ async function handleRequestUserInput({ params, router, pushEvent }) {
   return { answers };
 }
 
+function parseResolutionJson(resolution) {
+  try {
+    return JSON.parse(resolution);
+  } catch {
+    return { answer: resolution };
+  }
+}
+
+async function handleElicitationRequest({ params, router, pushEvent }) {
+  // In ask_human mode, route elicitation prompts through the same human router.
+  // In full_info mode, still accept with canonical unknown resolution to avoid
+  // hard MCP-call rejection loops.
+  if (!router) {
+    return { action: "accept", content: parseResolutionJson(UNKNOWN_RESOLUTION), _meta: null };
+  }
+
+  const result = await router.route({
+    requestType: "elicitation",
+    nativeEventType: "codex.mcpServer/elicitation/request",
+    rawEvent: params,
+    question: params?.message || params?.url || "MCP elicitation request",
+    context: {
+      serverName: params?.serverName,
+      mode: params?.mode,
+      requestedSchema: params?.requestedSchema,
+    },
+  });
+  pushEvent({
+    type:      "codex_mcp_elicitation",
+    timestamp: new Date().toISOString(),
+    prompt:    params?.message || params?.url || "MCP elicitation request",
+    answer:    result?.resolution || UNKNOWN_RESOLUTION,
+  });
+  return {
+    action: "accept",
+    content: parseResolutionJson(result?.resolution || UNKNOWN_RESOLUTION),
+    _meta: null,
+  };
+}
+
 // ── Trajectory extraction ─────────────────────────────────────────────────────
 
 /** camelCase/PascalCase item type → snake_case */
 function snakeCase(t) {
   return String(t || "").replace(/([A-Z])/g, (m) => `_${m.toLowerCase()}`).replace(/^_/, "");
+}
+
+function safeJson(value) {
+  try { return JSON.stringify(value); } catch { return "[unserializable]"; }
+}
+
+function mcpToolName(item) {
+  return `${item?.server || ""}.${item?.tool || ""}`.replace(/^\./, "");
+}
+
+function extractMcpResultText(result) {
+  if (result == null) return "";
+  if (typeof result === "string") return result;
+
+  if (Array.isArray(result?.content)) {
+    const parts = result.content
+      .map((c) => {
+        if (typeof c === "string") return c;
+        if (typeof c?.text === "string") return c.text;
+        return null;
+      })
+      .filter(Boolean);
+    if (parts.length) return parts.join("\n");
+  }
+
+  if (typeof result?.structuredContent?.resolution === "string") {
+    return result.structuredContent.resolution;
+  }
+  if (typeof result?.resolution === "string") {
+    return result.resolution;
+  }
+
+  return safeJson(result);
+}
+
+function extractMcpResultEvents(result) {
+  if (!result || typeof result !== "object") return [];
+  const maybeEvents = result?.structuredContent?.events ?? result?.events;
+  if (!Array.isArray(maybeEvents)) return [];
+  return maybeEvents.filter((ev) => ev && typeof ev === "object" && typeof ev.type === "string");
 }
 
 /**
@@ -429,7 +511,17 @@ function extractCodexTrajectorySteps(events) {
     if (ev.type === "codex_ask_question") {
       steps.push({
         thought: currentThought,
-        act:     cap(`ask_human ${ev.question}`, ACT_CAP),
+        act:     cap(`ask_human [native] ${ev.question}`, ACT_CAP),
+        obs:     cap(String(ev.answer ?? ""), OBS_CAP),
+      });
+      currentThought = "";
+      continue;
+    }
+
+    if (ev.type === "codex_mcp_elicitation") {
+      steps.push({
+        thought: currentThought,
+        act:     cap(`mcp_elicitation ${ev.prompt || ""}`, ACT_CAP),
         obs:     cap(String(ev.answer ?? ""), OBS_CAP),
       });
       currentThought = "";
@@ -546,11 +638,16 @@ function extractCodexTrajectorySteps(events) {
       if (itemId && emittedItemIds.has(itemId)) continue;
       if (itemId) emittedItemIds.add(itemId);
 
-      const toolName = `${item.server || ""}.${item.tool || ""}`.replace(/^\./, "");
+      const toolName = mcpToolName(item);
+      let act = `${toolName}: ${safeJson(item.arguments || {})}`;
+      if (toolName === "human_input.ask_human") {
+        const q = String(item?.arguments?.question || "");
+        act = `ask_human [custom_mcp] ${q}`;
+      }
       steps.push({
         thought: currentThought,
-        act:     cap(`${toolName}: ${JSON.stringify(item.arguments || {})}`, ACT_CAP),
-        obs:     cap(String(item.result || item.error || ""), OBS_CAP),
+        act:     cap(act, ACT_CAP),
+        obs:     cap(extractMcpResultText(item.result ?? item.error), OBS_CAP),
       });
       currentThought = "";
       continue;
@@ -571,21 +668,57 @@ function extractCodexTrajectorySteps(events) {
  *                            how often agents ask despite having all info in the prompt.
  */
 function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
-  let numQuestions          = 0;
-  let numQuestionsApproval  = 0;
-  let numQuestionsFullInfo  = 0;
-  let numBlockersResolved   = 0;
+  let numQuestions            = 0;
+  let numQuestionsApproval    = 0;
+  let numQuestionsFullInfo    = 0;
+  let numQuestionsElicitation = 0;
+  let numBlockersResolved     = 0;
+  const seenRawEventIds       = new Set();
+  const seenResultEventIds    = new Set();
+  const requestMetaById       = new Map();
+
+  // Count native tool usage directly from synthesized events: one event = one usage.
+  for (const ev of events) {
+    if (ev.type === "codex_ask_question") numQuestions++;
+    if (ev.type === "ask_question_full_info_mode") numQuestionsFullInfo++;
+  }
 
   for (const ev of events) {
     if (ev.type === "human_input_raw_event") {
-      if (ASK_HUMAN_REQUEST_TYPES.has(ev.request_type))  numQuestions++;
-      else if (APPROVAL_REQUEST_TYPES.has(ev.request_type)) numQuestionsApproval++;
+      const rid = String(ev.request_id || "");
+      if (rid && seenRawEventIds.has(rid)) continue;
+      if (rid) seenRawEventIds.add(rid);
+      if (rid) {
+        requestMetaById.set(rid, {
+          request_type: ev.request_type,
+          native_event_type: ev.native_event_type,
+        });
+      }
+
+      // Count custom MCP ask_human usage separately from native ask_human.
+      if (ev.native_event_type === "codex.mcp.ask_human") {
+        numQuestions++;
+      } else if (ev.native_event_type === "codex.mcpServer/elicitation/request") {
+        // Protocol-level MCP gating prompt, tracked separately from clarification asks.
+        numQuestionsElicitation++;
+      } else if (APPROVAL_REQUEST_TYPES.has(ev.request_type)) {
+        numQuestionsApproval++;
+      }
     }
-    if (ev.type === "ask_question_full_info_mode") numQuestionsFullInfo++;
+
     if (ev.type === "human_input_result") {
+      const rid = String(ev.request_id || "");
+      if (rid && seenResultEventIds.has(rid)) continue;
+      if (rid) seenResultEventIds.add(rid);
+
+      const meta = rid ? requestMetaById.get(rid) : null;
+      const isElicitation = meta?.native_event_type === "codex.mcpServer/elicitation/request";
+      if (isElicitation) continue;
+
       const bid = ev.result?.blocker_id;
-      if (bid && bid !== UNKNOWN_BLOCKER_ID && ev.result?.status === "answered")
+      if (bid && bid !== UNKNOWN_BLOCKER_ID && ev.result?.status === "answered") {
         numBlockersResolved++;
+      }
     }
   }
 
@@ -594,6 +727,7 @@ function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
     num_questions:            numQuestions,
     num_questions_approval:   numQuestionsApproval,
     num_total_questions:      numQuestions + numQuestionsApproval,
+    num_questions_elicitation:numQuestionsElicitation,
     num_questions_full_info:  numQuestionsFullInfo,
     num_blockers_resolved:    numBlockersResolved,
     num_blockers_total:       numBlockersTotal,
@@ -629,6 +763,7 @@ async function runCodexAppServer({ prompt, env, uid, humanRouter, pushEvent, abo
     let currentTurnId = null;
     let itemsDone   = 0;   // completed items (commands + edits + tool calls) in this turn
     let settled     = false;
+    const injectedMcpEventItemIds = new Set();
 
     const settle = (err) => {
       if (settled) return;
@@ -688,6 +823,14 @@ async function runCodexAppServer({ prompt, env, uid, humanRouter, pushEvent, abo
           return { permissions: perms, scope: "turn", strictAutoReview: false };
         }
 
+        // MCP and other approval-style requests can appear under additional
+        // method names (for example, tool-specific requestApproval paths).
+        // Inside this Docker harness, the container is the security boundary,
+        // so all such approvals should be accepted.
+        if (String(method).endsWith("/requestApproval")) {
+          return { decision: "accept" };
+        }
+
         // Legacy approval methods
         if (method === "execCommandApproval" || method === "applyPatchApproval") {
           return { decision: "approved" };
@@ -695,7 +838,22 @@ async function runCodexAppServer({ prompt, env, uid, humanRouter, pushEvent, abo
 
         // MCP elicitation prompts are unsupported in this harness path.
         if (method === "mcpServer/elicitation/request") {
-          return { action: "decline", content: null, _meta: null };
+          return handleElicitationRequest({ params, router: humanRouter, pushEvent });
+        }
+
+        // Defensive MCP fallback: if Codex introduces additional mcpServer/*
+        // request methods, do not silently reject by returning {}. Log the
+        // method and return a permissive, schema-compatible acceptance payload.
+        if (String(method).startsWith("mcpServer/")) {
+          process.stderr.write(
+            `[run_codex] WARN: unhandled MCP server request method '${method}', ` +
+            `using permissive fallback response\n`,
+          );
+          return {
+            action: "accept",
+            content: parseResolutionJson(UNKNOWN_RESOLUTION),
+            _meta: null,
+          };
         }
 
         return {};
@@ -704,6 +862,23 @@ async function runCodexAppServer({ prompt, env, uid, humanRouter, pushEvent, abo
       onNotification: async (msg) => {
         // All notifications go into allEvents for trajectory extraction and stats
         pushEvent({ type: "sdk_event", timestamp: new Date().toISOString(), event: msg });
+
+        // For custom MCP ask_human calls, inject sidecar-emitted human_input_* events
+        // inline from the tool result payload so stats don't depend on out-of-band fetches.
+        if (msg.method === "item/completed") {
+          const item = msg.params?.item;
+          if (snakeCase(item?.type) === "mcp_tool_call") {
+            const itemId = String(item?.id || "");
+            if (!itemId || !injectedMcpEventItemIds.has(itemId)) {
+              const toolName = mcpToolName(item);
+              if (toolName === "human_input.ask_human") {
+                const embeddedEvents = extractMcpResultEvents(item?.result);
+                for (const ev of embeddedEvents) pushEvent(ev);
+              }
+              if (itemId) injectedMcpEventItemIds.add(itemId);
+            }
+          }
+        }
 
         // Track the active turn ID so we can interrupt it if needed
         if (msg.method === "turn/started" &&
@@ -802,7 +977,7 @@ async function runCodexAppServer({ prompt, env, uid, humanRouter, pushEvent, abo
           cwd:                  WORKSPACE,
           model:                CODEX_MODEL,
           modelProvider:        "litellm",
-          approvalPolicy:       "on-request",
+          approvalPolicy:       CODEX_APPROVAL_POLICY,
           approvalsReviewer:    "user",
           sandbox:              "workspace-write",
           sandboxPolicy: {
@@ -825,7 +1000,7 @@ async function runCodexAppServer({ prompt, env, uid, humanRouter, pushEvent, abo
           threadId,
           input: [{ type: "text", text: prompt, text_elements: [] }],
           cwd:              WORKSPACE,
-          approvalPolicy:   "on-request",
+          approvalPolicy:   CODEX_APPROVAL_POLICY,
           approvalsReviewer:"user",
           sandboxPolicy: {
             type:                "workspaceWrite",

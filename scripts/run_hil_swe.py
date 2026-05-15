@@ -641,7 +641,8 @@ def _run_attempt_inner(
 
     container_log = out_dir / "container.log"
     started_at = time.time()
-    host_timeout = int(os.environ.get("ATTEMPT_TIMEOUT_MS", "10800000")) // 1000 + 120
+    host_timeout_ms = int(extra_env.get("ATTEMPT_TIMEOUT_MS") or os.environ.get("ATTEMPT_TIMEOUT_MS", "10800000"))
+    host_timeout = host_timeout_ms // 1000 + 120
     proc: subprocess.Popen | None = None
     try:
         with open(container_log, "w") as log_fh:
@@ -797,6 +798,13 @@ def main() -> None:
     parser.add_argument(
         "--eval-timeout", type=int, default=3600,
         help="Per-attempt eval timeout in seconds (default: 3600).",
+    )
+    parser.add_argument(
+        "--infra-retries", type=int, default=1,
+        help=(
+            "Number of infra-only eval retries per attempt (default: 1). "
+            "Matches scripts/eval_hil_swe.py behavior."
+        ),
     )
     parser.add_argument(
         "--max-turns", type=int, default=None,
@@ -1040,6 +1048,7 @@ def main() -> None:
             run_id=args.run_id,
             skip_if_complete=not args.force and not force_eval,
             timeout_s=args.eval_timeout,
+            infra_retries=max(0, args.infra_retries),
         )
         nonlocal completed_runs
         with completed_runs_lock:
@@ -1128,11 +1137,11 @@ def main() -> None:
             log(f"Cleaned up {cleaned_eval} orphaned eval container(s)")
 
     log(f"\n{'='*60}")
-    log(f"Solve:  {len(successes)} succeeded, {len(failures)} failed.")
+    log(f"Solve jobs: {len(successes)} succeeded, {len(failures)} failed.")
     for msg in failures:
         log(f"  SOLVE FAILED: {msg}", file=sys.stderr)
     if not args.skip_eval:
-        log(f"Eval:   {len(eval_ok)} evaluated, {len(eval_fail)} failed.")
+        log(f"Eval jobs:  {len(eval_ok)} evaluated, {len(eval_fail)} failed.")
         for msg in eval_fail:
             log(f"  EVAL FAILED: {msg}", file=sys.stderr)
 
@@ -1202,6 +1211,9 @@ def main() -> None:
                     n = m.get(f"pass_at_{k}_n", 0)
                     if pa is not None:
                         parts.append(f"    pass@{k}={pa:.3f} (n={n})")
+                eligible_attempts = int(m.get(f"pass_at_{args.passes}_n", 0) or 0)
+                requested_attempts = len(target_tasks)
+                excluded_attempts = max(0, requested_attempts - eligible_attempts)
                 if m.get("ask_f1") is not None:
                     q  = m.get("total_questions", 0)
                     qt = m.get("total_total_questions", 0)

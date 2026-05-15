@@ -31,6 +31,42 @@ if (!SIDECAR_URL) {
 const CANT_ANSWER      = "can't answer (perhaps transient hiccup)";
 const PROTOCOL_VERSION = "2024-11-05";
 
+function fallbackSidecarResult(question = "") {
+  const requestId = `codex_customtool_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+  return {
+    resolution: CANT_ANSWER,
+    selected_labels: [CANT_ANSWER],
+    blocker_id: "unknown",
+    status: "error",
+    events: [
+      {
+        type: "human_input_raw_event",
+        timestamp: new Date().toISOString(),
+        request_id: requestId,
+        request_type: "clarification",
+        native_event_type: "codex.mcp.ask_human",
+        question: String(question || ""),
+        options: [],
+        context: { source: "codex_mcp_bridge_error_fallback" },
+        raw_event: { question: String(question || "") },
+      },
+      {
+        type: "human_input_result",
+        timestamp: new Date().toISOString(),
+        request_id: requestId,
+        request_type: "clarification",
+        native_event_type: "codex.mcp.ask_human",
+        result: {
+          resolution: CANT_ANSWER,
+          selected_labels: [CANT_ANSWER],
+          blocker_id: "unknown",
+          status: "error",
+        },
+      },
+    ],
+  };
+}
+
 // ── JSON-RPC helpers ──────────────────────────────────────────────────────────
 
 function sendMsg(obj) {
@@ -53,7 +89,7 @@ async function sidecarAsk(question) {
     options:           [],
     context:           {},
     request_type:      "clarification",
-    native_event_type: "opencode.ask_human",
+    native_event_type: "codex.mcp.ask_human",
     raw_event:         { question },
   });
 
@@ -62,7 +98,7 @@ async function sidecarAsk(question) {
     try {
       urlObj = new URL(`${SIDECAR_URL}/ask`);
     } catch {
-      resolve(CANT_ANSWER);
+      resolve(fallbackSidecarResult(question));
       return;
     }
 
@@ -83,19 +119,25 @@ async function sidecarAsk(question) {
       res.on("end",   () => {
         try {
           const parsed = JSON.parse(data);
-          resolve(String(parsed.resolution ?? CANT_ANSWER));
+          resolve({
+            resolution: String(parsed.resolution ?? CANT_ANSWER),
+            selected_labels: Array.isArray(parsed.selected_labels) ? parsed.selected_labels : [String(parsed.resolution ?? CANT_ANSWER)],
+            blocker_id: String(parsed.blocker_id ?? "unknown"),
+            status: String(parsed.status ?? "unknown"),
+            events: Array.isArray(parsed.events) ? parsed.events : [],
+          });
         } catch {
-          resolve(CANT_ANSWER);
+          resolve(fallbackSidecarResult(question));
         }
       });
     });
 
-    req.on("error", () => resolve(CANT_ANSWER));
+    req.on("error", () => resolve(fallbackSidecarResult(question)));
 
     // 20-minute timeout — the LLM judge can be slow on large codebases
     req.setTimeout(1_200_000, () => {
       req.destroy();
-      resolve(CANT_ANSWER);
+      resolve(fallbackSidecarResult(question));
     });
 
     req.write(payload);
@@ -173,15 +215,22 @@ rl.on("line", async (line) => {
 
     const question = String(args.question ?? "");
 
-    let resolution;
+    let sidecarResult;
     try {
-      resolution = await sidecarAsk(question);
+      sidecarResult = await sidecarAsk(question);
     } catch {
-      resolution = CANT_ANSWER;
+      sidecarResult = fallbackSidecarResult(question);
     }
 
     success(id, {
-      content: [{ type: "text", text: resolution }],
+      content: [{ type: "text", text: String(sidecarResult.resolution ?? CANT_ANSWER) }],
+      structuredContent: {
+        resolution: String(sidecarResult.resolution ?? CANT_ANSWER),
+        selected_labels: Array.isArray(sidecarResult.selected_labels) ? sidecarResult.selected_labels : [String(sidecarResult.resolution ?? CANT_ANSWER)],
+        blocker_id: String(sidecarResult.blocker_id ?? "unknown"),
+        status: String(sidecarResult.status ?? "unknown"),
+        events: Array.isArray(sidecarResult.events) ? sidecarResult.events : [],
+      },
       isError: false,
     });
     return;

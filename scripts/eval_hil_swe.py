@@ -36,8 +36,8 @@ Docker cleanup:
   Eval containers use the BASE hilbench-swe:<uid> image (not the harness image).
   run_hil_swe.py's cleanup_orphaned_containers only queries by ancestor=harness_image,
   so eval containers are never in its scope regardless of owner tokens.
-  Eval containers also use --rm (auto-removed on exit) and Popen+kill on timeout,
-  so no orphaned containers or processes remain after eval finishes.
+  Eval containers are explicitly removed with `docker rm -f` after each attempt,
+  and cleanup_orphaned_eval_containers() sweeps leftovers after interruptions.
 """
 
 from __future__ import annotations
@@ -296,6 +296,21 @@ def cleanup_orphaned_eval_containers(uid: str) -> int:
         return 0
 
 
+def inspect_container_state(container_name: str) -> dict:
+    """Return docker inspect .State for a container name, or {} on failure."""
+    try:
+        res = subprocess.run(
+            ["docker", "inspect", "--format", "{{json .State}}", container_name],
+            capture_output=True, text=True, check=False,
+        )
+        if res.returncode != 0:
+            return {}
+        txt = (res.stdout or "").strip()
+        return json.loads(txt) if txt else {}
+    except Exception:
+        return {}
+
+
 # ── SWEAP output parsing ────────────────────────────────────────────────────
 
 def parse_sweap_json(output: str) -> list[dict]:
@@ -528,6 +543,7 @@ def eval_attempt(
     run_id: str,
     skip_if_complete: bool,
     timeout_s: int,
+    infra_retries: int,
 ) -> tuple[bool, str]:
     """Evaluate one (uid, mode, pass_index) attempt.  Returns (success, message)."""
     pass_dir = RUNS_DIR / run_id / uid / mode / f"pass_{pass_index}"
@@ -693,7 +709,7 @@ with open(patch_out, 'w', encoding='utf-8') as f:
         # Mirrors swebench run_evaluation.py + make_eval_script_list exactly:
         #
         # 1. Setup (git config) — mirrors make_repo_script_list_local() / make_eval_script_list
-        # 2. Apply agent patch with --allow-empty; fall back to patch --fuzz=5
+        # 2. Apply agent patch; fall back to patch --fuzz=5
         #    Mirrors run_evaluation.py L122-146:
         #      git apply --allow-empty -v /tmp/patch.diff
         #      OR patch --batch --fuzz=5 -p1 -i /tmp/patch.diff
@@ -720,26 +736,22 @@ git config --global user.name SWE-bench
 git config --global --add safe.directory /app
 
 # Apply agent patch.
-# Mirrors run_evaluation.py: git apply --allow-empty -v, then patch --fuzz=5 fallback.
-# If both fail → EvaluationError("APPLY_PATCH_FAIL") in canonical → we exit 3 (unresolved,
-# no tests run) to match canonical behaviour: a failed agent patch is NOT an infra error,
-# it's an unresolved attempt.
-if [ -s /tmp/agent.patch ]; then
-  if git apply --allow-empty -v /tmp/agent.patch 2>/tmp/agent_patch.log; then
-    echo "PATCH_APPLY_STATUS: ok"
-  else
-    echo "git apply failed, trying patch --batch --fuzz=5..." >&2
-    cat /tmp/agent_patch.log >&2
-    if patch --batch --fuzz=5 -p1 -i /tmp/agent.patch 2>/tmp/agent_patch2.log; then
-      echo "PATCH_APPLY_STATUS: ok (patch fallback)"
-    else
-      echo "PATCH_APPLY_STATUS: failed"
-      cat /tmp/agent_patch2.log >&2
-      exit 3
-    fi
-  fi
+# Mirrors swebench run_evaluation.py exactly:
+#   git apply --allow-empty -v /tmp/patch.diff
+#   fallback: patch --batch --fuzz=5 -p1 -i /tmp/patch.diff
+# If both fail → APPLY_PATCH_FAIL (here: exit 3 => unresolved).
+if git apply --allow-empty -v /tmp/agent.patch 2>/tmp/agent_patch.log; then
+  echo "PATCH_APPLY_STATUS: ok"
 else
-  echo "PATCH_APPLY_STATUS: empty"
+  echo "git apply failed, trying patch --batch --fuzz=5..." >&2
+  cat /tmp/agent_patch.log >&2
+  if patch --batch --fuzz=5 -p1 -i /tmp/agent.patch 2>/tmp/agent_patch2.log; then
+    echo "PATCH_APPLY_STATUS: ok (patch fallback)"
+  else
+    echo "PATCH_APPLY_STATUS: failed"
+    cat /tmp/agent_patch2.log >&2
+    exit 3
+  fi
 fi
 
 # Reset test files to HEAD before applying the test patch.
@@ -786,7 +798,7 @@ set +e
         container_name = f"th-eval-{uid[:12]}-{mode}-p{pass_index}-r{_run_id_token(run_id)}"
 
         cmd = [
-            "docker", "run", "--rm",
+            "docker", "run",
             "--name", container_name,
             # hilbench-swe base images have ENTRYPOINT ["sleep", "infinity"] baked in.
             # The harness image clears this with ENTRYPOINT [] in Dockerfile.harness, but
@@ -814,48 +826,73 @@ set +e
             "sh", "/tmp/eval.sh",
         ]
 
-        log(f"{label} Starting eval container ({base_image})")
-        started_at = time.time()
-        proc: subprocess.Popen | None = None
+        max_attempts = max(1, infra_retries + 1)
         stdout_data = b""
         stderr_data = b""
-        try:
-            # Use Popen so we can explicitly kill the docker CLI process on timeout.
-            # subprocess.run(timeout=...) raises TimeoutExpired but does NOT kill the child.
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        elapsed = 0
+        returncode: int | None = None
+        state: dict = {}
+
+        for infra_attempt in range(1, max_attempts + 1):
+            log(f"{label} Starting eval container ({base_image}) [attempt {infra_attempt}/{max_attempts}]")
+            started_at = time.time()
+            proc: subprocess.Popen | None = None
             try:
-                stdout_data, stderr_data = proc.communicate(timeout=timeout_s)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.communicate()  # drain and reap
+                # Use Popen so we can explicitly kill the docker CLI process on timeout.
+                # subprocess.run(timeout=...) raises TimeoutExpired but does NOT kill the child.
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                try:
+                    stdout_data, stderr_data = proc.communicate(timeout=timeout_s)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.communicate()  # drain and reap
+                    subprocess.run(["docker", "rm", "-f", container_name],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                    err = f"eval timed out after {timeout_s}s"
+                    log(f"{label} {err}", file=sys.stderr)
+                    _write_eval_result(eval_path, uid, mode, pass_index, error=err)
+                    _unregister_uid_owner(owner_token)
+                    return False, f"{label} {err}"
+            except Exception as exc:
+                if proc is not None:
+                    try:
+                        proc.kill()
+                        proc.communicate()
+                    except Exception:
+                        pass
                 subprocess.run(["docker", "rm", "-f", container_name],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-                err = f"eval timed out after {timeout_s}s"
-                log(f"{label} {err}", file=sys.stderr)
+                err = str(exc)
+                log(f"{label} Exception: {err}", file=sys.stderr)
                 _write_eval_result(eval_path, uid, mode, pass_index, error=err)
                 _unregister_uid_owner(owner_token)
-                return False, f"{label} {err}"
-        except Exception as exc:
-            if proc is not None:
-                try:
-                    proc.kill()
-                    proc.communicate()
-                except Exception:
-                    pass
+                return False, f"{label} Exception: {err}"
+
+            elapsed = int(time.time() - started_at)
+            returncode = proc.returncode
+            state = inspect_container_state(container_name)
             subprocess.run(["docker", "rm", "-f", container_name],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-            err = str(exc)
-            log(f"{label} Exception: {err}", file=sys.stderr)
-            _write_eval_result(eval_path, uid, mode, pass_index, error=err)
-            _unregister_uid_owner(owner_token)
-            return False, f"{label} Exception: {err}"
 
-        elapsed = int(time.time() - started_at)
+            # Retry fast-fail infra kills (e.g., transient OOM/SIGKILL) before classification.
+            # Only retry when no SWEAP JSON was produced, because valid test output should be
+            # classified immediately (resolved/unresolved/infra_error) without mutation.
+            combined_output = stdout_data.decode(errors="replace") + "\n" + stderr_data.decode(errors="replace")
+            test_results_probe = parse_sweap_json(combined_output)
+            oom_killed_probe = bool(state.get("OOMKilled")) if isinstance(state, dict) else False
+            transient_kill = returncode == 137 and not test_results_probe
+            if transient_kill and infra_attempt < max_attempts:
+                reason = "OOMKilled" if oom_killed_probe else "SIGKILL/exit137"
+                log(f"{label} transient eval infra kill ({reason}); retrying...", file=sys.stderr)
+                time.sleep(min(5 * infra_attempt, 15))
+                continue
+            break
+
         combined_output = stdout_data.decode(errors="replace") + "\n" + stderr_data.decode(errors="replace")
 
         # Determine patch apply status
-        patch_applied = "PATCH_APPLY_STATUS: ok" in combined_output or "PATCH_APPLY_STATUS: empty" in combined_output
-        returncode = proc.returncode
+        patch_applied = "PATCH_APPLY_STATUS: ok" in combined_output
+        assert returncode is not None
         # test_ran is True only when the test harness actually ran (exit 0 or 1).
         # exit 2  = test patch failed to apply (explicit `exit 2` in eval_script) → tests never ran.
         # exit 3  = agent patch failed to apply (both git apply and patch --fuzz=5 failed) → unresolved.
@@ -898,6 +935,7 @@ set +e
             eval_status = "unresolved"
             error_msg = None
 
+        oom_killed = bool(state.get("OOMKilled")) if isinstance(state, dict) else False
         eval_data = {
             "uid": uid,
             "mode": mode,
@@ -911,6 +949,7 @@ set +e
             "failed_tests": failed_tests,
             "all_tests": test_results,
             "container_exit_code": returncode,
+            "oom_killed": oom_killed,
             "elapsed_s": elapsed,
             "error": error_msg,
             "evaluated_at": datetime.now(timezone.utc).isoformat(),
@@ -943,6 +982,7 @@ def _write_eval_result(path: Path, uid: str, mode: str, pass_index: int, error: 
         "failed_tests": [],
         "all_tests": [],
         "container_exit_code": None,
+        "oom_killed": False,
         "elapsed_s": 0,
         "error": error,
         "evaluated_at": datetime.now(timezone.utc).isoformat(),
@@ -1020,6 +1060,10 @@ def main() -> None:
         "--timeout", type=int, default=3600,
         help="Per-attempt eval timeout in seconds (default: 3600).",
     )
+    parser.add_argument(
+        "--infra-retries", type=int, default=1,
+        help="Retries for transient eval infra kills (exit 137 with no SWEAP JSON). Default: 1.",
+    )
     args = parser.parse_args()
 
     run_dir = RUNS_DIR / args.run_id
@@ -1056,6 +1100,7 @@ def main() -> None:
                 run_id=args.run_id,
                 skip_if_complete=not args.force,
                 timeout_s=args.timeout,
+                infra_retries=max(0, args.infra_retries),
             )
 
         with ThreadPoolExecutor(max_workers=workers) as executor:

@@ -868,9 +868,10 @@ async def main() -> None:
         _litellm_kwargs["api_base"] = LITELLM_BASE_URL
     if LITELLM_API_KEY:
         _litellm_kwargs["api_key"] = LITELLM_API_KEY
-    # Per LiteLLM call timeout and retries (3 tries total, 20 minutes each by default).
+    # Per LiteLLM call timeout only.
+    # Retry policy is enforced uniformly at the harness level via STEP_LITELLM_TRIES
+    # so all SDKs get the same TOTAL OVERALL attempts.
     _litellm_kwargs["timeout"] = LITELLM_CALL_TIMEOUT_S
-    _litellm_kwargs["num_retries"] = max(0, STEP_LITELLM_TRIES - 1)
     if ADK_REASONING_EFFORT:
         # Best-effort hint forwarded to LiteLLM; unsupported providers may ignore it.
         _litellm_kwargs["reasoning_effort"] = ADK_REASONING_EFFORT

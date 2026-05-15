@@ -37,6 +37,28 @@ function snakeCase(t) {
   return String(t || "").replace(/([A-Z])/g, (m) => `_${m.toLowerCase()}`).replace(/^_/, "");
 }
 
+function safeJson(value) {
+  try { return JSON.stringify(value); } catch { return "[unserializable]"; }
+}
+
+function mcpToolName(item) {
+  return `${item?.server || ""}.${item?.tool || ""}`.replace(/^\./, "");
+}
+
+function extractMcpResultText(result) {
+  if (result == null) return "";
+  if (typeof result === "string") return result;
+  if (Array.isArray(result?.content)) {
+    const parts = result.content
+      .map((c) => (typeof c === "string" ? c : c?.text))
+      .filter(Boolean);
+    if (parts.length) return parts.join("\n");
+  }
+  if (typeof result?.structuredContent?.resolution === "string") return result.structuredContent.resolution;
+  if (typeof result?.resolution === "string") return result.resolution;
+  return safeJson(result);
+}
+
 function extractCodexTrajectorySteps(events) {
   const steps = [];
   const emittedItemIds = new Set();
@@ -141,11 +163,11 @@ function extractCodexTrajectorySteps(events) {
       if (itemId && emittedItemIds.has(itemId)) continue;
       if (itemId) emittedItemIds.add(itemId);
 
-      const toolName = `${item.server || ""}.${item.tool || ""}`.replace(/^\./, "");
+      const toolName = mcpToolName(item);
       steps.push({
         thought: currentThought,
-        act:     cap(`${toolName}: ${JSON.stringify(item.arguments || {})}`, ACT_CAP),
-        obs:     cap(String(item.result || item.error || ""), OBS_CAP),
+        act:     cap(`${toolName}: ${safeJson(item.arguments || {})}`, ACT_CAP),
+        obs:     cap(extractMcpResultText(item.result ?? item.error), OBS_CAP),
       });
       currentThought = "";
       continue;
@@ -160,14 +182,22 @@ function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
   let numQuestionsApproval  = 0;
   let numQuestionsFullInfo  = 0;
   let numBlockersResolved   = 0;
+  const seenRawEventIds     = new Set();
+  const seenResultEventIds  = new Set();
 
   for (const ev of events) {
     if (ev.type === "human_input_raw_event") {
+      const rid = String(ev.request_id || "");
+      if (rid && seenRawEventIds.has(rid)) continue;
+      if (rid) seenRawEventIds.add(rid);
       if (ASK_HUMAN_REQUEST_TYPES.has(ev.request_type))     numQuestions++;
       else if (APPROVAL_REQUEST_TYPES.has(ev.request_type)) numQuestionsApproval++;
     }
     if (ev.type === "ask_question_full_info_mode") numQuestionsFullInfo++;
     if (ev.type === "human_input_result") {
+      const rid = String(ev.request_id || "");
+      if (rid && seenResultEventIds.has(rid)) continue;
+      if (rid) seenResultEventIds.add(rid);
       const bid = ev.result?.blocker_id;
       if (bid && bid !== UNKNOWN_BLOCKER_ID && ev.result?.status === "answered")
         numBlockersResolved++;
@@ -327,6 +357,31 @@ test("extractCodexTrajectorySteps: mcp_tool_call completed → step", () => {
   assert.equal(steps.length, 1);
   assert.ok(steps[0].act.includes("fs.read_file"));
   assert.ok(steps[0].obs.includes("def foo(): pass"));
+});
+
+test("extractCodexTrajectorySteps: mcp_tool_call structured result is serialized as text", () => {
+  const events = [
+    mkSdkEvent("item/updated", { item: {
+      id: "mcp-structured", type: "mcp_tool_call",
+      server: "human_input", tool: "ask_human",
+      arguments: { question: "default timeout?" },
+      result: {
+        content: [{ type: "text", text: "11s" }],
+        structuredContent: {
+          resolution: "11s",
+          status: "answered",
+          blocker_id: "B42",
+          events: [{ type: "human_input_raw_event", request_id: "rq-1" }],
+        },
+      },
+      status: "completed",
+    }}),
+    mkSdkEvent("turn/completed", {}),
+  ];
+  const steps = extractCodexTrajectorySteps(events);
+  assert.equal(steps.length, 1);
+  assert.equal(steps[0].obs, "11s");
+  assert.ok(!steps[0].obs.includes("[object Object]"));
 });
 
 test("extractCodexTrajectorySteps: mcp_tool_call not yet completed is skipped", () => {
@@ -548,6 +603,22 @@ test("computeTrajectoryStats: mixed events full accounting", () => {
   assert.equal(stats.num_questions_full_info, 0);  // no full_info events
   assert.equal(stats.num_blockers_resolved,  1);
   assert.equal(stats.num_blockers_total,     3);
+});
+
+test("computeTrajectoryStats: duplicate request IDs are deduplicated", () => {
+  const events = [
+    { type: "human_input_raw_event", request_id: "rq-1", request_type: "clarification" },
+    { type: "human_input_raw_event", request_id: "rq-1", request_type: "clarification" },
+    { type: "human_input_raw_event", request_id: "rq-2", request_type: "approval" },
+    { type: "human_input_raw_event", request_id: "rq-2", request_type: "approval" },
+    { type: "human_input_result", request_id: "rq-3", result: { blocker_id: "B1", status: "answered" } },
+    { type: "human_input_result", request_id: "rq-3", result: { blocker_id: "B1", status: "answered" } },
+  ];
+  const stats = computeTrajectoryStats(events, [], 10);
+  assert.equal(stats.num_questions, 1);
+  assert.equal(stats.num_questions_approval, 1);
+  assert.equal(stats.num_total_questions, 2);
+  assert.equal(stats.num_blockers_resolved, 1);
 });
 
 // ── 5. full_info mode question tracking ──────────────────────────────────────
