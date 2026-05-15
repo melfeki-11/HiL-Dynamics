@@ -64,13 +64,13 @@ Environment variables (read from host env, forwarded into each container):
     LITELLM_PROXY_API_KEY       fallback API key
     ASK_HUMAN_BASE_URL          override URL for ask_human LiteLLM judge
     ASK_HUMAN_MODEL             override ask_human judge model slug
-    CLAUDE_MODEL                model slug for the agent when --sdk claude (default: claude-sonnet-4-6)
+    CLAUDE_MODEL                model slug for the agent when --sdk claude (default: claude-opus-4-7)
     CODEX_MODEL                 model slug for the agent when --sdk codex  (default: gpt-5.5)
     ADK_MODEL                   model slug for the agent when --sdk adk    (default: gemini/gemini-3.1-pro-preview-customtools)
     OPENCODE_MODEL              model slug for the agent when --sdk opencode (default: fireworks_ai/glm-5p1)
-    CLAUDE_REASONING_EFFORT     reasoning effort for Claude SDK query options (low|medium|high|xhigh|max)
+    CLAUDE_REASONING_EFFORT     reasoning effort for Claude SDK query options (low|medium|high|xhigh)
     CODEX_REASONING_EFFORT      reasoning effort for Codex app-server (none|minimal|low|medium|high|xhigh)
-    ADK_REASONING_EFFORT        best-effort reasoning effort forwarded to LiteLLM (string)
+    ADK_REASONING_EFFORT        best-effort reasoning effort forwarded to LiteLLM (low|medium|high)
     OPENCODE_REASONING_EFFORT   reasoning effort for OpenCode provider config (low|medium|high|xhigh|max)
     OPENCODE_STARTUP_TIMEOUT_MS startup watchdog before first OpenCode stdout event (default: 300000)
     LITELLM_CALL_TIMEOUT_MS     per-LiteLLM-call timeout in ms (default: 1200000 / 20 min)
@@ -83,6 +83,8 @@ Environment variables (read from host env, forwarded into each container):
 from __future__ import annotations
 
 import argparse
+import getpass
+import hashlib
 import json
 import os
 import re
@@ -111,7 +113,13 @@ from metrics_hil_swe import load_pass_rows, summarize  # noqa: E402
 # helpers probe the PID before removing running containers so we never kill a
 # container belonging to a concurrent script instance (e.g. a different agent/model
 # run for the same task that happens to share the same harness image).
-RUN_OWNER_DIR = Path(os.getenv("HIL_BENCH_RUN_OWNER_DIR", "/tmp/hil_bench_run_owners"))
+def _default_run_owner_dir() -> Path:
+    user = (os.getenv("USER") or getpass.getuser() or "unknown").strip()
+    user = re.sub(r"[^A-Za-z0-9_.-]+", "_", user) or "unknown"
+    return Path(f"/tmp/hil_bench_run_owners_{user}")
+
+
+RUN_OWNER_DIR = Path(os.getenv("HIL_BENCH_RUN_OWNER_DIR") or str(_default_run_owner_dir()))
 
 # ── Attempt-start stagger (mirrors paper_pipeline.py: 20 s between launches) ─
 # Ensures the LiteLLM proxy / model API is not hammered with simultaneous cold
@@ -170,7 +178,7 @@ SDK_CONFIGS = {
         "harness_image_prefix": "hilbench-swe-harness-claude",
         "entrypoint":           "/opt/trust_horizon/src/hil_swe/run_claude.mjs",
         "model_env_key":        "CLAUDE_MODEL",
-        "default_model":        "claude-sonnet-4-6",
+        "default_model":        "claude-opus-4-7",
         "executable_env":       "CLAUDE_CODE_EXECUTABLE=claude",
         # runtime defaults to "node" when absent
     },
@@ -239,6 +247,7 @@ FORWARDED_ENV_KEYS = [
     "OPENCODE_STARTUP_TIMEOUT_MS",
     "LITELLM_CALL_TIMEOUT_MS",
     "STEP_LITELLM_TRIES",
+    "WITH_CUSTOM_TOOL",
     "MAX_TURNS",
     "ATTEMPT_TIMEOUT_MS",
     "PERMISSION_MODE",
@@ -446,6 +455,11 @@ def output_dir_for(run_id: str, uid: str, mode: str, pass_index: int) -> Path:
     return RUNS_DIR / run_id / uid / mode / f"pass_{pass_index}"
 
 
+def _run_id_token(run_id: str) -> str:
+    """Stable short token for container names, collision-resistant across run_ids."""
+    return hashlib.sha1(str(run_id).encode("utf-8")).hexdigest()[:12]
+
+
 SYSTEM_ERROR_STOP_REASONS = {
     "sdk_error",
     "timeout",
@@ -585,8 +599,8 @@ def _run_attempt_inner(
     ]
 
     # Unique container name for targeted cleanup on timeout.
-    # Format: th-swe-<uid12>-<mode>-p<pass>-<run_id12>
-    container_name = f"th-swe-{uid[:12]}-{mode}-p{pass_index}-{run_id[:12]}"
+    # Format: th-swe-<uid12>-<mode>-p<pass>-r<run_id_hash12>
+    container_name = f"th-swe-{uid[:12]}-{mode}-p{pass_index}-r{_run_id_token(run_id)}"
 
     cmd = [
         "docker", "run",
@@ -818,6 +832,15 @@ def main() -> None:
             "completed ALL expected passes are counted in the pass@k denominators."
         ),
     )
+    parser.add_argument(
+        "--with-custom-tool",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable an additional top-level custom ask_human tool for claude/codex SDK "
+            "runs only. Does not replace native question-asking tools."
+        ),
+    )
     args = parser.parse_args()
 
     # ── Apply SDK-specific globals before any worker threads are started ─────────
@@ -856,6 +879,24 @@ def main() -> None:
     # 4. --max-turns shorthand (equivalent to --env MAX_TURNS=N)
     if args.max_turns is not None:
         effective_env["MAX_TURNS"] = str(args.max_turns)
+
+    # 4a. Ensure selected SDK always has an explicit model env value.
+    # This guarantees container-side runners use the same default model policy
+    # even when .env omits the model key and no --env override is provided.
+    sdk_cfg_for_model = SDK_CONFIGS[args.sdk]
+    model_env_key = sdk_cfg_for_model["model_env_key"]
+    if not effective_env.get(model_env_key):
+        effective_env[model_env_key] = sdk_cfg_for_model["default_model"]
+
+    # 4b. Optional custom ask_human tool exposure (claude/codex only)
+    if args.with_custom_tool:
+        if args.sdk not in {"claude", "codex"}:
+            print(
+                "ERROR: --with-custom-tool is only supported with --sdk claude or --sdk codex.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        effective_env["WITH_CUSTOM_TOOL"] = "1"
 
     # 5. Reasoning defaults/overrides (unless SDK-specific key explicitly set via --env)
     sdk_cfg_for_reasoning = SDK_CONFIGS[args.sdk]

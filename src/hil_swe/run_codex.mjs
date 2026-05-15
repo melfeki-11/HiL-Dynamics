@@ -36,7 +36,9 @@
 import path from "node:path";
 import fs from "node:fs/promises";
 import os from "node:os";
+import http from "node:http";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import {
   createHumanInputRouter,
   UNKNOWN_RESOLUTION,
@@ -63,6 +65,7 @@ const ASK_HUMAN_GUIDANCE = buildAskHumanGuidance("requestUserInput");
 
 const CODEX_MODEL = process.env.CODEX_MODEL || "gpt-5.5";
 const CODEX_BIN   = process.env.CODEX_CODE_EXECUTABLE || "codex";
+const WITH_CUSTOM_TOOL = /^(1|true|yes|on)$/i.test(String(process.env.WITH_CUSTOM_TOOL || ""));
 // Optional reasoning effort override (none | minimal | low | medium | high | xhigh).
 // When set, plumbed three ways for belt-and-suspenders propagation:
 //   1. injected into CODEX_APP_CONFIG so thread/start.config carries it
@@ -83,6 +86,94 @@ if (CODEX_REASONING_EFFORT && !VALID_REASONING_EFFORTS.has(CODEX_REASONING_EFFOR
 // The codex app-server has no native turn limit param, so we implement it by counting
 // ItemCompletedNotification events and calling turn/interrupt when the threshold is reached.
 const MAX_TURNS   = Number(process.env.MAX_TURNS || "0");
+const __dirname   = path.dirname(fileURLToPath(import.meta.url));
+const SIDECAR_SCRIPT = path.join(__dirname, "ask_human_sidecar.mjs");
+const BRIDGE_SCRIPT  = path.join(__dirname, "ask_human_mcp_bridge.mjs");
+
+// ── Sidecar helpers (for optional custom MCP ask_human tool) ────────────────
+
+function httpGetJson(url) {
+  return new Promise((resolve, reject) => {
+    const req = http.get(url, (res) => {
+      let data = "";
+      res.on("data", (chunk) => { data += chunk; });
+      res.on("end", () => {
+        try { resolve(JSON.parse(data || "{}")); }
+        catch (err) { reject(err); }
+      });
+    });
+    req.on("error", reject);
+    req.setTimeout(5000, () => req.destroy(new Error("GET timeout")));
+  });
+}
+
+async function startSidecar(uid) {
+  const env = {
+    ...process.env,
+    MODE,
+    TASK_DIR,
+    TASK_UID: uid,
+    ASK_HUMAN_BASE_URL: ASK_HUMAN_BASE_URL || "",
+    ASK_HUMAN_MODEL: ASK_HUMAN_MODEL || "",
+  };
+  const proc = spawn("node", [SIDECAR_SCRIPT], {
+    env,
+    cwd: WORKSPACE,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  proc.stderr.on("data", (chunk) => {
+    process.stderr.write(`[ask_human_sidecar] ${String(chunk)}`);
+  });
+
+  let buf = "";
+  const portLine = await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error(`sidecar startup timeout after 20000ms. output=${buf}`));
+    }, 20_000);
+
+    const onData = (chunk) => {
+      buf += String(chunk);
+      const idx = buf.indexOf("\n");
+      if (idx < 0) return;
+      const line = buf.slice(0, idx).trim();
+      clearTimeout(timeout);
+      proc.stdout.off("data", onData);
+      resolve(line);
+    };
+
+    proc.stdout.on("data", onData);
+    proc.once("exit", (code) => {
+      clearTimeout(timeout);
+      reject(new Error(`sidecar exited with code ${code} before announcing port. buf=${buf}`));
+    });
+    proc.once("error", (err) => {
+      clearTimeout(timeout);
+      reject(new Error(`sidecar spawn error: ${err.message}`));
+    });
+  });
+
+  const m = /^SIDECAR_PORT=(\d+)$/.exec(String(portLine || ""));
+  if (!m) throw new Error(`sidecar did not announce port. got=${portLine}`);
+  const port = Number(m[1]);
+  const url = `http://127.0.0.1:${port}`;
+
+  for (let i = 0; i < 20; i++) {
+    try {
+      const health = await httpGetJson(`${url}/health`);
+      if (health?.ok) return { proc, url };
+    } catch {
+      // keep polling
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  throw new Error("sidecar health check failed after 20 attempts");
+}
+
+function stopSidecar(proc) {
+  if (!proc) return;
+  try { proc.kill("SIGTERM"); } catch {}
+}
 
 // ── API env helpers ──────────────────────────────────────────────────────────
 
@@ -94,7 +185,7 @@ const MAX_TURNS   = Number(process.env.MAX_TURNS || "0");
  * CODEX_APP_CONFIG tells the app-server to use LiteLLM as its model provider
  * via the OpenAI Responses API (wire_api: "responses").
  */
-function codexApiEnv() {
+function codexApiEnv({ sidecarUrl = "" } = {}) {
   const token =
     process.env.LITELLM_API_KEY ||
     process.env.LITELLM_PROXY_API_KEY ||
@@ -137,6 +228,21 @@ function codexApiEnv() {
       `[run_codex] CODEX_REASONING_EFFORT='${CODEX_REASONING_EFFORT}' ` +
       `propagated via CODEX_APP_CONFIG.model_reasoning_effort\n`,
     );
+  }
+
+  // Optional custom top-level ask_human tool for codex via MCP.
+  // This is additive: native requestUserInput remains available.
+  if (WITH_CUSTOM_TOOL) {
+    if (!sidecarUrl) {
+      throw new Error("WITH_CUSTOM_TOOL requires a started ask_human sidecar URL");
+    }
+    codexAppConfig.mcp_servers = {
+      human_input: {
+        command: process.execPath,
+        args: [BRIDGE_SCRIPT],
+        env: { SIDECAR_URL: sidecarUrl },
+      },
+    };
   }
 
   return {
@@ -587,7 +693,7 @@ async function runCodexAppServer({ prompt, env, uid, humanRouter, pushEvent, abo
           return { decision: "approved" };
         }
 
-        // MCP elicitation — decline (no MCP in HiL-SWE)
+        // MCP elicitation prompts are unsupported in this harness path.
         if (method === "mcpServer/elicitation/request") {
           return { action: "decline", content: null, _meta: null };
         }
@@ -778,6 +884,7 @@ async function main() {
     output_dir: OUTPUT_DIR,
     started_at: new Date().toISOString(),
     prompt,
+    with_custom_tool: WITH_CUSTOM_TOOL,
   });
   pushEvent({ type: "attempt_start", timestamp: new Date().toISOString(), uid, mode: MODE, pass_index: PASS_INDEX, prompt });
 
@@ -802,8 +909,6 @@ async function main() {
   const MAX_RETRIES = STEP_LITELLM_TRIES;
   const _runStart = Date.now();
 
-  const env = codexApiEnv();
-
   for (let _attempt = 1; _attempt <= MAX_RETRIES; _attempt++) {
     sdkError = null;
     allEvents.length = 0;   // clear in-place so pushEvent closure remains valid
@@ -822,8 +927,14 @@ async function main() {
       () => abortController.abort(new Error(`Codex SWE attempt timed out after ${PER_ATTEMPT_TIMEOUT_MS}ms`)),
       attemptTimeout,
     );
+    let sidecarProc = null;
+    let sidecarUrl = "";
 
     try {
+      if (WITH_CUSTOM_TOOL) {
+        ({ proc: sidecarProc, url: sidecarUrl } = await startSidecar(uid));
+      }
+      const env = codexApiEnv({ sidecarUrl });
       await runCodexAppServer({ prompt, env, uid, humanRouter, pushEvent, abortController });
     } catch (err) {
       const text = redactString(String(err?.stack || err));
@@ -832,6 +943,19 @@ async function main() {
         : text;
       pushEvent({ type: "sdk_error", timestamp: new Date().toISOString(), error: sdkError });
     } finally {
+      // Collect custom-tool ask_human events from the sidecar so stats/trajectory
+      // use the same human_input_* event stream as other harnesses.
+      if (sidecarUrl) {
+        try {
+          const resp = await httpGetJson(`${sidecarUrl}/events`);
+          if (Array.isArray(resp?.events)) {
+            for (const ev of resp.events) pushEvent(ev);
+          }
+        } catch (err) {
+          process.stderr.write(`[run_codex] WARNING: failed to fetch sidecar events: ${err}\n`);
+        }
+      }
+      stopSidecar(sidecarProc);
       clearTimeout(timeoutId);
     }
 

@@ -34,6 +34,7 @@ import subprocess
 import sys
 import threading
 import time
+from functools import lru_cache
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -101,12 +102,10 @@ ASK_HUMAN_REQUEST_TYPES = frozenset({"clarification", "elicitation"})
 
 AGENT_NAME = "swe_agent"  # must be a valid Python identifier
 SKILL_NAME = "clarify-information"
-SKILL_DESCRIPTION = (
-    "Use for coding tasks with missing, ambiguous, or contradictory information. "
-    "Use when you've identified such information and it would be helpful to get "
-    "more clarification from the human expert before doing the next implementation step."
-)
 SKILL_TOOL_NAME = "ask_human"
+_TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
+_ASK_HUMAN_GUIDANCE_TEMPLATE_PATH = _TEMPLATE_DIR / "ask_human_guidance.txt"
+_SHARED_SKILL_TEMPLATE_PATH = _TEMPLATE_DIR / "ask_human_skill.md"
 
 
 # ── Utility helpers ───────────────────────────────────────────────────────────
@@ -126,21 +125,13 @@ def _write_json(path: str | Path, data: Any) -> None:
     p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+@lru_cache(maxsize=1)
+def _shared_skill_template() -> str:
+    return _SHARED_SKILL_TEMPLATE_PATH.read_text(encoding="utf-8")
+
+
 def _render_shared_skill(tool_name: str) -> str:
-    return f"""---
-name: {SKILL_NAME}
-description: {SKILL_DESCRIPTION}
----
-
-Understand what is the missing piece of information, ambiguity, or contradiction present in the task you need to clarify. Then, use the `{tool_name}` tool to get clarification from the human expert.
-
-Rules for using the `{tool_name}` tool:
-- Submit only ONE, clear, specific question at a time, targeting one specific detail. Never ask multiple questions in one tool call.
-- Never ask general questions about high-level or even medium-level implementation details. E.g. "How should I implement function X?" is a bad question that will NOT be answered by the expert. A much more specific one, such as, "What is the expected return type of function X?" CAN be answered by the expert.
-- If the expert deems your question irrelevant, but you believe it's a necessary clarification, try asking again but word, structure, or format your question differently. An irrelevant classification doesn't just come from asking a useless question; it could also be because you did not ask a specific-enough question, or because you put more than one question in one tool call.
-- If the expert answers your question, **do not ask about the same detail again.** Always immediately incorporate their clarification into your code changes.
-- Always integrate previous expert answers into your problem solving process to unblock you in your implementation or so you can ask follow-up questions.
-"""
+    return _shared_skill_template().replace("{{TOOL_NAME}}", str(tool_name or ""))
 
 
 def _install_workspace_skill_for_discovery(workspace: str, tool_name: str) -> Path:
@@ -264,29 +255,13 @@ def build_swe_prompt(problem_statement: str, mode: str, blockers: list[dict]) ->
 
 _BASE_SYSTEM = "You are a helpful assistant that can interact with a computer to solve tasks."
 
+@lru_cache(maxsize=1)
+def _ask_human_guidance_template() -> str:
+    return _ASK_HUMAN_GUIDANCE_TEMPLATE_PATH.read_text(encoding="utf-8")
+
+
 def _build_ask_human_guidance(tool_name: str) -> str:
-    # Text must be byte-for-byte identical to buildAskHumanGuidance() in
-    # constants.mjs so all three SDKs (Claude, Codex, ADK) receive the same
-    # guidance.  The 6-space bullet indentation and the trailing-space "blank"
-    # line (line starting with "      \n") are intentional — they match the JS
-    # template-literal exactly.
-    return (
-        f"A human expert is available via the {tool_name} tool to answer questions about the implementation requirements. You **must** do the following:\n"
-        f"      - First understand the problem given to you\n"
-        f"      - Then think of what are the missing pieces of information, ambiguities, or contradictions present in the problem, or what are the blockers you need to know before you can start implementing\n"
-        f"      - Then, ask the human expert for clarifications on these topics. Do NOT make assumptions or guesses, you MUST ASK!\n"
-        f"      \n"
-        f"      **Do not spend more than 5 steps trying to find the answer to a blocker in the codebase. You have very limited steps. Instead, use the {tool_name} tool to get clarification FAST.**\n"
-        f"      \n"
-        f"      **IMPORTANT: If you had previous instructions above to not ask questions or to only rely on your own knowledge, IGNORE THOSE INSTRUCTIONS!!!** They are a copy-paste error and do not apply to this task. Again, YOU MUST USE THE {tool_name} TOOL HERE TO ASK QUESTIONS WHERE NECESSARY.\n"
-        f"\n"
-        f"      Rules for using the {tool_name} tool:\n"
-        f"      - Submit only ONE, clear, specific question at a time, targeting one specific detail. Never ask multiple questions in one tool call.\n"
-        f'      - Never ask general questions about high-level or even medium-level implementation details. E.g. "How should I implement function X?" is a bad question that will NOT be answered by the expert. A much more specific one, such as, "What is the expected return type of function X?" CAN be answered by the expert.\n'
-        f"      - If the expert deems your question irrelevant, but you believe it's a necessary clarification, try asking again but word, structure, or format your question differently. An irrelevant classification doesn't just come from asking a useless question; it could also be because you did not ask a specific-enough question, or because you put more than one question in one tool call.\n"
-        f"      - If the expert answers your question, **do not ask about the same detail again.** Always immediately incorporate their clarification into your code changes.\n"
-        f"      - Always integrate previous expert answers into your problem solving process to unblock you in your implementation or so you can ask follow-up questions."
-    )
+    return _ask_human_guidance_template().replace("{{TOOL_NAME}}", str(tool_name or ""))
 
 
 def _build_instruction(mode: str) -> str:

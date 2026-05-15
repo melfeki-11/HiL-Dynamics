@@ -43,6 +43,8 @@ Docker cleanup:
 from __future__ import annotations
 
 import argparse
+import getpass
+import hashlib
 import json
 import os
 import re
@@ -62,7 +64,18 @@ TASKS_DIR = DATA_DIR / "tasks"
 TASKS_INDEX = DATA_DIR / "tasks_index.json"
 RUNS_DIR = ROOT / "runs"
 
-RUN_OWNER_DIR = Path(os.getenv("HIL_BENCH_RUN_OWNER_DIR", "/tmp/hil_bench_run_owners"))
+
+def _run_id_token(run_id: str) -> str:
+    """Stable short token for container names, collision-resistant across run_ids."""
+    return hashlib.sha1(str(run_id).encode("utf-8")).hexdigest()[:12]
+
+def _default_run_owner_dir() -> Path:
+    user = (os.getenv("USER") or getpass.getuser() or "unknown").strip()
+    user = re.sub(r"[^A-Za-z0-9_.-]+", "_", user) or "unknown"
+    return Path(f"/tmp/hil_bench_run_owners_{user}")
+
+
+RUN_OWNER_DIR = Path(os.getenv("HIL_BENCH_RUN_OWNER_DIR") or str(_default_run_owner_dir()))
 
 # The eval container runs the base hilbench-swe image (not the harness).
 # It applies patches and runs run_script.sh / parser.py that are already baked in.
@@ -769,8 +782,8 @@ set +e
         eval_script_file.write_text(eval_script)
 
         # Unique name so we can kill by name on timeout (same pattern as run_hil_swe.py).
-        # Format: th-eval-<uid12>-<mode>-p<pass>-<run_id12>
-        container_name = f"th-eval-{uid[:12]}-{mode}-p{pass_index}-{run_id[:12]}"
+        # Format: th-eval-<uid12>-<mode>-p<pass>-r<run_id_hash12>
+        container_name = f"th-eval-{uid[:12]}-{mode}-p{pass_index}-r{_run_id_token(run_id)}"
 
         cmd = [
             "docker", "run", "--rm",

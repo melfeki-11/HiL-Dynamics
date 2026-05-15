@@ -33,7 +33,8 @@
 
 import path from "node:path";
 import fs from "node:fs/promises";
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { createSdkMcpServer, query, tool } from "@anthropic-ai/claude-agent-sdk";
+import { z } from "zod";
 import { createHumanInputRouter, approvalPolicyRouter, UNKNOWN_RESOLUTION, CANT_ANSWER, UNKNOWN_BLOCKER_ID, ASK_HUMAN_REQUEST_TYPES, APPROVAL_REQUEST_TYPES } from "../shared/human_input.mjs";
 import { ensureDir, writeJson, writeText } from "../shared/io.mjs";
 import { redactString } from "../shared/redact.mjs";
@@ -64,6 +65,7 @@ const MAX_TURNS       = Number(process.env.MAX_TURNS || "200");
 // skip the canUseTool callback for some tool types entirely.
 const PERMISSION_MODE = process.env.PERMISSION_MODE || "acceptEdits";
 const CLAUDE_BIN      = process.env.CLAUDE_CODE_EXECUTABLE || "claude";
+const WITH_CUSTOM_TOOL = /^(1|true|yes|on)$/i.test(String(process.env.WITH_CUSTOM_TOOL || ""));
 const VALID_CLAUDE_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
 if (CLAUDE_REASONING_EFFORT && !VALID_CLAUDE_EFFORTS.has(CLAUDE_REASONING_EFFORT)) {
   throw new Error(
@@ -123,8 +125,66 @@ function isAskUserQuestionTool(toolName) {
   return /AskUserQuestion|askUserQuestion/.test(String(toolName || ""));
 }
 
-function parseResolutionJson(resolution) {
-  try { return JSON.parse(resolution); } catch { return { answer: resolution }; }
+function isCustomAskHumanTool(toolName) {
+  return String(toolName || "") === "mcp__human_input__ask_human";
+}
+
+function createCustomAskHumanMcpServer({ router, pushEvent }) {
+  return createSdkMcpServer({
+    name: "human_input",
+    version: "0.1.0",
+    alwaysLoad: true,
+    tools: [
+      tool(
+        "ask_human",
+        "Ask a focused clarification question about task requirements.",
+        {
+          question: z.string(),
+          request_type: z.enum(["clarification", "elicitation"]).optional(),
+          options: z.array(z.object({ label: z.string(), description: z.string().optional() })).optional(),
+        },
+        async (input) => {
+          const question = String(input?.question || "");
+          try {
+            if (!router) {
+              // full_info mode: keep tool exposed but always return irrelevant_question.
+              pushEvent({
+                type: "ask_question_full_info_mode",
+                timestamp: new Date().toISOString(),
+                question,
+              });
+              return { content: [{ type: "text", text: UNKNOWN_RESOLUTION }] };
+            }
+            const result = await router.route({
+              requestType: input.request_type || "clarification",
+              nativeEventType: "claude.mcp.ask_human",
+              rawEvent: input,
+              question,
+              options: input.options || [],
+              context: { source: "claude_mcp_tool" },
+            });
+            return { content: [{ type: "text", text: result.resolution || UNKNOWN_RESOLUTION }] };
+          } catch (err) {
+            // Best-effort tool failure handling: keep the agent loop alive and
+            // return the canonical retryable answer text.
+            pushEvent({
+              type: "custom_ask_human_tool_error",
+              timestamp: new Date().toISOString(),
+              error: String(err?.message || err),
+            });
+            return {
+              content: [{ type: "text", text: CANT_ANSWER }],
+              isError: true,
+            };
+          }
+        },
+        {
+          alwaysLoad: true,
+          annotations: { readOnlyHint: true },
+        },
+      ),
+    ],
+  });
 }
 
 async function answerClaudeAskUserQuestion({ router, input, permission }) {
@@ -429,6 +489,9 @@ async function main() {
         ...(ASK_HUMAN_MODEL ? { modelId: ASK_HUMAN_MODEL } : {}),
       })
     : null;
+  const customAskHumanMcp = WITH_CUSTOM_TOOL
+    ? createCustomAskHumanMcpServer({ router: humanRouter, pushEvent })
+    : null;
 
   // 5. Run agent with up to 3 attempts
   // Retries occur only on transient SDK errors; timeouts and clean completions
@@ -473,8 +536,20 @@ async function main() {
           maxTurns: MAX_TURNS,
           permissionMode: PERMISSION_MODE,
           env,
-          mcpServers: [],
+          mcpServers: customAskHumanMcp ? { human_input: customAskHumanMcp } : [],
           canUseTool: async (_toolName, _input, permission) => {
+            // Custom top-level MCP ask_human tool is optional (--with-custom-tool).
+            // Let it run directly; the tool handler itself routes to the same
+            // ask-human backend and records structured events.
+            if (isCustomAskHumanTool(_toolName)) {
+              return {
+                behavior: "allow",
+                updatedInput: _input || {},
+                toolUseID: permission.toolUseID,
+                decisionClassification: "user_temporary",
+              };
+            }
+
             // Native AskUserQuestion: intercept and route through the ask_human simulator
             // (ask_human mode) or deny cleanly (full_info mode, where all information is
             // provided upfront and no human is present to answer questions).
