@@ -8,8 +8,8 @@
  *
  *   ask_human mode : item/tool/requestUserInput → createHumanInputRouter → LLM judge
  *                    (identical to claude-code AskUserQuestion routing)
- *   full_info mode : item/tool/requestUserInput → UNKNOWN_RESOLUTION ("irrelevant question")
- *                    (identical to claude-code full_info behaviour)
+ *   full_info mode : item/tool/requestUserInput → answers filled with UNKNOWN_RESOLUTION
+ *                    ("irrelevant question") — mirrors claude-code full_info behaviour
  *
  * Layout inside the container (identical to run_claude.mjs):
  *   /task/      ro  metadata.json, problem_statement.txt, blocker_registry.json, ...
@@ -49,7 +49,7 @@ import {
 import { ensureDir, writeJson, writeText } from "../shared/io.mjs";
 import { redactString } from "../shared/redact.mjs";
 import { buildSwePrompt } from "./prompt.mjs";
-import { installAgentsSkill, SKILL_TOOL_REF } from "./skills.mjs";
+import { installAgentsSkill, removeInstalledAskHumanSkills, SKILL_TOOL_REF } from "./skills.mjs";
 import {
   WORKSPACE, TASK_DIR, OUTPUT_DIR,
   MODE, PASS_INDEX, RUN_ID, TIMEOUT_MS,
@@ -341,7 +341,7 @@ class JsonRpcProcess {
  * Mirrors handleRequestUserInput() in app_server.mjs.
  *
  * ask_human mode : route each question through the LLM judge (createHumanInputRouter).
- * full_info mode : deny with UNKNOWN_RESOLUTION ("irrelevant question") — all info
+ * full_info mode : fill answers with UNKNOWN_RESOLUTION ("irrelevant question") — all info
  *                  is already in the prompt so the agent should not need to ask.
  */
 async function handleRequestUserInput({ params, router, pushEvent }) {
@@ -380,7 +380,7 @@ async function handleRequestUserInput({ params, router, pushEvent }) {
         source:      "native_requestUserInput",
       });
     } else {
-      // full_info mode: no human present — deny with canonical "irrelevant question".
+      // full_info mode: no human present — respond with canonical "irrelevant question"
       // We still push a structured event so the trajectory extractor can record the
       // attempt (as an ask_human step with obs "irrelevant question") and so the
       // stats counter num_questions_full_info is incremented.
@@ -676,6 +676,17 @@ function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
   const seenRawEventIds       = new Set();
   const seenResultEventIds    = new Set();
   const requestMetaById       = new Map();
+  const requestStatusById     = new Map();
+
+  // Build request_id → status map first so failed ask_human bridge/tool calls
+  // (status="error") can be excluded from question counters.
+  for (const ev of events) {
+    if (ev.type !== "human_input_result") continue;
+    const rid = String(ev.request_id || "");
+    if (!rid) continue;
+    const status = String(ev.result?.status || "unknown").toLowerCase();
+    requestStatusById.set(rid, status);
+  }
 
   // Count native tool usage directly from synthesized events: one event = one usage.
   for (const ev of events) {
@@ -688,6 +699,8 @@ function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
       const rid = String(ev.request_id || "");
       if (rid && seenRawEventIds.has(rid)) continue;
       if (rid) seenRawEventIds.add(rid);
+      const status = rid ? requestStatusById.get(rid) : null;
+      if (status === "error") continue;
       if (rid) {
         requestMetaById.set(rid, {
           request_type: ev.request_type,
@@ -1042,7 +1055,11 @@ async function main() {
     }));
   }
   const prompt = buildSwePrompt({ problemStatement, mode: MODE, blockers });
-  await installAgentsSkill(WORKSPACE, SKILL_TOOL_REF.codex);
+  if (MODE === "full_info") {
+    await removeInstalledAskHumanSkills(WORKSPACE);
+  } else {
+    await installAgentsSkill(WORKSPACE, SKILL_TOOL_REF.codex);
+  }
 
   // 3. Write attempt metadata
   await writeJson(path.join(OUTPUT_DIR, "attempt.json"), {

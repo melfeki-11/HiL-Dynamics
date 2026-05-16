@@ -33,10 +33,9 @@
  *
  * ask_human tool behaviour:
  *   ask_human mode  — MCP ask_human tool registered + guided; questions routed through
- *                     ask_human_sidecar → human_input.mjs
- *   full_info mode  — MCP ask_human tool STILL registered (agent can call it), NO guidance
- *                     in system prompt; calls return "irrelevant question" and are counted
- *                     in num_questions_full_info (same rule as Claude + Codex + ADK)
+ *                     ask_human_sidecar → human_input.mjs; ask-human SKILL.md installed.
+ *   full_info mode  — NO MCP ask_human tool, NO ask-human guidance in system prompt,
+ *                     and NO ask-human skill on disk.
  *
  * Tool approvals:
  *   In SDK/server mode we set agent.build.permission edit/bash to "allow" in
@@ -52,7 +51,7 @@ import { fileURLToPath } from "node:url";
 import { createOpencode } from "@opencode-ai/sdk";
 
 import { buildSwePrompt } from "./prompt.mjs";
-import { installOpenCodeSkill, SKILL_TOOL_REF } from "./skills.mjs";
+import { installOpenCodeSkill, removeInstalledAskHumanSkills, SKILL_TOOL_REF } from "./skills.mjs";
 import {
   WORKSPACE, TASK_DIR, OUTPUT_DIR,
   MODE, PASS_INDEX, RUN_ID, TIMEOUT_MS,
@@ -266,6 +265,42 @@ function httpGetJson(url) {
   });
 }
 
+function httpPostJson(url, body = {}) {
+  return new Promise((resolve, reject) => {
+    const payload = JSON.stringify(body);
+    const u = new URL(url);
+    const req = http.request(
+      {
+        method: "POST",
+        protocol: u.protocol,
+        hostname: u.hostname,
+        port: u.port,
+        path: u.pathname + u.search,
+        headers: {
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(payload),
+        },
+      },
+      (res) => {
+        let data = "";
+        res.on("data", (c) => { data += c; });
+        res.on("end", () => {
+          if (res.statusCode !== 200) {
+            reject(new Error(`HTTP ${res.statusCode || "?"}`));
+            return;
+          }
+          try { resolve(JSON.parse(data || "{}")); }
+          catch (e) { reject(e); }
+        });
+      }
+    );
+    req.on("error", reject);
+    req.setTimeout(10_000, () => { req.destroy(); reject(new Error("timeout")); });
+    req.write(payload);
+    req.end();
+  });
+}
+
 // ── Stats computation ─────────────────────────────────────────────────────────
 
 /**
@@ -279,9 +314,22 @@ function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
   let numQuestionsApproval = 0;
   let numQuestionsFullInfo = 0;
   let numBlockersResolved  = 0;
+  const requestStatusById  = new Map();
+
+  // Exclude failed ask_human invocations (status="error") from question counts.
+  for (const ev of events) {
+    if (ev.type !== "human_input_result") continue;
+    const rid = String(ev.request_id || "");
+    if (!rid) continue;
+    const status = String(ev.result?.status || "unknown").toLowerCase();
+    requestStatusById.set(rid, status);
+  }
 
   for (const ev of events) {
     if (ev.type === "human_input_raw_event") {
+      const rid = String(ev.request_id || "");
+      const status = rid ? requestStatusById.get(rid) : null;
+      if (status === "error") continue;
       if (ASK_HUMAN_REQUEST_TYPES.has(ev.request_type)) {
         numQuestions++;
       } else if (APPROVAL_REQUEST_TYPES.has(ev.request_type)) {
@@ -448,7 +496,12 @@ async function main() {
   // 3. Build prompt and system instruction
   const prompt      = buildSwePrompt({ problemStatement, mode: MODE, blockers });
   const instruction = buildInstruction(MODE);
-  await installOpenCodeSkill(WORKSPACE, SKILL_TOOL_REF.opencode);
+  const askHumanToolEnabled = MODE === "ask_human";
+  if (!askHumanToolEnabled) {
+    await removeInstalledAskHumanSkills(WORKSPACE);
+  } else {
+    await installOpenCodeSkill(WORKSPACE, SKILL_TOOL_REF.opencode);
+  }
 
   // 4. Write attempt metadata
   await writeJson(path.join(OUTPUT_DIR, "attempt.json"), {
@@ -465,25 +518,28 @@ async function main() {
     output_dir: OUTPUT_DIR,
     started_at: nowIso(),
     prompt,
+    ask_human_tool_enabled: askHumanToolEnabled,
   });
 
-  // 5a. Start ask_human sidecar (unconditional — handles both modes gracefully)
+  // 5a. Start ask_human sidecar only when ask_human tool is enabled.
   let sidecarProc = null;
   let sidecarUrl  = "";
-  try {
-    ({ proc: sidecarProc, url: sidecarUrl } = await startSidecar(uid));
-  } catch (err) {
-    const sdkErr = `Failed to start ask_human sidecar: ${err}`;
-    process.stderr.write(`[run_opencode] ERROR: ${sdkErr}\n`);
-    await writeJson(path.join(OUTPUT_DIR, "result.json"), {
-      patch_bytes:  0,
-      num_steps:    0,
-      completed_at: nowIso(),
-      sdk_error:    sdkErr,
-      timeout:      false,
-      stop_reason:  "sidecar_start_failed",
-    });
-    return;
+  if (askHumanToolEnabled) {
+    try {
+      ({ proc: sidecarProc, url: sidecarUrl } = await startSidecar(uid));
+    } catch (err) {
+      const sdkErr = `Failed to start ask_human sidecar: ${err}`;
+      process.stderr.write(`[run_opencode] ERROR: ${sdkErr}\n`);
+      await writeJson(path.join(OUTPUT_DIR, "result.json"), {
+        patch_bytes:  0,
+        num_steps:    0,
+        completed_at: nowIso(),
+        sdk_error:    sdkErr,
+        timeout:      false,
+        stop_reason:  "sidecar_start_failed",
+      });
+      return;
+    }
   }
 
   // 5b. Start the LiteLLM drop-params proxy.
@@ -540,9 +596,8 @@ async function main() {
   //              prepended to the user message (stdin), which the model sees first and
   //              treats as authoritative instructions before the task description.
   //    • "agent.build.steps" = MAX_TURNS — caps the number of agentic steps.
-  //    • "mcp.ask_human" is present UNCONDITIONALLY (both ask_human and full_info modes).
-  //      In full_info mode, the sidecar returns "irrelevant question" immediately and
-  //      records an ask_question_full_info_mode event, mirroring Claude/Codex/ADK behaviour.
+  //    • "mcp.ask_human" is present ONLY in ask_human mode. In full_info mode
+  //      no ask_human tool is exposed to the agent.
   //    • "autoupdate: false" prevents the agent from downloading updates mid-run.
   //    • "environment" (not "env") is the correct key in OpenCode's MCP local config schema.
   const opencodeConfig = {
@@ -587,17 +642,21 @@ async function main() {
         },
       },
     },
-    mcp: {
-      ask_human: {
-        // type "local" + command as array.
-        // "environment" is the correct key in OpenCode's McpLocalConfig schema
-        // (not "env" — that field is unknown and silently ignored).
-        type:        "local",
-        enabled:     true,
-        command:     ["node", BRIDGE_SCRIPT],
-        environment: { SIDECAR_URL: sidecarUrl },
-      },
-    },
+    ...(askHumanToolEnabled
+      ? {
+          mcp: {
+            ask_human: {
+              // type "local" + command as array.
+              // "environment" is the correct key in OpenCode's McpLocalConfig schema
+              // (not "env" — that field is unknown and silently ignored).
+              type:        "local",
+              enabled:     true,
+              command:     ["node", BRIDGE_SCRIPT],
+              environment: { SIDECAR_URL: sidecarUrl },
+            },
+          },
+        }
+      : {}),
   };
   // 7. Configure OpenCode runtime behavior for SDK/server mode.
   //
@@ -617,6 +676,7 @@ async function main() {
   let sdkError   = null;
   let timedOut   = false;
   let stopReason = "complete";
+  let allEvents  = [];
 
   const MAX_RETRIES = STEP_LITELLM_TRIES;
   const _runStart = Date.now();
@@ -627,6 +687,26 @@ async function main() {
     sdkError   = null;
     timedOut   = false;
     stopReason = "complete";
+    let attemptEventStartIndex = 0;
+
+    if (askHumanToolEnabled) {
+      // Best-effort reset so sidecar /events contains only this retry attempt.
+      // If reset fails, fall back to snapshot/slice logic for isolation.
+      try {
+        await httpPostJson(`${sidecarUrl}/events/reset`);
+        attemptEventStartIndex = 0;
+      } catch (err) {
+        process.stderr.write(`[run_opencode] WARNING: failed to reset sidecar events before retry attempt: ${err}\n`);
+        try {
+          const snap = await httpGetJson(`${sidecarUrl}/events`);
+          const existing = Array.isArray(snap?.events) ? snap.events : [];
+          attemptEventStartIndex = existing.length;
+        } catch (snapErr) {
+          process.stderr.write(`[run_opencode] WARNING: failed pre-attempt sidecar event snapshot: ${snapErr}\n`);
+          attemptEventStartIndex = 0;
+        }
+      }
+    }
 
     const PER_ATTEMPT_TIMEOUT_MS = LITELLM_CALL_TIMEOUT_MS;
     const remainingMs = TIMEOUT_MS - (Date.now() - _runStart);
@@ -796,6 +876,21 @@ async function main() {
       }
     }
 
+    // Capture ONLY this attempt's sidecar events (delta since attempt start).
+    // Retries should not leak ask_human events into the final pass stats.
+    let attemptEvents = [];
+    if (askHumanToolEnabled) {
+      try {
+        const snap = await httpGetJson(`${sidecarUrl}/events`);
+        const fullEvents = Array.isArray(snap?.events) ? snap.events : [];
+        const start = Math.max(0, Math.min(attemptEventStartIndex, fullEvents.length));
+        attemptEvents = fullEvents.slice(start);
+      } catch (err) {
+        process.stderr.write(`[run_opencode] WARNING: failed to fetch attempt sidecar events: ${err}\n`);
+        attemptEvents = [];
+      }
+    }
+
     // Retry transient failures and timeout-aborted turns up to STEP_LITELLM_TRIES.
     if ((stopReason === "sdk_error" || stopReason === "timeout") && _attempt < MAX_RETRIES) {
       process.stderr.write(
@@ -803,26 +898,16 @@ async function main() {
       );
       continue;
     }
+    allEvents = attemptEvents;
     break;
   }
 
-  // 9. Retrieve all human_input events accumulated by the sidecar.
-  //    These are the ground-truth events for stats (same approach as
-  //    ADK's all_events list, just retrieved post-run instead of inline).
-  let allEvents = [];
-  try {
-    const resp = await httpGetJson(`${sidecarUrl}/events`);
-    allEvents = Array.isArray(resp.events) ? resp.events : [];
-  } catch (err) {
-    process.stderr.write(`[run_opencode] WARNING: failed to fetch sidecar events: ${err}\n`);
-  }
-
-  // 10. Collect patch and build trajectory + stats
+  // 9. Collect patch and build trajectory + stats
   const patch = await gitDiff(WORKSPACE);
   const trajectorySteps = extractTrajectory(opencodeEvents);
   const stats = computeTrajectoryStats(allEvents, trajectorySteps, numBlockersTotal);
 
-  // 11. Write output files (same order / format as run_claude.mjs + run_adk.py)
+  // 10. Write output files (same order / format as run_claude.mjs + run_adk.py)
   await writeText(path.join(OUTPUT_DIR, "patch.diff"),       patch);
   await writeJson(path.join(OUTPUT_DIR, "trajectory.json"),  trajectorySteps);
   await writeJson(path.join(OUTPUT_DIR, "stats.json"),       stats);
@@ -835,7 +920,7 @@ async function main() {
     stop_reason:  stopReason,
   });
 
-  // 12. Cleanup
+  // 11. Cleanup
   stopSidecar(sidecarProc);
   stopLiteLLMProxy(llmProxyProc);
 

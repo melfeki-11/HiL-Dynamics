@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 """
-Ingest HiL-Bench SWE tasks from HuggingFace into trust_horizon's data directory.
+Ingest HiL-Bench SWE tasks into trust_horizon's local task registry.
+
+Public attempts are ingested from the ScaleAI/hil-bench HF dataset.
+Private attempts are ingested via the paper pipeline's native attempt loader
+(`create_data_object + setup_task_environment`), which reads source-of-truth
+task data directly from backend storage (e.g., Mongo-backed attempt metadata)
+and builds/reuses attempt-scoped `hilbench-swe:<attempt_id>` images with the
+same setup logic used in the paper stack.
 
 For each requested attempt (by uid/attempt_id), this script:
-  1. Loads the task record from the ScaleAI/hil-bench HF dataset
-  2. Downloads the Docker image archive (tar.zst) from HF buckets
-  3. docker loads the image and records the resulting image name
-  4. Extracts run_script.sh and parser.py from the loaded image
-  5. Writes all metadata files under data/hil_bench_swe/tasks/<attempt_id>/
+  1. Resolves attempt source (HF public row vs. private paper pipeline data)
+  2. Ensures the task image is available locally (download/load for HF, setup/build/reuse for private)
+  3. Ensures run_script.sh and parser.py are available
+  4. Writes all metadata files under data/hil_bench_swe/tasks/<attempt_id>/
 
 Output layout per task:
   data/hil_bench_swe/tasks/<attempt_id>/
@@ -21,9 +27,11 @@ A summary index is written to:
   data/hil_bench_swe/tasks_index.json
 
 Usage:
-  python3 scripts/ingest_hil_swe.py --uids 69bc1094b455a91fa20fb868 69a9e77602049c14d2793bb5 69c60cc7b6a31e9900faa779
-  python3 scripts/ingest_hil_swe.py --all          # all 100 public SWE tasks
-  python3 scripts/ingest_hil_swe.py --csv models/research_evals/hil_bench/utils/swe_delivered_tasks_and_attempts_PUBLIC.csv
+  python3 scripts/ingest_hil_swe.py --uids 69bc1094b455a91fa20fb868 69a9e77602049c14d2793bb5
+  python3 scripts/ingest_hil_swe.py --all --p-set public
+  python3 scripts/ingest_hil_swe.py --all --p-set private
+  python3 scripts/ingest_hil_swe.py --all --p-set both
+  python3 scripts/ingest_hil_swe.py --csv models/research_evals/hil_bench/utils/swe_delivered_tasks_and_attempts_PRIVATE.csv
 """
 
 from __future__ import annotations
@@ -36,6 +44,8 @@ import shlex
 import subprocess
 import sys
 import threading
+import types
+from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -64,6 +74,30 @@ ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data" / "hil_bench_swe"
 TASKS_DIR = DATA_DIR / "tasks"
 IMAGES_CACHE_DIR = DATA_DIR / "image_archives"
+SRC_ROOT = ROOT.parent
+MODELS_ROOT = SRC_ROOT / "models"
+PUBLIC_UIDS_CSV = (
+    MODELS_ROOT
+    / "research_evals"
+    / "hil_bench"
+    / "utils"
+    / "swe_delivered_tasks_and_attempts_PUBLIC.csv"
+)
+PRIVATE_UIDS_CSV = (
+    MODELS_ROOT
+    / "research_evals"
+    / "hil_bench"
+    / "utils"
+    / "swe_delivered_tasks_and_attempts_PRIVATE.csv"
+)
+
+
+@dataclass(frozen=True)
+class WorkItem:
+    uid: str
+    source: str  # "hf" | "private"
+    row: dict[str, Any] | None = None
+    repo_or_db_name_hint: str = ""
 
 
 def _parse_token_from_env_file(path: Path) -> str | None:
@@ -99,6 +133,75 @@ def read_hf_token() -> str | None:
     if token:
         return token
     return None
+
+
+def _ensure_models_import_paths() -> None:
+    for path in (
+        MODELS_ROOT,
+        MODELS_ROOT / "genai",
+        MODELS_ROOT / "research_evals" / "hil_bench",
+        SRC_ROOT
+        / "scaleapi"
+        / "packages"
+        / "customer-data-service"
+        / "clients"
+        / "customer_data_service_python_helper",
+        SRC_ROOT
+        / "scaleapi"
+        / "packages"
+        / "customer-data-service"
+        / "clients"
+        / "python",
+        SRC_ROOT
+        / "scaleapi"
+        / "packages"
+        / "s2sauth-helper-client"
+        / "s2sauth_python_helper",
+        SRC_ROOT
+        / "scaleapi"
+        / "packages"
+        / "s2sauth"
+        / "clients"
+        / "python",
+    ):
+        s = str(path)
+        if path.exists() and s not in sys.path:
+            sys.path.insert(0, s)
+
+
+def _ensure_botocore_vendored_requests_shim() -> None:
+    """Provide botocore.vendored.requests shim for older internal imports."""
+    try:
+        import botocore.vendored  # type: ignore  # pragma: no cover
+
+        return
+    except Exception:
+        pass
+    try:
+        import requests
+    except Exception:
+        return
+    vendored = types.ModuleType("botocore.vendored")
+    vendored.requests = requests
+    sys.modules.setdefault("botocore.vendored", vendored)
+    sys.modules.setdefault("botocore.vendored.requests", requests)
+
+
+def _load_paper_pipeline_helpers():
+    _ensure_models_import_paths()
+    _ensure_botocore_vendored_requests_shim()
+    try:
+        from research_evals.hil_bench.utils.paper_pipeline import (  # type: ignore
+            create_data_object,
+            setup_task_environment,
+            validate_swe_runtime_task,
+        )
+    except Exception as e:  # pragma: no cover - import errors are environment-dependent
+        raise RuntimeError(
+            "Failed importing paper_pipeline SWE helpers required for private ingest. "
+            f"Expected repo path under {MODELS_ROOT}. Original error: {e}"
+        ) from e
+    return create_data_object, setup_task_environment, validate_swe_runtime_task
 
 
 def _normalize_blocker_entry(entry: dict) -> dict:
@@ -153,6 +256,19 @@ def ensure_list_of_strings(value: Any) -> list[str]:
         parsed = json.loads(stripped) if stripped.startswith("[") else [stripped]
         return [str(v) for v in parsed if str(v).strip()]
     return [str(value)]
+
+
+def load_csv_rows_by_uid(csv_path: Path) -> dict[str, dict[str, str]]:
+    import csv
+
+    rows: dict[str, dict[str, str]] = {}
+    with open(csv_path) as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            uid = str(row.get("attempt_id", "")).strip()
+            if uid:
+                rows[uid] = row
+    return rows
 
 
 def docker_image_exists(image_name: str) -> bool:
@@ -250,7 +366,7 @@ def download_hf_file(hf_uri: str, destination: Path, token: str | None) -> None:
     print(f"    Downloaded {bytes_written // 1024 // 1024} MB → {destination.name}", flush=True)
 
 
-def ingest_task(row: dict, token: str | None, skip_if_exists: bool) -> dict:
+def ingest_task_from_hf(row: dict, token: str | None, skip_if_exists: bool) -> dict:
     uid = str(row["uid"])
     task_dir = TASKS_DIR / uid
     metadata_path = task_dir / "metadata.json"
@@ -318,6 +434,119 @@ def ingest_task(row: dict, token: str | None, skip_if_exists: bool) -> dict:
     return metadata
 
 
+def ingest_task_from_private(
+    uid: str,
+    *,
+    repo_or_db_name_hint: str,
+    skip_if_exists: bool,
+) -> dict:
+    task_dir = TASKS_DIR / uid
+    metadata_path = task_dir / "metadata.json"
+
+    if skip_if_exists and metadata_path.exists():
+        existing = json.loads(metadata_path.read_text())
+        image_name = str(existing.get("image_name", "")).strip()
+        if image_name and docker_image_exists(image_name):
+            print(f"  [{uid}] Already ingested and image present, skipping.")
+            return existing
+
+    create_data_object, setup_task_environment, validate_swe_runtime_task = _load_paper_pipeline_helpers()
+
+    print(f"  [{uid}] Ingesting private SWE attempt via paper pipeline ...")
+    task_dir.mkdir(parents=True, exist_ok=True)
+    ctx = None
+    source_task_dir: Path | None = None
+
+    try:
+        attempt_data = create_data_object(uid, "swe")
+        source_task_dir, _, ctx = setup_task_environment(
+            attempt_data=attempt_data,
+            task_type="swe",
+        )
+        if source_task_dir is None:
+            validation_error = getattr(ctx, "validation_error", "") if ctx is not None else ""
+            raise RuntimeError(
+                f"paper_pipeline setup_task_environment returned no task_dir for {uid}. "
+                f"validation_error={validation_error!r}"
+            )
+        source_task_dir = Path(source_task_dir)
+        valid, validation_error = validate_swe_runtime_task(source_task_dir, uid)
+        if not valid:
+            raise RuntimeError(
+                f"SWE runtime validation failed for {uid}: {validation_error or 'unknown'}"
+            )
+
+        source_metadata = json.loads((source_task_dir / "metadata.json").read_text())
+        image_name = str(source_metadata.get("image_name", "")).strip()
+        if not image_name:
+            raise RuntimeError(f"Missing image_name in source metadata for {uid}")
+        if not docker_image_exists(image_name):
+            raise RuntimeError(f"Expected prebuilt image missing after setup: {image_name}")
+
+        combined_problem_statement = (
+            f"# PROBLEM STATEMENT\n{attempt_data.problem_statement}\n\n\n"
+            f"# REQUIREMENTS\n{attempt_data.problem_requirements}\n\n\n"
+            f"# PUBLIC INTERFACES\n{attempt_data.problem_interfaces}"
+        )
+        (task_dir / "problem_statement.txt").write_text(combined_problem_statement)
+
+        for script_name in ("run_script.sh", "parser.py"):
+            src = source_task_dir / script_name
+            if not src.exists():
+                raise FileNotFoundError(f"Missing required {script_name} at {src}")
+            (task_dir / script_name).write_text(src.read_text())
+
+        blocker_entries = normalize_blockers(getattr(attempt_data, "blocker_registry", []))
+        blocker_registry = {"version": 1, "entries": blocker_entries}
+        (task_dir / "blocker_registry.json").write_text(json.dumps(blocker_registry, indent=2))
+
+        fail_to_pass = ensure_list_of_strings(
+            (source_metadata.get("swe_bench_metadata") or {}).get("FAIL_TO_PASS")
+            or getattr(attempt_data, "tests_to_pass", [])
+        )
+        test_files = ensure_list_of_strings(
+            source_metadata.get("test_files")
+            or getattr(attempt_data, "test_files", [])
+        )
+        metadata = {
+            "instance_id": str(getattr(attempt_data, "instance_id")),
+            "uid": uid,
+            "repo_name": "app",
+            "repo_or_db_name": str(repo_or_db_name_hint or getattr(attempt_data, "repo_name", "")),
+            "base_commit": "HEAD",
+            "image_name": image_name,
+            "log_parser": str(source_metadata.get("log_parser") or SWEAP_LOG_PARSER),
+            "test_cmd": str(source_metadata.get("test_cmd") or SWEAP_TEST_CMD),
+            "test_patch": str(source_metadata.get("test_patch") or ""),
+            "swe_bench_metadata": {
+                "FAIL_TO_PASS": fail_to_pass,
+                "PASS_TO_PASS": ensure_list_of_strings(
+                    (source_metadata.get("swe_bench_metadata") or {}).get("PASS_TO_PASS") or []
+                ),
+            },
+            "test_files": test_files,
+            "num_blockers": len(blocker_entries),
+        }
+        if source_metadata.get("language"):
+            metadata["language"] = str(source_metadata["language"])
+        metadata_path.write_text(json.dumps(metadata, indent=2))
+        print(f"    Prepared private task artifacts (image={image_name}, blockers={len(blocker_entries)})")
+        return metadata
+    except ModuleNotFoundError as e:
+        missing_module = str(getattr(e, "name", "") or "").strip() or str(e)
+        raise RuntimeError(
+            "Private ingest requires the paper_pipeline runtime stack to be importable in the current "
+            f"Python environment. Missing module: {missing_module}. "
+            "Install missing internal deps (or run from the same env used by paper_pipeline) and retry."
+        ) from e
+    finally:
+        if ctx is not None and hasattr(ctx, "cleanup"):
+            try:
+                ctx.cleanup()
+            except Exception:
+                pass
+
+
 def load_hf_dataset(token: str | None) -> list[dict]:
     if token:
         os.environ["HF_TOKEN"] = token
@@ -329,45 +558,72 @@ def load_hf_dataset(token: str | None) -> list[dict]:
     return swe_rows
 
 
-def load_public_csv_uids(csv_path: Path) -> list[str]:
-    import csv
-    uids = []
-    with open(csv_path) as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            uid = row.get("attempt_id", "").strip()
-            if uid:
-                uids.append(uid)
-    return uids
+def load_csv_uids(csv_path: Path) -> list[str]:
+    return list(load_csv_rows_by_uid(csv_path).keys())
 
 
 def write_tasks_index(results: list[dict]) -> None:
     index_path = DATA_DIR / "tasks_index.json"
-    index = []
+    merged: dict[str, dict[str, Any]] = {}
+
+    if index_path.exists():
+        try:
+            existing = json.loads(index_path.read_text())
+            if isinstance(existing, list):
+                for row in existing:
+                    uid = str((row or {}).get("uid", "")).strip()
+                    if uid:
+                        merged[uid] = dict(row)
+        except Exception:
+            pass
+
     for m in results:
+        uid = str(m.get("uid", "")).strip()
+        if not uid:
+            continue
         instance_id = m.get("instance_id", "")
-        # task_id is formatted as "public_swe_N" or "private_swe_N" by prepare_hf_tasks.py
         is_public = str(instance_id).startswith("public_")
-        index.append({
-            "uid": m.get("uid"),
+        merged[uid] = {
+            "uid": uid,
             "instance_id": instance_id,
             "is_public": is_public,
             "repo_or_db_name": m.get("repo_or_db_name"),
             "image_name": m.get("image_name"),
             "num_blockers": m.get("num_blockers", 0),
-            "task_dir": str(TASKS_DIR / m.get("uid", "")),
-        })
+            "task_dir": str(TASKS_DIR / uid),
+        }
+
+    index = sorted(merged.values(), key=lambda row: str(row.get("uid", "")))
     index_path.write_text(json.dumps(index, indent=2))
-    print(f"\nWrote tasks index: {index_path} ({len(index)} tasks)")
+    print(f"\nWrote tasks index: {index_path} ({len(index)} tasks total)")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Ingest HiL-Bench SWE tasks from HuggingFace.")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Ingest HiL-Bench SWE tasks into trust_horizon. "
+            "Public attempts are read from HF; private attempts are prepared through paper_pipeline."
+        )
+    )
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--uids", nargs="+", metavar="UID", help="Specific attempt UIDs to ingest.")
-    group.add_argument("--all", action="store_true", help="Ingest all 100 public SWE tasks.")
+    group.add_argument(
+        "--all",
+        action="store_true",
+        help="Ingest all attempts from --p-set (default: public).",
+    )
     group.add_argument("--csv", type=Path, metavar="CSV_PATH",
-                       help="CSV file with attempt_id column (e.g. swe_delivered_tasks_and_attempts_PUBLIC.csv).")
+                       help="CSV file with attempt_id column.")
+    parser.add_argument(
+        "--p-set",
+        choices=["public", "private", "both"],
+        default="public",
+        help=(
+            "Partition set used by --all. "
+            "'public' uses swe_delivered_tasks_and_attempts_PUBLIC.csv, "
+            "'private' uses swe_delivered_tasks_and_attempts_PRIVATE.csv."
+        ),
+    )
     parser.add_argument("--skip-if-exists", action="store_true", default=True,
                         help="Skip tasks already ingested with image present (default: True).")
     parser.add_argument("--no-skip", dest="skip_if_exists", action="store_false",
@@ -382,43 +638,109 @@ def main() -> None:
     if not token:
         print("Warning: No HF token found. Set HF_TOKEN env var or run `huggingface-cli login`.")
 
-    swe_rows = load_hf_dataset(token)
-    rows_by_uid = {str(r["uid"]): r for r in swe_rows}
+    public_csv_rows = load_csv_rows_by_uid(PUBLIC_UIDS_CSV) if PUBLIC_UIDS_CSV.exists() else {}
+    private_csv_rows = load_csv_rows_by_uid(PRIVATE_UIDS_CSV) if PRIVATE_UIDS_CSV.exists() else {}
 
     if args.all:
-        target_uids = list(rows_by_uid.keys())
+        target_uids: list[str] = []
+        if args.p_set in {"public", "both"}:
+            target_uids.extend(public_csv_rows.keys())
+        if args.p_set in {"private", "both"}:
+            target_uids.extend(private_csv_rows.keys())
     elif args.csv:
-        target_uids = load_public_csv_uids(args.csv)
+        target_uids = load_csv_uids(args.csv)
         print(f"Loaded {len(target_uids)} UIDs from CSV.")
     else:
         target_uids = args.uids
 
-    missing = [u for u in target_uids if u not in rows_by_uid]
-    if missing:
-        print(f"ERROR: UIDs not found in HF dataset: {missing}", file=sys.stderr)
+    # Preserve order while deduplicating.
+    target_uids = list(dict.fromkeys(target_uids))
+    if not target_uids:
+        print("ERROR: No target UIDs resolved from arguments.", file=sys.stderr)
         sys.exit(1)
 
-    workers = args.workers if args.workers is not None else min(len(target_uids), 4)
-    print(f"\nIngesting {len(target_uids)} task(s) with {workers} worker(s)...\n", flush=True)
+    # Determine whether we need HF rows at all.
+    # Private-only runs can avoid loading HF entirely.
+    def _source_hint(uid: str) -> str:
+        in_public = uid in public_csv_rows
+        in_private = uid in private_csv_rows
+        if in_public and not in_private:
+            return "hf"
+        if in_private and not in_public:
+            return "private"
+        if in_public and in_private:
+            if args.p_set == "private":
+                return "private"
+            return "hf"
+        return "unknown"
+
+    hints = {uid: _source_hint(uid) for uid in target_uids}
+    need_hf = any(h in {"hf", "unknown"} for h in hints.values())
+    rows_by_uid: dict[str, dict[str, Any]] = {}
+    if need_hf:
+        swe_rows = load_hf_dataset(token)
+        rows_by_uid = {str(r["uid"]): r for r in swe_rows}
+
+    work_items: list[WorkItem] = []
+    unresolved: list[str] = []
+    for uid in target_uids:
+        hint = hints[uid]
+        if hint == "hf":
+            row = rows_by_uid.get(uid)
+            if row is None:
+                unresolved.append(uid)
+                continue
+            work_items.append(WorkItem(uid=uid, source="hf", row=row))
+            continue
+        if hint == "private":
+            hint_repo = str(private_csv_rows.get(uid, {}).get("repo_or_db_name", ""))
+            work_items.append(
+                WorkItem(uid=uid, source="private", repo_or_db_name_hint=hint_repo)
+            )
+            continue
+
+        # Unknown source: try HF first, then fall back to private paper-pipeline path.
+        row = rows_by_uid.get(uid)
+        if row is not None:
+            work_items.append(WorkItem(uid=uid, source="hf", row=row))
+        else:
+            hint_repo = str(private_csv_rows.get(uid, {}).get("repo_or_db_name", ""))
+            work_items.append(
+                WorkItem(uid=uid, source="private", repo_or_db_name_hint=hint_repo)
+            )
+
+    if unresolved:
+        print(f"ERROR: UIDs requested as public but not found in HF dataset: {unresolved}", file=sys.stderr)
+        sys.exit(1)
+
+    workers = args.workers if args.workers is not None else min(len(work_items), 4)
+    print(f"\nIngesting {len(work_items)} task(s) with {workers} worker(s)...\n", flush=True)
 
     results = []
     errors = []
 
-    def ingest_one(uid: str) -> dict:
-        return ingest_task(rows_by_uid[uid], token, args.skip_if_exists)
+    def ingest_one(item: WorkItem) -> dict:
+        if item.source == "hf":
+            assert item.row is not None
+            return ingest_task_from_hf(item.row, token, args.skip_if_exists)
+        return ingest_task_from_private(
+            item.uid,
+            repo_or_db_name_hint=item.repo_or_db_name_hint,
+            skip_if_exists=args.skip_if_exists,
+        )
 
     if workers == 1:
-        for uid in tqdm(target_uids, desc="Ingesting", unit="task"):
+        for item in tqdm(work_items, desc="Ingesting", unit="task"):
             try:
-                metadata = ingest_one(uid)
+                metadata = ingest_one(item)
                 results.append(metadata)
             except Exception as e:
-                tqdm.write(f"  ERROR ingesting {uid}: {e}", file=sys.stderr)
-                errors.append((uid, str(e)))
+                tqdm.write(f"  ERROR ingesting {item.uid}: {e}", file=sys.stderr)
+                errors.append((item.uid, str(e)))
     else:
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {executor.submit(ingest_one, uid): uid for uid in target_uids}
-            with tqdm(total=len(target_uids), desc="Ingesting", unit="task") as pbar:
+            futures = {executor.submit(ingest_one, item): item.uid for item in work_items}
+            with tqdm(total=len(work_items), desc="Ingesting", unit="task") as pbar:
                 for future in as_completed(futures):
                     uid = futures[future]
                     try:
