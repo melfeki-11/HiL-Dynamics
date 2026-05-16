@@ -33,6 +33,7 @@ from run_adk import (
     THOUGHT_CAP,
     UNKNOWN_BLOCKER_ID,
     UNKNOWN_RESOLUTION,
+    _build_agent_tools,
     _build_instruction,
     build_swe_prompt,
     compute_stats,
@@ -285,6 +286,20 @@ class TestComputeStats(unittest.TestCase):
         self.assertEqual(stats["num_questions_approval"], 2)
         self.assertEqual(stats["num_total_questions"],    2)
 
+    def test_failed_requests_status_error_are_excluded_from_question_counts(self):
+        events = [
+            {"type": "human_input_raw_event", "request_id": "ok-1", "request_type": "clarification"},
+            {"type": "human_input_result", "request_id": "ok-1", "result": {"blocker_id": UNKNOWN_BLOCKER_ID, "status": "unknown"}},
+            {"type": "human_input_raw_event", "request_id": "err-1", "request_type": "clarification"},
+            {"type": "human_input_result", "request_id": "err-1", "result": {"blocker_id": UNKNOWN_BLOCKER_ID, "status": "error"}},
+            {"type": "human_input_raw_event", "request_id": "err-2", "request_type": "approval"},
+            {"type": "human_input_result", "request_id": "err-2", "result": {"blocker_id": UNKNOWN_BLOCKER_ID, "status": "error"}},
+        ]
+        stats = compute_stats(events, [], 0)
+        self.assertEqual(stats["num_questions"],          1)
+        self.assertEqual(stats["num_questions_approval"], 0)
+        self.assertEqual(stats["num_total_questions"],    1)
+
     def test_full_info_events_counted_in_num_questions_full_info(self):
         events = [
             {"type": "ask_question_full_info_mode", "question": "Q1"},
@@ -378,7 +393,7 @@ class TestBuildInstruction(unittest.TestCase):
     def test_ask_human_mode_contains_base_and_guidance(self):
         instr = _build_instruction("ask_human")
         self.assertIn("helpful assistant", instr)
-        self.assertIn("ask_human", instr)         # tool name in guidance
+        self.assertIn("asking tool", instr)
         self.assertIn("human expert", instr)
 
     def test_full_info_mode_contains_only_base(self):
@@ -389,8 +404,8 @@ class TestBuildInstruction(unittest.TestCase):
 
     def test_ask_human_guidance_references_tool_name(self):
         instr = _build_instruction("ask_human")
-        # The guidance must reference the exact tool name the model will see
-        self.assertIn("ask_human tool", instr)
+        # Guidance must direct the model to use the dedicated asking tool (name in code: ask_human).
+        self.assertIn("asking tool", instr)
 
 
 # ── 5. Sidecar integration tests ─────────────────────────────────────────────
@@ -412,6 +427,42 @@ def _make_sidecar_request(url: str, question: str) -> dict:
     with _urllib.urlopen(req, timeout=10) as resp:
         return _json.loads(resp.read())
 
+
+
+
+class TestBuildAgentTools(unittest.TestCase):
+
+    def test_full_info_excludes_ask_human_tool(self):
+        def bash_tool():
+            return None
+
+        def editor_tool():
+            return None
+
+        def ask_human_tool():
+            return None
+
+        tools = _build_agent_tools("full_info", bash_tool, editor_tool, ask_human_tool, [])
+        self.assertIn(bash_tool, tools)
+        self.assertIn(editor_tool, tools)
+        self.assertNotIn(ask_human_tool, tools)
+
+    def test_ask_human_mode_includes_ask_human_tool_and_skills(self):
+        def bash_tool():
+            return None
+
+        def editor_tool():
+            return None
+
+        def ask_human_tool():
+            return None
+
+        skill_toolset = object()
+        tools = _build_agent_tools("ask_human", bash_tool, editor_tool, ask_human_tool, [skill_toolset])
+        self.assertIn(bash_tool, tools)
+        self.assertIn(editor_tool, tools)
+        self.assertIn(ask_human_tool, tools)
+        self.assertIn(skill_toolset, tools)
 
 class TestSidecarIntegration(unittest.TestCase):
     """Integration tests that actually spawn ask_human_sidecar.mjs."""

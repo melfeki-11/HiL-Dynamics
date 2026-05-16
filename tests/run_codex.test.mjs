@@ -184,12 +184,23 @@ function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
   let numBlockersResolved   = 0;
   const seenRawEventIds     = new Set();
   const seenResultEventIds  = new Set();
+  const requestStatusById   = new Map();
+
+  for (const ev of events) {
+    if (ev.type !== "human_input_result") continue;
+    const rid = String(ev.request_id || "");
+    if (!rid) continue;
+    const status = String(ev.result?.status || "unknown").toLowerCase();
+    requestStatusById.set(rid, status);
+  }
 
   for (const ev of events) {
     if (ev.type === "human_input_raw_event") {
       const rid = String(ev.request_id || "");
       if (rid && seenRawEventIds.has(rid)) continue;
       if (rid) seenRawEventIds.add(rid);
+      const status = rid ? requestStatusById.get(rid) : null;
+      if (status === "error") continue;
       if (ASK_HUMAN_REQUEST_TYPES.has(ev.request_type))     numQuestions++;
       else if (APPROVAL_REQUEST_TYPES.has(ev.request_type)) numQuestionsApproval++;
     }
@@ -619,6 +630,21 @@ test("computeTrajectoryStats: duplicate request IDs are deduplicated", () => {
   assert.equal(stats.num_questions_approval, 1);
   assert.equal(stats.num_total_questions, 2);
   assert.equal(stats.num_blockers_resolved, 1);
+});
+
+test("computeTrajectoryStats: failed ask_human requests (status=error) are excluded", () => {
+  const events = [
+    { type: "human_input_raw_event", request_id: "ok-1", request_type: "clarification" },
+    { type: "human_input_result", request_id: "ok-1", result: { blocker_id: UNKNOWN_BLOCKER_ID, status: "unknown" } },
+    { type: "human_input_raw_event", request_id: "err-1", request_type: "clarification" },
+    { type: "human_input_result", request_id: "err-1", result: { blocker_id: UNKNOWN_BLOCKER_ID, status: "error" } },
+    { type: "human_input_raw_event", request_id: "err-2", request_type: "approval" },
+    { type: "human_input_result", request_id: "err-2", result: { blocker_id: UNKNOWN_BLOCKER_ID, status: "error" } },
+  ];
+  const stats = computeTrajectoryStats(events, [], 0);
+  assert.equal(stats.num_questions, 1);
+  assert.equal(stats.num_questions_approval, 0);
+  assert.equal(stats.num_total_questions, 1);
 });
 
 // ── 5. full_info mode question tracking ──────────────────────────────────────

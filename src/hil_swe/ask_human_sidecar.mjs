@@ -17,6 +17,7 @@
  *               that run_adk.py appends to its all_events list for stats/trajectory.
  *
  *   GET  /health — liveness probe; returns 200 { ok: true }
+ *   POST /events/reset — clear accumulated global events; returns { cleared }
  *
  * Mode handling:
  *   ask_human mode:  route through createHumanInputRouter (LLM judge)
@@ -125,6 +126,16 @@ const server = http.createServer(async (req, res) => {
     // events without needing to read them inline per-request.
     if (req.method === "GET" && req.url === "/events") {
       sendJson(res, 200, { events: _globalEvents });
+      return;
+    }
+
+    // ── Clear global event accumulator ───────────────────────────────────────
+    // Used by retrying harnesses (e.g. OpenCode) to avoid counting events from
+    // failed attempts in final-pass stats.
+    if (req.method === "POST" && req.url === "/events/reset") {
+      const cleared = _globalEvents.length;
+      _globalEvents.length = 0;
+      sendJson(res, 200, { ok: true, cleared });
       return;
     }
 

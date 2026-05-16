@@ -38,3 +38,23 @@ export async function installOpenCodeSkill(workspaceDir, toolName) {
 export async function installClaudeSkill(workspaceDir, toolName) {
   return installSkillAt(path.join(workspaceDir, ".claude", "skills"), toolName);
 }
+
+/**
+ * Remove the shared ask-human SKILL.md tree from every harness location we might
+ * have written to, so full_info runs do not leave a discoverable skill on disk.
+ */
+export async function removeInstalledAskHumanSkills(workspaceDir) {
+  const roots = [
+    path.join(workspaceDir, ".claude", "skills", SHARED_SKILL_NAME),
+    path.join(workspaceDir, ".agents", "skills", SHARED_SKILL_NAME),
+    path.join(workspaceDir, ".opencode", "skills", SHARED_SKILL_NAME),
+    path.join(workspaceDir, "skills", SHARED_SKILL_NAME),
+  ];
+  for (const p of roots) {
+    try {
+      await fs.rm(p, { recursive: true, force: true });
+    } catch {
+      // ignore
+    }
+  }
+}

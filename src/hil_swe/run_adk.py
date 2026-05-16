@@ -15,14 +15,14 @@ The harness mirrors run_claude.mjs and run_codex.mjs in structure and output
 format so eval_hil_swe.py and metrics_hil_swe.py work without modification.
 
 ask_human tool behaviour:
-  ask_human mode  — registered + guided; questions routed through ask_human_sidecar.mjs
-  full_info mode  — registered (tool exists so agent can call it), NO guidance in system
-                    prompt; calls return "irrelevant question" and are counted in
-                    num_questions_full_info (same rule as Claude + Codex).
+  ask_human mode  — registered + guided; questions routed through ask_human_sidecar.mjs;
+                    ask-human SKILL.md installed under /app/skills.
+  full_info mode  — ask_human tool is NOT registered; NO ask-human skill on disk; NO
+                    guidance in system prompt.
 
 SWE-agent-like tool surface:
-  bash + str_replace_editor + ask_human
-  (mirrors the effective ask_config tool shape in SWE-agent runs).
+  ask_human mode: bash + str_replace_editor + ask_human
+  full_info mode: bash + str_replace_editor
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -143,6 +144,28 @@ def _install_workspace_skill_for_discovery(workspace: str, tool_name: str) -> Pa
     skill_path = skill_dir / "SKILL.md"
     skill_path.write_text(_render_shared_skill(tool_name), encoding="utf-8")
     return skill_dir
+
+
+def _remove_workspace_ask_human_skill_dirs(workspace: str) -> None:
+    """Best-effort removal of shared ask-human skill trees (full_info — no skill exposure)."""
+    root = Path(workspace)
+    for rel in (
+        Path(".claude") / "skills" / SKILL_NAME,
+        Path(".agents") / "skills" / SKILL_NAME,
+        Path(".opencode") / "skills" / SKILL_NAME,
+        Path("skills") / SKILL_NAME,
+    ):
+        d = root / rel
+        if d.exists():
+            shutil.rmtree(d, ignore_errors=True)
+
+
+def _build_agent_tools(mode: str, bash_tool, editor_tool, ask_human_tool, skill_toolsets: list[Any]) -> list[Any]:
+    """Return the mode-specific ADK tool surface."""
+    base_tools: list[Any] = [bash_tool, editor_tool]
+    if mode == "ask_human":
+        base_tools.append(ask_human_tool)
+    return [*base_tools, *skill_toolsets]
 
 
 def _normalize_workspace_path(path_value: str) -> tuple[Optional[Path], Optional[str]]:
@@ -536,10 +559,25 @@ def compute_stats(
     num_questions_full_info = 0
     num_blockers_resolved  = 0
     num_skill_calls        = 0
+    request_status_by_id: dict[str, str] = {}
+
+    # Build request_id -> status map first so failed ask_human bridge/tool calls
+    # (status="error") are not counted as real clarification/approval questions.
+    for ev in all_events:
+        if ev.get("type", "") != "human_input_result":
+            continue
+        rid = str(ev.get("request_id", "") or "")
+        if not rid:
+            continue
+        status = str(ev.get("result", {}).get("status", "unknown") or "unknown").lower()
+        request_status_by_id[rid] = status
 
     for ev in all_events:
         ev_type = ev.get("type", "")
         if ev_type == "human_input_raw_event":
+            rid = str(ev.get("request_id", "") or "")
+            if rid and request_status_by_id.get(rid) == "error":
+                continue
             rt = ev.get("request_type", "")
             if rt in ASK_HUMAN_REQUEST_TYPES:
                 num_questions += 1
@@ -603,6 +641,8 @@ async def main() -> None:
     # ── 3. Build prompt and instruction ───────────────────────────────────────
     prompt      = build_swe_prompt(problem_stmt, MODE, blockers)
     instruction = _build_instruction(MODE)
+    if MODE == "full_info":
+        _remove_workspace_ask_human_skill_dirs(WORKSPACE)
 
     # ── 4. Write attempt metadata ─────────────────────────────────────────────
     _write_json(Path(OUTPUT_DIR, "attempt.json"), {
@@ -619,28 +659,30 @@ async def main() -> None:
         "output_dir": OUTPUT_DIR,
         "started_at": _now_iso(),
         "prompt":     prompt,
+        "ask_human_tool_enabled": MODE == "ask_human",
     })
 
-    # ── 5. Start ask_human sidecar (always — handles both modes) ──────────────
-    # The sidecar handles full_info gracefully (returns UNKNOWN_RESOLUTION without
-    # calling the LLM judge) so we keep the start/stop logic unconditional.
+    # ── 5. Start ask_human sidecar only in ask_human mode ───────────────────
     global _sidecar_proc, _sidecar_url
-    try:
-        _sidecar_proc, _sidecar_url = _start_sidecar(uid)
-    except Exception as exc:
-        err = f"Failed to start ask_human sidecar: {exc}"
-        print(f"[run_adk] ERROR: {err}", file=sys.stderr)
-        _write_json(Path(OUTPUT_DIR, "result.json"), {
-            "patch_bytes":  0,
-            "num_steps":    0,
-            "completed_at": _now_iso(),
-            "sdk_error":    err,
-            "timeout":      False,
-            "stop_reason":  "sidecar_start_failed",
-        })
-        return
+    _sidecar_proc = None
+    _sidecar_url = ""
+    if MODE == "ask_human":
+        try:
+            _sidecar_proc, _sidecar_url = _start_sidecar(uid)
+        except Exception as exc:
+            err = f"Failed to start ask_human sidecar: {exc}"
+            print(f"[run_adk] ERROR: {err}", file=sys.stderr)
+            _write_json(Path(OUTPUT_DIR, "result.json"), {
+                "patch_bytes":  0,
+                "num_steps":    0,
+                "completed_at": _now_iso(),
+                "sdk_error":    err,
+                "timeout":      False,
+                "stop_reason":  "sidecar_start_failed",
+            })
+            return
 
-    # per-run event log: human_input_* events from sidecar + ask_question_full_info_mode
+    # per-run event log: human_input_* events from sidecar (ask_human mode)
     all_events: list[dict] = []
     # ADK event stream (Event objects from runner.run_async)
     adk_events: list       = []
@@ -700,8 +742,7 @@ async def main() -> None:
             # the agent can retry on the next turn.
             return "can't answer (perhaps transient hiccup)"
 
-        # Append human_input_* events (ask_human mode) or ask_question_full_info_mode
-        # event (full_info mode) so compute_stats() can count them.
+        # Append human_input_* events (ask_human mode) so compute_stats() can count them.
         for ev in result.get("events", []):
             all_events.append(ev)
 
@@ -848,15 +889,16 @@ async def main() -> None:
         return f"Last edit to {resolved} undone successfully."
 
     adk_skill_toolsets: list[Any] = []
-    try:
-        from google.adk.skills import load_skill_from_dir
-        from google.adk.tools import skill_toolset
+    if MODE == "ask_human":
+        try:
+            from google.adk.skills import load_skill_from_dir
+            from google.adk.tools import skill_toolset
 
-        skill_dir = _install_workspace_skill_for_discovery(WORKSPACE, SKILL_TOOL_NAME)
-        loaded_skill = load_skill_from_dir(skill_dir)
-        adk_skill_toolsets = [skill_toolset.SkillToolset(skills=[loaded_skill])]
-    except Exception as exc:
-        print(f"[run_adk] WARN: failed to initialize ADK skills: {exc}", file=sys.stderr)
+            skill_dir = _install_workspace_skill_for_discovery(WORKSPACE, SKILL_TOOL_NAME)
+            loaded_skill = load_skill_from_dir(skill_dir)
+            adk_skill_toolsets = [skill_toolset.SkillToolset(skills=[loaded_skill])]
+        except Exception as exc:
+            print(f"[run_adk] WARN: failed to initialize ADK skills: {exc}", file=sys.stderr)
 
     # ── 7. Create ADK agent ───────────────────────────────────────────────────
     # Route LiteLlm calls through the LiteLLM proxy by passing api_base and
@@ -908,7 +950,7 @@ async def main() -> None:
         agent = LlmAgent(
             name=AGENT_NAME,
             model=LiteLlm(model=ADK_MODEL, **_litellm_kwargs),
-            tools=[bash, str_replace_editor, ask_human, *adk_skill_toolsets],
+            tools=_build_agent_tools(MODE, bash, str_replace_editor, ask_human, adk_skill_toolsets),
             instruction=instruction,
             # temperature=1.0 matches ask_config_gemini_3-1_pro_preview_customtools.yaml
             generate_content_config=genai_types.GenerateContentConfig(temperature=1.0),

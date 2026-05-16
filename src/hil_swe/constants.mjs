@@ -42,7 +42,7 @@ export const ASK_HUMAN_MODEL = process.env.ASK_HUMAN_MODEL || process.env.PAPER_
 // Claude:  systemPrompt.append in the query() call.        toolName = "AskUserQuestion"
 // Codex:   developerInstructions in the thread/start RPC.  toolName = "requestUserInput"
 // Not injected in full_info mode — all context is already in the task prompt
-// and the question-asking tool is denied there.
+// and native questions are short-circuited to "irrelevant question" without ask-human guidance.
 //
 // The toolName parameter MUST match the agent's actual native tool name so the
 // model can connect the guidance to a concrete action in its tool list.

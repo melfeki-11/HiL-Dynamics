@@ -39,7 +39,11 @@ import { createHumanInputRouter, approvalPolicyRouter, UNKNOWN_RESOLUTION, CANT_
 import { ensureDir, writeJson, writeText } from "../shared/io.mjs";
 import { redactString } from "../shared/redact.mjs";
 import { buildSwePrompt } from "./prompt.mjs";
-import { installClaudeSkill, SKILL_TOOL_REF } from "./skills.mjs";
+import {
+  installClaudeSkill,
+  removeInstalledAskHumanSkills,
+  SKILL_TOOL_REF,
+} from "./skills.mjs";
 import {
   WORKSPACE, TASK_DIR, OUTPUT_DIR,
   MODE, PASS_INDEX, RUN_ID, TIMEOUT_MS,
@@ -170,8 +174,8 @@ function createCustomAskHumanMcpServer({ router, pushEvent }) {
             // Best-effort tool failure handling: keep the agent loop alive and
             // return the canonical retryable answer text.
             const requestId = `claude_customtool_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-            // Record a synthetic ask attempt so num_questions reflects the tool
-            // usage even when the router call fails before emitting normal events.
+            // Emit synthetic raw/result events for auditability. computeTrajectoryStats
+            // explicitly excludes status="error" requests from num_questions.
             pushEvent({
               type: "human_input_raw_event",
               timestamp: new Date().toISOString(),
@@ -334,18 +338,25 @@ function extractTrajectorySteps(events) {
 
     // ── full_info mode questions ──────────────────────────────────────────────
     // In full_info mode the agent may still call AskUserQuestion; the handler
-    // denies it with UNKNOWN_RESOLUTION and pushes this event so we capture the
+    // injects irrelevant answers (behavior:"allow") and pushes this event so we capture the
     // attempt in the trajectory (act: "ask_human …", obs: "irrelevant question").
     // Adding the id to handledAskIds ensures the SDK's synthetic tool_result does
     // not create a duplicate trajectory step.
     if (event.type === "ask_question_full_info_mode") {
       const p = pending.get(event.tool_use_id);
       const source = event.source || "unknown";
-      steps.push({
-        thought: p?.thought ?? "",
-        act:     cap(`ask_human [${source}] ${event.question || ""}`, ACT_CAP),
-        obs:     UNKNOWN_RESOLUTION,
-      });
+      const pairs = Array.isArray(event.qa_pairs) && event.qa_pairs.length
+        ? event.qa_pairs
+        : [{ question: event.question, answer: UNKNOWN_RESOLUTION }];
+      let first = true;
+      for (const pair of pairs) {
+        steps.push({
+          thought: first ? (p?.thought ?? "") : "",
+          act:     cap(`ask_human [${source}] ${pair?.question || ""}`, ACT_CAP),
+          obs:     cap(String(pair?.answer ?? UNKNOWN_RESOLUTION), OBS_CAP),
+        });
+        first = false;
+      }
       if (event.tool_use_id) {
         pending.delete(event.tool_use_id);
         handledAskIds.add(event.tool_use_id);
@@ -436,6 +447,18 @@ function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
   const seenRawEventIds    = new Set();
   const seenResultEventIds = new Set();
   const requestMetaById    = new Map();
+  const requestStatusById  = new Map();
+
+  // Build a request_id → terminal status map so failed ask_human invocations
+  // (e.g. tool/bridge failures with status="error") are not counted as real
+  // clarification/approval questions.
+  for (const ev of events) {
+    if (ev.type !== "human_input_result") continue;
+    const rid = String(ev.request_id || "");
+    if (!rid) continue;
+    const status = String(ev.result?.status || "unknown").toLowerCase();
+    requestStatusById.set(rid, status);
+  }
 
   // One native AskUserQuestion use should count as one question regardless of
   // how many sub-questions were bundled in that single tool call.
@@ -449,6 +472,8 @@ function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
       const rid = String(ev.request_id || "");
       if (rid && seenRawEventIds.has(rid)) continue;
       if (rid) seenRawEventIds.add(rid);
+      const status = rid ? requestStatusById.get(rid) : null;
+      if (status === "error") continue;
       if (rid) {
         requestMetaById.set(rid, {
           request_type: ev.request_type,
@@ -517,7 +542,11 @@ async function main() {
     }));
   }
   const prompt = buildSwePrompt({ problemStatement, mode: MODE, blockers });
-  await installClaudeSkill(WORKSPACE, SKILL_TOOL_REF.claude);
+  if (MODE === "full_info") {
+    await removeInstalledAskHumanSkills(WORKSPACE);
+  } else {
+    await installClaudeSkill(WORKSPACE, SKILL_TOOL_REF.claude);
+  }
 
   // 3. Write attempt metadata
   const attemptMeta = {
@@ -616,8 +645,7 @@ async function main() {
             }
 
             // Native AskUserQuestion: intercept and route through the ask_human simulator
-            // (ask_human mode) or deny cleanly (full_info mode, where all information is
-            // provided upfront and no human is present to answer questions).
+            // (ask_human mode) or short-circuit with irrelevant answers (full_info mode).
             if (isAskUserQuestionTool(_toolName)) {
               if (humanRouter) {
                 // ask_human mode: route to the LLM-backed human simulator.
@@ -655,32 +683,33 @@ async function main() {
                   decisionClassification: "user_temporary",
                 };
               }
-              // full_info mode: no human is present (all blockers are provided in the prompt).
-              // We cannot let AskUserQuestion execute natively — it would block on stdin in a
-              // non-TTY container.  Return the same UNKNOWN_RESOLUTION ("irrelevant question")
-              // that ask_human_server.py returns for unmatched questions.  This keeps the
-              // trajectory observation clean and consistent across modes: the model sees
-              // "irrelevant question" and understands it should proceed without asking.
-              // We still push a structured event (with question + tool_use_id) so:
-              //   1. extractTrajectorySteps can record the attempt as an ask_human step.
-              //   2. computeTrajectoryStats can increment num_questions_full_info.
-              //   3. handledAskIds suppresses the SDK's synthetic tool_result duplicate.
-              {
-                const q = _input?.question || _input?.questions?.[0]?.question || JSON.stringify(_input || {});
-                pushEvent({
-                  type:        "ask_question_full_info_mode",
-                  timestamp:   new Date().toISOString(),
-                  question:    String(q),
-                  tool_use_id: permission.toolUseID,
-                  source:      "native",
-                  toolName:    _toolName,
-                  input:       _input,
-                });
+              // full_info mode: same SDK pattern as ask_human (behavior:"allow" +
+              // pre-filled answers) so the tool does not surface as a hard deny, but every
+              // answer is UNKNOWN_RESOLUTION ("irrelevant question").  Native execution is
+              // still avoided — answers are injected before any stdin prompt.
+              const questions = Array.isArray(_input?.questions) ? _input.questions : [_input || {}];
+              const answers = {};
+              const qaPairs = [];
+              for (const qq of questions) {
+                const promptText = qq?.question || "Clarification request";
+                answers[promptText] = UNKNOWN_RESOLUTION;
+                qaPairs.push({ question: promptText, answer: UNKNOWN_RESOLUTION });
               }
+              const q = _input?.question || questions[0]?.question || JSON.stringify(_input || {});
+              pushEvent({
+                type:        "ask_question_full_info_mode",
+                timestamp:   new Date().toISOString(),
+                question:    String(q),
+                qa_pairs:    qaPairs,
+                tool_use_id: permission.toolUseID,
+                source:      "native",
+                toolName:    _toolName,
+                input:       _input,
+              });
               return {
-                behavior: "deny",
-                toolUseID: permission.toolUseID,
-                message: UNKNOWN_RESOLUTION,   // "irrelevant question" — canonical ask_human_server.py response
+                behavior:    "allow",
+                updatedInput: { questions, answers },
+                toolUseID:   permission.toolUseID,
                 decisionClassification: "user_temporary",
               };
             }
