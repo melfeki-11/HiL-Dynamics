@@ -84,7 +84,7 @@ Comprehensive comparison of Trust Horizon HiL-SWE runs on the 20-attempt test se
 
 | Theme (article) | Trust Horizon implementation |
 |-----------------|----------------------------|
-| Trajectory-sensitive judge metrics; label noise | `scripts/diag_skill78_slice.py` (full file): irrelevant rate, native vs MCP channel counts, counterfactual P; outputs `smoke_logs/skill78_diag_slice.md` |
+| Trajectory-sensitive judge metrics; label noise | Per-pass `stats.json` and trajectory tags in `src/hil_swe/run_claude.mjs` (`[native]` / `[custom_mcp]`) |
 | Slice asks by tool channel and outcome | Trajectory `act`/`obs` tags `[native]` / `[custom_mcp]` in `src/hil_swe/run_claude.mjs` (`formatAct`, lines 325–341) |
 | Per-pass attribution for cap / cooldown / BR | `computeTrajectoryStats` in `src/hil_swe/run_claude.mjs` (lines 506–575) → `stats.json`; mirrored in Codex `src/hil_swe/run_codex.mjs` |
 | LLM judge as selector over registry | `createHumanInputRouter` / `askHuman` in `src/shared/human_input.mjs` (e.g. `STRICT_SELECTOR_SCHEMA` lines 21–30, `validateSelectorResult` ~503+) |
@@ -95,7 +95,7 @@ Comprehensive comparison of Trust Horizon HiL-SWE runs on the 20-attempt test se
 
 | Theme (post) | Trust Horizon implementation |
 |--------------|------------------------------|
-| Pass@k overstates agents that patch without clarifying | `gated_pass@k` reported beside raw pass@k in `scripts/metrics_hil_swe.py` and ablation summaries (`scripts/aggregate_skill7_ablation.py` lines 99–118; `scripts/aggregate_skill8_ablation.py`) |
+| Pass@k overstates agents that patch without clarifying | `gated_pass@k` reported beside raw pass@k in `scripts/metrics_hil_swe.py` and `smoke_logs/skill9_ablation_summary.md` |
 | Do not pick configs that raise P only by suppressing asks | Ablation: prefer irrelevant-first throttle **K** over blind cap; production **split** keeps Codex at high R (`scripts/run_skill9_ablation.sh` lines 66–69 vs 72–74) |
 
 ### Claude Code primitives (planned paths vs this repo)
@@ -123,7 +123,7 @@ Those directories are **not present** under `/mnt/efs/weijunluo/trust_horizon` i
 
 ## C. What works vs what does not
 
-Evidence columns: 2-UID ablation = `smoke_logs/skill7_ablation_summary.md`, `smoke_logs/skill8_ablation_summary.md`, `smoke_logs/skill9_ablation_summary.md`; 20-UID = `runs/_swe_skill9_full_*` / `smoke_logs/skill9_vs_alina.md`.
+Evidence: 2-UID ablation = `smoke_logs/skill9_ablation_summary.md`; 20-UID = `runs/_swe_skill9_full_*` / `smoke_logs/skill9_vs_alina.md`.
 
 | ID | Change | Claude | Codex | 2-UID | 20-UID | Verdict | Primary source files |
 |----|--------|--------|-------|-------|--------|---------|----------------------|
@@ -150,15 +150,14 @@ Evidence columns: 2-UID ablation = `smoke_logs/skill7_ablation_summary.md`, `smo
 - **Config:** `SOFTEN_CATEGORY_MANDATE=1` only — set in `scripts/run_skill9_full_scale.sh` (Codex branch) and `scripts/run_skill9_ablation.sh` (`split` profile, lines 67–68).
 - **20-UID:** P=0.75, R=0.94, pass@1=0.60, pass@3=0.65 — `runs/_swe_skill9_full_codex/metrics/summary.json`; CSV row 35.
 - **Harness:** `src/hil_swe/run_codex.mjs` — `buildAskHumanGuidance("requestUserInput")` (65); MCP via `src/hil_swe/ask_human_mcp_bridge.mjs` → `ask_human_sidecar.mjs`; skill8 tracker env forwarded (251–258).
-- **Why:** Custom MCP dominates asks (`scripts/diag_skill78_slice.py` MCP vs native counts on skill8 full run); soften text in `constants.mjs` `RICH_ASK_HUMAN_TOOL_DESCRIPTION_SOFT` (255–259) improves judge match without `MAX_ASKS_PER_PASS` killing high-recall asks.
-- **Diagnostics:** `smoke_logs/skill78_diag_slice.md` — Codex irrelevant ~69% (skill7) → ~64% (skill8); counterfactual P upper bound ≈1.0.
+- **Why:** Custom MCP dominates asks on Codex; soften text in `constants.mjs` improves judge match without a per-pass cap killing high-recall asks.
 
 ### Claude (skill9 split)
 
 - **Config:** `SOFTEN_CATEGORY_MANDATE=1` + `MAX_ASKS_PER_PASS=5` — `scripts/run_skill9_full_scale.sh` (Claude branch); ablation `split` lines 67–68.
 - **20-UID:** P=0.71, R=0.71, pass@1=0.28, pass@3=0.33 — `runs/_swe_skill9_full_claude/metrics/summary.json`; CSV row 34.
 - **Harness:** `src/hil_swe/run_claude.mjs` — `installClaudeSkill` (604); `createCustomAskHumanMcpServer` (703); native path `answerClaudeAskUserQuestion` (755); stats via `computeTrajectoryStats` (906).
-- **Why:** Skill7 over-ask (~51% irrelevant on skill8 full Claude per `skill78_diag_slice.md`); cap enforced in `skill8_ask_limits.mjs` `checkBeforeJudge` (141–147); soften via `richAskHumanToolDescriptionForHarness` (267–269).
+- **Why:** Claude over-asked before cap + soften; cap enforced in `skill8_ask_limits.mjs`; soften via `richAskHumanToolDescriptionForHarness` in `constants.mjs`.
 - **Channels:** Both native and custom MCP routed through `createHumanInputRouter` in `src/shared/human_input.mjs` (665–673).
 
 ### Production profile
@@ -199,7 +198,6 @@ Implementation: `scripts/run_skill9_full_scale.sh`, `scripts/run_hil_swe.py`
 | `scripts/run_skill9_full_scale.sh` | 20-UID production profile |
 | `scripts/acceptance_skill9.py` | Gate vs both Alina P/R baselines |
 | `scripts/metrics_hil_swe.py` | Official metrics + gated_pass@k |
-| `scripts/diag_skill78_slice.py` | Irrelevant / channel diagnostics |
 | `tests/skill8_ask_limits.test.mjs` | Cap/throttle unit tests |
 
 ---
@@ -264,8 +262,6 @@ Trust Horizon implements the same concepts in the files below.
 | LLM judge router & selector | `src/shared/human_input.mjs` |
 | Judge env / LiteLLM fallback | `src/hil_swe/constants.mjs` (ASK_HUMAN_BASE_URL, ASK_HUMAN_MODEL) |
 | Read-before-ask gate | `src/hil_swe/skill8_ask_limits.mjs` |
-| Trajectory diagnostics | `scripts/diag_skill78_slice.py` → `smoke_logs/skill78_diag_slice.md` |
-
 #### Section B — Claude Code parity (harness)
 
 | Topic | File path |
@@ -284,8 +280,6 @@ Trust Horizon implements the same concepts in the files below.
 
 | Topic | File path |
 |-------|-----------|
-| Skill7 ABD ablation | `scripts/aggregate_skill7_ablation.py`, `smoke_logs/skill7_ablation_summary.md` |
-| Skill8 H/HE/HEG ablation | `scripts/aggregate_skill8_ablation.py`, `smoke_logs/skill8_ablation_summary.md` |
 | Skill9 split ablation | `scripts/aggregate_skill9_ablation.py`, `scripts/run_skill9_ablation.sh`, `smoke_logs/skill9_ablation_summary.md` |
 | Ask-limit unit tests | `tests/skill8_ask_limits.test.mjs` |
 
