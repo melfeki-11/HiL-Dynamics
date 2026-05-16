@@ -1,0 +1,35 @@
+Description,Rationale,Agent / Model,Pass@1,Pass@3,Precision,Recall,F1
+Original HiL-Bench SWE-agent on the same test set <-- performance we want to recreate,N/A,claude-opus-4-7,0,0.25,0.26,0.42,0.32
+,,gpt 5.5,0.3,0.5,0.45,0.6,0.52
+,,gemini 3.1 pro preview customtools,0.05,0.1,0.48,0.4,0.43
+,,GLM 5.1,0.05,0.15,0.33,0.28,0.31
+Added ask_human guidance to system prompt (*_swe),To encourage agents to ask questions,claude-code,0.05,0.2,0.53,0.19,0.28
+,,codex,0.15,0.2,0.68,0.26,0.38
+,,google ADK,N/A,N/A,N/A,N/A,N/A
+,,OpenCode,N/A,N/A,N/A,N/A,N/A
+"Added ignore clause to system prompt, also same time that we started using xhigh (*_swe_xhigh(_pathfix))",Codex base system prompt (un-modifiable) discourages asking questions + to cover any prompting that might discourage other agents from asking,claude-code,0.21,0.21,0.62,0.14,0.23
+,,codex,0.1,0.2,0.78,0.42,0.54
+,,google ADK,N/A,N/A,N/A,N/A,N/A
+,,OpenCode,N/A,N/A,N/A,N/A,N/A
+"Simple skill with basically same instructions as the ask_human guidance ""rules for using the tool"" (*_swe_skill)","Initial skill, have it repeat information in the system prompt since repetition is good for agents",claude-code,0.11,0.11,0.58,0.25,0.35
+,,codex,0.1,0.2,0.83,0.42,0.55
+,,google ADK,0,0.15,0.58,0.46,0.51
+,,OpenCode,0.05,0.15,0.54,0.36,0.43
+"Detailed skill with question-asking tool rules, and remove those rules from system prompt (*_swe_skill2)","Have the skill be more of a walkthrough guide, based on CC skill examples",claude-code,0.06,0.11,0.7,0.21,0.33
+,,codex,0.2,0.2,0.77,0.26,0.38
+,,google ADK,0.05,0.15,0.6,0.46,0.52
+,,OpenCode,N/A,N/A,N/A,N/A,N/A
+"Add examples of blockers/when to use in system prompt + skill description, put back ask_human guidance in system prompt (*_swe_skill3)","Simple skill had overall better P/R. Agents CAN use skill just not effectively --> need to focus on improving recall. Details in system prompt seem important (at least for codex). ADK and OpenCode seem well enough. Claude-code especially struggles on missing params compared to swe-agent, but all struggle on ambig overall.",claude-code,0.05,0.1,0.74,0.27,0.4
+,,codex,0.15,0.2,0.73,0.37,0.49
+,,google ADK,,,,,
+,,OpenCode,,,,,
+"Alina PR — custom tool baseline (*_swe_customtool, PR #1)","Custom MCP ask_human; 20-UID ask_human metrics from acceptance baselines (https://github.com/melfeki-11/trust_horizon/pull/1). Pass@k not in repo—backfill if available.",claude-code,,,0.58,0.37,0.45
+,,codex,,,0.56,0.65,0.60
+"Alina PR — skill + guidance baseline (*_swe_skill_guidance)","System/skill guidance for ask_human; 20-UID P/R from acceptance baselines. Pass@k not in repo—backfill if available.",claude-code,,,0.65,0.35,0.45
+,,codex,,,0.74,0.42,0.54
+Layered tweaks A+B+D on top of Alina's PR (*_swe_skill7),"TodoWriteTool seed + CLAUDE.md per-task hint + rich custom MCP ask tool description. 2-UID ablation showed Claude R: 0.29 -> 0.71 (+0.42), Codex R: 0.38 -> 0.92 (+0.54) over the PR baseline; Codex pass@1 0.33 -> 0.83.",claude-code,0.20,0.30,0.49,0.74,0.59
+,,codex,0.40,0.60,0.63,0.96,0.76
+Skill8 precision recovery on Skill7 ABD (*_swe_skill8),SOFTEN_CATEGORY_MANDATE + optional MAX_ASKS_PER_PASS + IRRELEVANT_COOLDOWN; see smoke_logs/skill8_ablation_summary.md for 2-UID winner.,claude-code,0.15,0.25,0.58,0.59,0.59
+,,codex,0.25,0.50,0.69,0.80,0.74
+Skill9 Pareto split profile on Skill7 ABD (*_swe_skill9),2-UID ablation winner split: Codex SOFTEN only (H); Claude soften+MAX_ASKS_PER_PASS=5 (HE). Beats both Alina custom-tool and skill+guidance on 2 UID; see smoke_logs/skill9_ablation_summary.md.,claude-code,0.28,0.33,0.71,0.71,0.71
+,,codex,0.60,0.65,0.75,0.94,0.84

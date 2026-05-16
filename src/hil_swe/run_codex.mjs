@@ -55,11 +55,14 @@ import {
   MODE, PASS_INDEX, RUN_ID, TIMEOUT_MS,
   LITELLM_CALL_TIMEOUT_MS, STEP_LITELLM_TRIES,
   ASK_HUMAN_BASE_URL, ASK_HUMAN_MODEL, buildAskHumanGuidance,
+  CLAUDE_MD_HINT, RICH_ASK_TOOL_DESC,
+  buildPerTaskMemoryHint,
   THOUGHT_CAP, ACT_CAP, OBS_CAP, cap, gitDiff,
 } from "./constants.mjs";
 
-// Codex's native question-asking tool is requestUserInput
-const ASK_HUMAN_GUIDANCE = buildAskHumanGuidance("requestUserInput");
+// Codex's native question-asking tool is requestUserInput. The recall-tweak
+// flags (SEED_BLOCKER_TODOS / etc.) modulate the appended guidance internally.
+const ASK_HUMAN_GUIDANCE = buildAskHumanGuidance("requestUserInput", "codex");
 
 // ── Configuration from env ──────────────────────────────────────────────────
 
@@ -241,7 +244,19 @@ function codexApiEnv({ sidecarUrl = "" } = {}) {
       human_input: {
         command: process.execPath,
         args: [BRIDGE_SCRIPT],
-        env: { SIDECAR_URL: sidecarUrl },
+        env: {
+          SIDECAR_URL: sidecarUrl,
+          // Forward the Tweak D rich-description flag to the bridge subprocess.
+          RICH_ASK_TOOL_DESC: process.env.RICH_ASK_TOOL_DESC || "",
+          SOFTEN_CATEGORY_MANDATE: process.env.SOFTEN_CATEGORY_MANDATE || "",
+          MAX_ASKS_PER_PASS: process.env.MAX_ASKS_PER_PASS || "",
+          IRRELEVANT_COOLDOWN: process.env.IRRELEVANT_COOLDOWN || "",
+          BLOCKER_SCALED_CAP: process.env.BLOCKER_SCALED_CAP || "",
+          IRRELEVANT_FIRST_THROTTLE: process.env.IRRELEVANT_FIRST_THROTTLE || "",
+          STOP_WHEN_BLOCKERS_RESOLVED: process.env.STOP_WHEN_BLOCKERS_RESOLVED || "",
+          READ_BEFORE_ASK: process.env.READ_BEFORE_ASK || "",
+          READ_BEFORE_ASK_MIN_FILES: process.env.READ_BEFORE_ASK_MIN_FILES || "",
+        },
       },
     };
   }
@@ -673,6 +688,8 @@ function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
   let numQuestionsFullInfo    = 0;
   let numQuestionsElicitation = 0;
   let numBlockersResolved     = 0;
+  let numAskHumanCapped       = 0;
+  let numAskHumanCooldownDenied = 0;
   const seenRawEventIds       = new Set();
   const seenResultEventIds    = new Set();
   const requestMetaById       = new Map();
@@ -692,6 +709,10 @@ function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
   for (const ev of events) {
     if (ev.type === "codex_ask_question") numQuestions++;
     if (ev.type === "ask_question_full_info_mode") numQuestionsFullInfo++;
+    if (ev.type === "skill8_ask_human_suppressed") {
+      if (ev.reason === "cooldown") numAskHumanCooldownDenied += 1;
+      else if (ev.reason === "cap") numAskHumanCapped += 1;
+    }
   }
 
   for (const ev of events) {
@@ -742,6 +763,8 @@ function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
     num_total_questions:      numQuestions + numQuestionsApproval,
     num_questions_elicitation:numQuestionsElicitation,
     num_questions_full_info:  numQuestionsFullInfo,
+    num_ask_human_capped:     numAskHumanCapped,
+    num_ask_human_cooldown_denied: numAskHumanCooldownDenied,
     num_blockers_resolved:    numBlockersResolved,
     num_blockers_total:       numBlockersTotal,
   };
@@ -1059,6 +1082,45 @@ async function main() {
     await removeInstalledAskHumanSkills(WORKSPACE);
   } else {
     await installAgentsSkill(WORKSPACE, SKILL_TOOL_REF.codex);
+  }
+
+  // 2b. Tweak B — per-task AGENTS.md hint (Codex auto-injects AGENTS.md from
+  // workspace root, mirroring the CLAUDE_MD_HINT flag in run_claude.mjs).
+  // Only written in ask_human mode; the file is appended to so we don't clobber
+  // the skill's existing AGENTS.md if installAgentsSkill wrote one already.
+  if (MODE === "ask_human" && CLAUDE_MD_HINT) {
+    let numBlockersForHint = 0;
+    try {
+      const reg = JSON.parse(
+        await fs.readFile(path.join(TASK_DIR, "blocker_registry.json"), "utf8"),
+      );
+      numBlockersForHint = (reg.entries || reg.blockers || []).length;
+    } catch { /* metadata-only fallback */ }
+    const hint = buildPerTaskMemoryHint({
+      uid,
+      numBlockers: numBlockersForHint,
+      sdk: "codex",
+    });
+    try {
+      const agentsMdPath = path.join(WORKSPACE, "AGENTS.md");
+      let existing = "";
+      try { existing = await fs.readFile(agentsMdPath, "utf8"); } catch {}
+      const combined = existing ? `${existing.trimEnd()}\n\n${hint}\n` : `${hint}\n`;
+      await fs.writeFile(agentsMdPath, combined, "utf8");
+      pushEvent({
+        type: "agents_md_hint_written",
+        timestamp: new Date().toISOString(),
+        path: agentsMdPath,
+        num_blockers_hinted: numBlockersForHint,
+        bytes: Buffer.byteLength(combined),
+      });
+    } catch (err) {
+      pushEvent({
+        type: "agents_md_hint_error",
+        timestamp: new Date().toISOString(),
+        error: String(err?.message || err),
+      });
+    }
   }
 
   // 3. Write attempt metadata

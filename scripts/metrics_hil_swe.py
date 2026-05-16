@@ -305,6 +305,10 @@ def load_pass_rows(run_dir: Path) -> list[dict[str, Any]]:
                     "num_questions_full_info": stats.get("num_questions_full_info"),
                     "num_blockers_resolved": stats.get("num_blockers_resolved"),
                     "num_blockers_total": stats.get("num_blockers_total"),
+                    "num_ask_human_capped": stats.get("num_ask_human_capped"),
+                    "num_ask_human_cooldown_denied": stats.get(
+                        "num_ask_human_cooldown_denied"
+                    ),
                     "patch_bytes": result.get("patch_bytes"),
                     "pass_dir": str(pass_dir),
                 }
@@ -368,6 +372,10 @@ def summarize(
 
         num_solved_by_k = {k: 0 for k in range(1, k_max + 1)}
         num_attempts_with_k_valid = {k: 0 for k in range(1, k_max + 1)}
+        # gated_pass@k: PAE-style — credit only successes where the agent
+        # actually asked at least one judge question (clarification/elicitation).
+        # Strips out silent-pass lucky-passes that inflate raw pass@k.
+        num_gated_solved_by_k = {k: 0 for k in range(1, k_max + 1)}
 
         # MICRO aggregation accumulators (run_hil_bench.py style)
         total_blockers_resolved = 0.0
@@ -379,6 +387,8 @@ def summarize(
         total_steps = 0.0
         # questions asked in full_info mode (agent asked despite having all info in prompt)
         total_questions_full_info = 0.0
+        total_ask_human_capped = 0.0
+        total_ask_human_cooldown_denied = 0.0
         total_attempts_and_passes = 0
 
         for valid_passes in attempts:
@@ -389,6 +399,14 @@ def summarize(
             for k in range(1, n_valid + 1):
                 if any(bool(valid_passes[i].get("resolved")) for i in range(k)):
                     num_solved_by_k[k] += 1
+                # gated success: at least one of the first k passes both
+                # resolved AND asked >= 1 judge question.
+                if any(
+                    bool(valid_passes[i].get("resolved"))
+                    and float(valid_passes[i].get("num_questions") or 0) >= 1
+                    for i in range(k)
+                ):
+                    num_gated_solved_by_k[k] += 1
 
             for row in valid_passes:
                 total_attempts_and_passes += 1
@@ -396,6 +414,10 @@ def summarize(
                 total_questions += float(row.get("num_questions") or 0)
                 total_total_questions += float(row.get("num_total_questions") or row.get("num_questions") or 0)
                 total_questions_full_info += float(row.get("num_questions_full_info") or 0)
+                total_ask_human_capped += float(row.get("num_ask_human_capped") or 0)
+                total_ask_human_cooldown_denied += float(
+                    row.get("num_ask_human_cooldown_denied") or 0
+                )
 
                 if mode == "ask_human":
                     total_blockers_resolved += float(row.get("num_blockers_resolved") or 0)
@@ -418,6 +440,9 @@ def summarize(
             denom = num_attempts_with_k_valid[k]
             metrics[f"pass_at_{k}"] = num_solved_by_k[k] / denom if denom > 0 else 0.0
             metrics[f"pass_at_{k}_n"] = denom
+            metrics[f"gated_pass_at_{k}"] = (
+                num_gated_solved_by_k[k] / denom if denom > 0 else 0.0
+            )
 
         if mode == "ask_human":
             # ── Primary ask metrics: denominator = judge questions (clarification + elicitation)
@@ -428,6 +453,8 @@ def summarize(
             metrics["ask_recall"]    = ask_recall
             metrics["ask_f1"]        = _f1(ask_precision, ask_recall)
             metrics["total_questions"]         = int(total_questions)
+            metrics["total_ask_human_capped"]          = int(total_ask_human_capped)
+            metrics["total_ask_human_cooldown_denied"] = int(total_ask_human_cooldown_denied)
             metrics["total_blockers_resolved"] = int(total_blockers_resolved)
             metrics["total_blockers_present"]  = int(total_blockers_present)
 

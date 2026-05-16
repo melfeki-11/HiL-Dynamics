@@ -1,0 +1,682 @@
+[
+  {
+    "run_id": "_swe_skill7_full_claude",
+    "official": {
+      "precision": 0.49240121580547114,
+      "recall": 0.7397260273972602,
+      "total_questions": 329,
+      "blockers_resolved": 162,
+      "blockers_present": 219,
+      "capped": 0,
+      "cooldown_denied": 0
+    },
+    "trajectory": {
+      "ask_steps": 329,
+      "irrelevant_steps": 167,
+      "irrelevant_rate": 0.5075987841945289,
+      "precision_upper_bound": 1.0
+    },
+    "by_channel": {
+      "native": {
+        "asks": 95,
+        "irrelevant": 38
+      },
+      "custom_mcp": {
+        "asks": 234,
+        "irrelevant": 129
+      }
+    },
+    "per_uid": {
+      "698139c7dc5e90df07566a6c": {
+        "q": 21,
+        "irrelev": 8,
+        "br": 13,
+        "bt": 15,
+        "passes": 3
+      },
+      "69a7a4d1617c0b97d4d6aacd": {
+        "q": 8,
+        "irrelev": 0,
+        "br": 8,
+        "bt": 9,
+        "passes": 3
+      },
+      "69a9e77602049c14d2793bb5": {
+        "q": 18,
+        "irrelev": 11,
+        "br": 7,
+        "bt": 12,
+        "passes": 3
+      },
+      "69b1031f73a8f5979167a774": {
+        "q": 10,
+        "irrelev": 6,
+        "br": 4,
+        "bt": 15,
+        "passes": 3
+      },
+      "69b20af8600119b97e678c5b": {
+        "q": 23,
+        "irrelev": 13,
+        "br": 10,
+        "bt": 15,
+        "passes": 3
+      },
+      "69b3ab1df8d713deb4c0087d": {
+        "q": 23,
+        "irrelev": 16,
+        "br": 7,
+        "bt": 9,
+        "passes": 3
+      },
+      "69bc1094b455a91fa20fb868": {
+        "q": 16,
+        "irrelev": 8,
+        "br": 8,
+        "bt": 12,
+        "passes": 3
+      },
+      "69bcc6360c872b9773cce01d": {
+        "q": 14,
+        "irrelev": 8,
+        "br": 6,
+        "bt": 12,
+        "passes": 3
+      },
+      "69be1b17ed0dad79557a9d20": {
+        "q": 3,
+        "irrelev": 3,
+        "br": 0,
+        "bt": 9,
+        "passes": 3
+      },
+      "69be580e4bde28908b05c56f": {
+        "q": 20,
+        "irrelev": 13,
+        "br": 7,
+        "bt": 9,
+        "passes": 3
+      },
+      "69c0073e28d67846c637cb7e": {
+        "q": 10,
+        "irrelev": 5,
+        "br": 5,
+        "bt": 9,
+        "passes": 3
+      },
+      "69c0ead7ef94e54e9dc6a130": {
+        "q": 17,
+        "irrelev": 11,
+        "br": 6,
+        "bt": 9,
+        "passes": 3
+      },
+      "69c196fa0b42d9b078f32b2e": {
+        "q": 17,
+        "irrelev": 7,
+        "br": 10,
+        "bt": 9,
+        "passes": 3
+      },
+      "69c2af94ae34531293e5f7ec": {
+        "q": 19,
+        "irrelev": 8,
+        "br": 11,
+        "bt": 9,
+        "passes": 3
+      },
+      "69c3277deb9e9972372b30fc": {
+        "q": 28,
+        "irrelev": 21,
+        "br": 7,
+        "bt": 9,
+        "passes": 3
+      },
+      "69c3c5e0b961752c24493b50": {
+        "q": 9,
+        "irrelev": 5,
+        "br": 4,
+        "bt": 12,
+        "passes": 3
+      },
+      "69c3f3301734592b5a14a3b9": {
+        "q": 20,
+        "irrelev": 5,
+        "br": 15,
+        "bt": 12,
+        "passes": 3
+      },
+      "69c6079bcb74caaa66c49c87": {
+        "q": 17,
+        "irrelev": 7,
+        "br": 10,
+        "bt": 9,
+        "passes": 3
+      },
+      "69c60cc7b6a31e9900faa779": {
+        "q": 28,
+        "irrelev": 12,
+        "br": 16,
+        "bt": 15,
+        "passes": 3
+      },
+      "69c6ac9f46a2e65fc3988794": {
+        "q": 8,
+        "irrelev": 0,
+        "br": 8,
+        "bt": 9,
+        "passes": 3
+      }
+    }
+  },
+  {
+    "run_id": "_swe_skill8_full_claude",
+    "official": {
+      "precision": 0.5829596412556054,
+      "recall": 0.593607305936073,
+      "total_questions": 223,
+      "blockers_resolved": 130,
+      "blockers_present": 219,
+      "capped": 16,
+      "cooldown_denied": 0
+    },
+    "trajectory": {
+      "ask_steps": 239,
+      "irrelevant_steps": 93,
+      "irrelevant_rate": 0.3891213389121339,
+      "precision_upper_bound": 1.0
+    },
+    "by_channel": {
+      "native": {
+        "asks": 144,
+        "irrelevant": 61
+      },
+      "custom_mcp": {
+        "asks": 95,
+        "irrelevant": 32
+      }
+    },
+    "per_uid": {
+      "698139c7dc5e90df07566a6c": {
+        "q": 14,
+        "irrelev": 4,
+        "br": 8,
+        "bt": 15,
+        "passes": 3
+      },
+      "69a7a4d1617c0b97d4d6aacd": {
+        "q": 9,
+        "irrelev": 1,
+        "br": 8,
+        "bt": 9,
+        "passes": 3
+      },
+      "69a9e77602049c14d2793bb5": {
+        "q": 11,
+        "irrelev": 5,
+        "br": 6,
+        "bt": 12,
+        "passes": 3
+      },
+      "69b1031f73a8f5979167a774": {
+        "q": 9,
+        "irrelev": 6,
+        "br": 3,
+        "bt": 15,
+        "passes": 3
+      },
+      "69b20af8600119b97e678c5b": {
+        "q": 17,
+        "irrelev": 7,
+        "br": 8,
+        "bt": 15,
+        "passes": 3
+      },
+      "69b3ab1df8d713deb4c0087d": {
+        "q": 17,
+        "irrelev": 11,
+        "br": 4,
+        "bt": 9,
+        "passes": 3
+      },
+      "69bc1094b455a91fa20fb868": {
+        "q": 13,
+        "irrelev": 7,
+        "br": 5,
+        "bt": 12,
+        "passes": 3
+      },
+      "69bcc6360c872b9773cce01d": {
+        "q": 10,
+        "irrelev": 3,
+        "br": 7,
+        "bt": 12,
+        "passes": 3
+      },
+      "69be1b17ed0dad79557a9d20": {
+        "q": 2,
+        "irrelev": 2,
+        "br": 0,
+        "bt": 9,
+        "passes": 3
+      },
+      "69be580e4bde28908b05c56f": {
+        "q": 17,
+        "irrelev": 9,
+        "br": 6,
+        "bt": 9,
+        "passes": 3
+      },
+      "69c0073e28d67846c637cb7e": {
+        "q": 5,
+        "irrelev": 4,
+        "br": 1,
+        "bt": 9,
+        "passes": 3
+      },
+      "69c0ead7ef94e54e9dc6a130": {
+        "q": 13,
+        "irrelev": 7,
+        "br": 6,
+        "bt": 9,
+        "passes": 3
+      },
+      "69c196fa0b42d9b078f32b2e": {
+        "q": 11,
+        "irrelev": 1,
+        "br": 10,
+        "bt": 9,
+        "passes": 3
+      },
+      "69c2af94ae34531293e5f7ec": {
+        "q": 13,
+        "irrelev": 5,
+        "br": 7,
+        "bt": 9,
+        "passes": 3
+      },
+      "69c3277deb9e9972372b30fc": {
+        "q": 18,
+        "irrelev": 9,
+        "br": 6,
+        "bt": 9,
+        "passes": 3
+      },
+      "69c3c5e0b961752c24493b50": {
+        "q": 8,
+        "irrelev": 4,
+        "br": 4,
+        "bt": 12,
+        "passes": 3
+      },
+      "69c3f3301734592b5a14a3b9": {
+        "q": 17,
+        "irrelev": 4,
+        "br": 11,
+        "bt": 12,
+        "passes": 3
+      },
+      "69c6079bcb74caaa66c49c87": {
+        "q": 12,
+        "irrelev": 2,
+        "br": 10,
+        "bt": 9,
+        "passes": 3
+      },
+      "69c60cc7b6a31e9900faa779": {
+        "q": 16,
+        "irrelev": 2,
+        "br": 13,
+        "bt": 15,
+        "passes": 3
+      },
+      "69c6ac9f46a2e65fc3988794": {
+        "q": 7,
+        "irrelev": 0,
+        "br": 7,
+        "bt": 9,
+        "passes": 3
+      }
+    }
+  },
+  {
+    "run_id": "_swe_skill7_full_codex",
+    "official": {
+      "precision": 0.6261127596439169,
+      "recall": 0.9634703196347032,
+      "total_questions": 337,
+      "blockers_resolved": 211,
+      "blockers_present": 219,
+      "capped": 0,
+      "cooldown_denied": 0
+    },
+    "trajectory": {
+      "ask_steps": 674,
+      "irrelevant_steps": 463,
+      "irrelevant_rate": 0.6869436201780416,
+      "precision_upper_bound": 1.0
+    },
+    "by_channel": {
+      "native": {
+        "asks": 0,
+        "irrelevant": 0
+      },
+      "custom_mcp": {
+        "asks": 337,
+        "irrelevant": 126
+      }
+    },
+    "per_uid": {
+      "698139c7dc5e90df07566a6c": {
+        "q": 32,
+        "irrelev": 18,
+        "br": 14,
+        "bt": 15,
+        "passes": 3
+      },
+      "69a7a4d1617c0b97d4d6aacd": {
+        "q": 20,
+        "irrelev": 11,
+        "br": 9,
+        "bt": 9,
+        "passes": 3
+      },
+      "69a9e77602049c14d2793bb5": {
+        "q": 48,
+        "irrelev": 37,
+        "br": 11,
+        "bt": 12,
+        "passes": 3
+      },
+      "69b1031f73a8f5979167a774": {
+        "q": 44,
+        "irrelev": 28,
+        "br": 16,
+        "bt": 15,
+        "passes": 3
+      },
+      "69b20af8600119b97e678c5b": {
+        "q": 68,
+        "irrelev": 49,
+        "br": 19,
+        "bt": 15,
+        "passes": 3
+      },
+      "69b3ab1df8d713deb4c0087d": {
+        "q": 30,
+        "irrelev": 21,
+        "br": 9,
+        "bt": 9,
+        "passes": 3
+      },
+      "69bc1094b455a91fa20fb868": {
+        "q": 34,
+        "irrelev": 22,
+        "br": 12,
+        "bt": 12,
+        "passes": 3
+      },
+      "69bcc6360c872b9773cce01d": {
+        "q": 40,
+        "irrelev": 28,
+        "br": 12,
+        "bt": 12,
+        "passes": 3
+      },
+      "69be1b17ed0dad79557a9d20": {
+        "q": 18,
+        "irrelev": 15,
+        "br": 3,
+        "bt": 9,
+        "passes": 3
+      },
+      "69be580e4bde28908b05c56f": {
+        "q": 18,
+        "irrelev": 9,
+        "br": 9,
+        "bt": 9,
+        "passes": 3
+      },
+      "69c0073e28d67846c637cb7e": {
+        "q": 24,
+        "irrelev": 15,
+        "br": 9,
+        "bt": 9,
+        "passes": 3
+      },
+      "69c0ead7ef94e54e9dc6a130": {
+        "q": 34,
+        "irrelev": 25,
+        "br": 9,
+        "bt": 9,
+        "passes": 3
+      },
+      "69c196fa0b42d9b078f32b2e": {
+        "q": 34,
+        "irrelev": 25,
+        "br": 9,
+        "bt": 9,
+        "passes": 3
+      },
+      "69c2af94ae34531293e5f7ec": {
+        "q": 24,
+        "irrelev": 16,
+        "br": 8,
+        "bt": 9,
+        "passes": 3
+      },
+      "69c3277deb9e9972372b30fc": {
+        "q": 38,
+        "irrelev": 30,
+        "br": 8,
+        "bt": 9,
+        "passes": 3
+      },
+      "69c3c5e0b961752c24493b50": {
+        "q": 26,
+        "irrelev": 18,
+        "br": 8,
+        "bt": 12,
+        "passes": 3
+      },
+      "69c3f3301734592b5a14a3b9": {
+        "q": 46,
+        "irrelev": 33,
+        "br": 13,
+        "bt": 12,
+        "passes": 3
+      },
+      "69c6079bcb74caaa66c49c87": {
+        "q": 34,
+        "irrelev": 26,
+        "br": 8,
+        "bt": 9,
+        "passes": 3
+      },
+      "69c60cc7b6a31e9900faa779": {
+        "q": 40,
+        "irrelev": 24,
+        "br": 16,
+        "bt": 15,
+        "passes": 3
+      },
+      "69c6ac9f46a2e65fc3988794": {
+        "q": 22,
+        "irrelev": 13,
+        "br": 9,
+        "bt": 9,
+        "passes": 3
+      }
+    }
+  },
+  {
+    "run_id": "_swe_skill8_full_codex",
+    "official": {
+      "precision": 0.691699604743083,
+      "recall": 0.7990867579908676,
+      "total_questions": 253,
+      "blockers_resolved": 175,
+      "blockers_present": 219,
+      "capped": 18,
+      "cooldown_denied": 0
+    },
+    "trajectory": {
+      "ask_steps": 541,
+      "irrelevant_steps": 348,
+      "irrelevant_rate": 0.6432532347504621,
+      "precision_upper_bound": 1.0
+    },
+    "by_channel": {
+      "native": {
+        "asks": 1,
+        "irrelevant": 1
+      },
+      "custom_mcp": {
+        "asks": 270,
+        "irrelevant": 77
+      }
+    },
+    "per_uid": {
+      "698139c7dc5e90df07566a6c": {
+        "q": 30,
+        "irrelev": 16,
+        "br": 14,
+        "bt": 15,
+        "passes": 3
+      },
+      "69a7a4d1617c0b97d4d6aacd": {
+        "q": 18,
+        "irrelev": 10,
+        "br": 8,
+        "bt": 9,
+        "passes": 3
+      },
+      "69a9e77602049c14d2793bb5": {
+        "q": 28,
+        "irrelev": 22,
+        "br": 5,
+        "bt": 12,
+        "passes": 3
+      },
+      "69b1031f73a8f5979167a774": {
+        "q": 36,
+        "irrelev": 22,
+        "br": 11,
+        "bt": 15,
+        "passes": 3
+      },
+      "69b20af8600119b97e678c5b": {
+        "q": 36,
+        "irrelev": 26,
+        "br": 7,
+        "bt": 15,
+        "passes": 3
+      },
+      "69b3ab1df8d713deb4c0087d": {
+        "q": 26,
+        "irrelev": 18,
+        "br": 8,
+        "bt": 9,
+        "passes": 3
+      },
+      "69bc1094b455a91fa20fb868": {
+        "q": 32,
+        "irrelev": 20,
+        "br": 11,
+        "bt": 12,
+        "passes": 3
+      },
+      "69bcc6360c872b9773cce01d": {
+        "q": 34,
+        "irrelev": 23,
+        "br": 9,
+        "bt": 12,
+        "passes": 3
+      },
+      "69be1b17ed0dad79557a9d20": {
+        "q": 22,
+        "irrelev": 17,
+        "br": 5,
+        "bt": 9,
+        "passes": 3
+      },
+      "69be580e4bde28908b05c56f": {
+        "q": 16,
+        "irrelev": 8,
+        "br": 8,
+        "bt": 9,
+        "passes": 3
+      },
+      "69c0073e28d67846c637cb7e": {
+        "q": 22,
+        "irrelev": 13,
+        "br": 9,
+        "bt": 9,
+        "passes": 3
+      },
+      "69c0ead7ef94e54e9dc6a130": {
+        "q": 26,
+        "irrelev": 18,
+        "br": 8,
+        "bt": 9,
+        "passes": 3
+      },
+      "69c196fa0b42d9b078f32b2e": {
+        "q": 18,
+        "irrelev": 11,
+        "br": 7,
+        "bt": 9,
+        "passes": 3
+      },
+      "69c2af94ae34531293e5f7ec": {
+        "q": 24,
+        "irrelev": 15,
+        "br": 9,
+        "bt": 9,
+        "passes": 3
+      },
+      "69c3277deb9e9972372b30fc": {
+        "q": 33,
+        "irrelev": 24,
+        "br": 7,
+        "bt": 9,
+        "passes": 3
+      },
+      "69c3c5e0b961752c24493b50": {
+        "q": 24,
+        "irrelev": 18,
+        "br": 5,
+        "bt": 12,
+        "passes": 3
+      },
+      "69c3f3301734592b5a14a3b9": {
+        "q": 36,
+        "irrelev": 21,
+        "br": 12,
+        "bt": 12,
+        "passes": 3
+      },
+      "69c6079bcb74caaa66c49c87": {
+        "q": 26,
+        "irrelev": 18,
+        "br": 8,
+        "bt": 9,
+        "passes": 3
+      },
+      "69c60cc7b6a31e9900faa779": {
+        "q": 34,
+        "irrelev": 17,
+        "br": 15,
+        "bt": 15,
+        "passes": 3
+      },
+      "69c6ac9f46a2e65fc3988794": {
+        "q": 20,
+        "irrelev": 11,
+        "br": 9,
+        "bt": 9,
+        "passes": 3
+      }
+    }
+  }
+]

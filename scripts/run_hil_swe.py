@@ -248,6 +248,18 @@ FORWARDED_ENV_KEYS = [
     "LITELLM_CALL_TIMEOUT_MS",
     "STEP_LITELLM_TRIES",
     "WITH_CUSTOM_TOOL",
+    # Recall-tweak flags (skill7 layer on top of Alina's PR)
+    "SEED_BLOCKER_TODOS",
+    "CLAUDE_MD_HINT",
+    "RICH_ASK_TOOL_DESC",
+    "SOFTEN_CATEGORY_MANDATE",
+    "MAX_ASKS_PER_PASS",
+    "IRRELEVANT_COOLDOWN",
+    "BLOCKER_SCALED_CAP",
+    "IRRELEVANT_FIRST_THROTTLE",
+    "STOP_WHEN_BLOCKERS_RESOLVED",
+    "READ_BEFORE_ASK",
+    "READ_BEFORE_ASK_MIN_FILES",
     "MAX_TURNS",
     "ATTEMPT_TIMEOUT_MS",
     "PERMISSION_MODE",
@@ -504,6 +516,7 @@ def run_attempt(
     run_id: str,
     skip_if_complete: bool,
     extra_env: dict[str, str],
+    cleared_env_keys: set[str] | None = None,
 ) -> tuple[bool, str]:
     """
     Spin up one Docker container to run the claude-code SWE harness for a single
@@ -545,6 +558,7 @@ def run_attempt(
             out_dir=out_dir,
             task_dir=task_dir,
             extra_env=extra_env,
+            cleared_env_keys=cleared_env_keys,
         )
     finally:
         _unregister_uid_owner(owner_token)
@@ -560,6 +574,7 @@ def _run_attempt_inner(
     out_dir: Path,
     task_dir: Path,
     extra_env: dict[str, str],
+    cleared_env_keys: set[str] | None = None,
 ) -> tuple[bool, str]:
     """Build + run the docker container for one (uid, mode, pass_index) pass."""
     # Remove stale trajectory.jsonl from any previous run format that wrote it.
@@ -569,8 +584,14 @@ def _run_attempt_inner(
 
     # Build docker run command
     env_args: list[str] = []
+    cleared = cleared_env_keys or set()
     for key in FORWARDED_ENV_KEYS:
-        val = extra_env.get(key) or os.environ.get(key, "")
+        if key in cleared:
+            continue
+        if key in extra_env:
+            val = extra_env[key]
+        else:
+            val = os.environ.get(key, "")
         if val:
             env_args += ["-e", f"{key}={val}"]
 
@@ -878,10 +899,15 @@ def main() -> None:
 
     # 3. Explicit --env KEY=VALUE overrides win over everything
     explicit_env_override_keys: set[str] = set()
+    cleared_env_keys: set[str] = set()
     for item in args.env or []:
         if "=" in item:
             k, v = item.split("=", 1)
-            effective_env[k] = v
+            if v == "":
+                effective_env.pop(k, None)
+                cleared_env_keys.add(k)
+            else:
+                effective_env[k] = v
             explicit_env_override_keys.add(k)
 
     # 4. --max-turns shorthand (equivalent to --env MAX_TURNS=N)
@@ -1033,6 +1059,7 @@ def main() -> None:
             run_id=args.run_id,
             skip_if_complete=not args.force,
             extra_env=effective_env,
+            cleared_env_keys=cleared_env_keys,
         )
 
     def eval_one(job: dict, force_eval: bool = False) -> tuple[bool, str]:

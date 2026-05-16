@@ -49,11 +49,15 @@ import {
   MODE, PASS_INDEX, RUN_ID, TIMEOUT_MS,
   LITELLM_CALL_TIMEOUT_MS, STEP_LITELLM_TRIES,
   ASK_HUMAN_BASE_URL, ASK_HUMAN_MODEL, buildAskHumanGuidance,
+  CLAUDE_MD_HINT, richAskHumanToolDescriptionForHarness,
+  buildPerTaskMemoryHint,
   THOUGHT_CAP, ACT_CAP, OBS_CAP, cap, gitDiff,
 } from "./constants.mjs";
+import { createSkill8AskLimitTracker } from "./skill8_ask_limits.mjs";
 
-// Claude's native question-asking tool is AskUserQuestion
-const ASK_HUMAN_GUIDANCE = buildAskHumanGuidance("AskUserQuestion");
+// Claude's native question-asking tool is AskUserQuestion. The recall-tweak
+// flags (SEED_BLOCKER_TODOS / etc.) modulate the appended guidance internally.
+const ASK_HUMAN_GUIDANCE = buildAskHumanGuidance("AskUserQuestion", "claude");
 
 // ── Configuration from env ──────────────────────────────────────────────────
 
@@ -133,7 +137,24 @@ function isCustomAskHumanTool(toolName) {
   return String(toolName || "") === "mcp__human_input__ask_human";
 }
 
-function createCustomAskHumanMcpServer({ router, pushEvent }) {
+function extractReadPathsForSkill9(toolName, input) {
+  const name = String(toolName || "");
+  const paths = [];
+  if (name === "Read" || name === "Glob" || name === "LS") {
+    for (const key of ["file_path", "path", "target_file", "file"]) {
+      if (input?.[key]) paths.push(input[key]);
+    }
+  }
+  if (/Grep|Search|search/i.test(name) && input?.path) {
+    paths.push(input.path);
+  }
+  return paths.map((p) => String(p)).filter(Boolean);
+}
+
+function createCustomAskHumanMcpServer({ router, pushEvent, skill8Tracker }) {
+  const toolDesc =
+    richAskHumanToolDescriptionForHarness() ??
+    "Ask a focused clarification question about task requirements.";
   return createSdkMcpServer({
     name: "human_input",
     version: "0.1.0",
@@ -141,7 +162,7 @@ function createCustomAskHumanMcpServer({ router, pushEvent }) {
     tools: [
       tool(
         "ask_human",
-        "Ask a focused clarification question about task requirements.",
+        toolDesc,
         {
           question: z.string(),
           request_type: z.enum(["clarification", "elicitation"]).optional(),
@@ -161,6 +182,20 @@ function createCustomAskHumanMcpServer({ router, pushEvent }) {
               });
               return { content: [{ type: "text", text: UNKNOWN_RESOLUTION }] };
             }
+            if (skill8Tracker) {
+              const gate = skill8Tracker.checkBeforeJudge();
+              if (gate.shortCircuit) {
+                pushEvent({
+                  type: "skill8_ask_human_suppressed",
+                  timestamp: new Date().toISOString(),
+                  reason: gate.reason,
+                  question,
+                  sdk: "claude_custom_mcp",
+                });
+                return { content: [{ type: "text", text: gate.responseText }] };
+              }
+              skill8Tracker.notifyRoutedToJudge();
+            }
             const result = await router.route({
               requestType,
               nativeEventType: "claude.mcp.ask_human",
@@ -169,7 +204,12 @@ function createCustomAskHumanMcpServer({ router, pushEvent }) {
               options: input.options || [],
               context: { source: "claude_mcp_tool" },
             });
-            return { content: [{ type: "text", text: result.resolution || UNKNOWN_RESOLUTION }] };
+            const resolution = result.resolution || UNKNOWN_RESOLUTION;
+            skill8Tracker?.recordJudgeResolution(resolution, {
+              blockerId: result.blocker_id,
+              status: result.status,
+            });
+            return { content: [{ type: "text", text: resolution }] };
           } catch (err) {
             // Best-effort tool failure handling: keep the agent loop alive and
             // return the canonical retryable answer text.
@@ -220,28 +260,63 @@ function createCustomAskHumanMcpServer({ router, pushEvent }) {
   });
 }
 
-async function answerClaudeAskUserQuestion({ router, input, permission }) {
+async function answerClaudeAskUserQuestion({ router, input, permission, skill8Tracker, pushEvent }) {
   const questions = Array.isArray(input?.questions) ? input.questions : [input];
   const answerParts = [];
   // AskUserQuestionOutput.answers is keyed by question text (not header).
   // This is the structured map passed back via updatedInput so Claude Code
   // formats the tool result as "question=answer" pairs for the model.
   const answersMap = {};
+  let hitJudgeAny = false;
   for (const question of questions) {
     const prompt = question?.question || "Clarification request";
-    const result = await router.route({
-      requestType: "clarification",
-      nativeEventType: "claude.AskUserQuestion.canUseTool",
-      rawEvent: { input, permission: serializablePermission(permission) },
-      question: prompt,
-      options: question?.options || [],
-      context: { source: "claude_builtin_AskUserQuestion" },
-    });
-    const answerStr = result.resolution || UNKNOWN_RESOLUTION;
+    let answerStr;
+
+    if (skill8Tracker) {
+      const gate = skill8Tracker.checkBeforeJudge();
+      if (gate.shortCircuit) {
+        pushEvent?.({
+          type: "skill8_ask_human_suppressed",
+          timestamp: new Date().toISOString(),
+          reason: gate.reason,
+          question: prompt,
+          sdk: "claude_native",
+        });
+        answerStr = gate.responseText;
+      } else {
+        skill8Tracker.notifyRoutedToJudge();
+        const result = await router.route({
+          requestType: "clarification",
+          nativeEventType: "claude.AskUserQuestion.canUseTool",
+          rawEvent: { input, permission: serializablePermission(permission) },
+          question: prompt,
+          options: question?.options || [],
+          context: { source: "claude_builtin_AskUserQuestion" },
+        });
+        answerStr = result.resolution || UNKNOWN_RESOLUTION;
+        skill8Tracker.recordJudgeResolution(answerStr, {
+          blockerId: result.blocker_id,
+          status: result.status,
+        });
+        hitJudgeAny = true;
+      }
+    } else {
+      const result = await router.route({
+        requestType: "clarification",
+        nativeEventType: "claude.AskUserQuestion.canUseTool",
+        rawEvent: { input, permission: serializablePermission(permission) },
+        question: prompt,
+        options: question?.options || [],
+        context: { source: "claude_builtin_AskUserQuestion" },
+      });
+      answerStr = result.resolution || UNKNOWN_RESOLUTION;
+      hitJudgeAny = true;
+    }
+
     answerParts.push(`${prompt}\n${answerStr}`);
     answersMap[prompt] = answerStr;
   }
-  return { answerText: answerParts.join("\n\n"), answers: answersMap, questions };
+  return { answerText: answerParts.join("\n\n"), answers: answersMap, questions, hitJudgeAny };
 }
 
 // ── Trajectory extraction ────────────────────────────────────────────────────
@@ -443,6 +518,8 @@ function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
   let numQuestions         = 0;
   let numQuestionsApproval = 0;
   let numQuestionsFullInfo = 0;
+  let numAskHumanCapped    = 0;
+  let numAskHumanCooldownDenied = 0;
   let numBlockersResolved  = 0;
   const seenRawEventIds    = new Set();
   const seenResultEventIds = new Set();
@@ -461,10 +538,15 @@ function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
   }
 
   // One native AskUserQuestion use should count as one question regardless of
-  // how many sub-questions were bundled in that single tool call.
+  // how many sub-questions were bundled — but Skill8 suppressions bypass the judge
+  // and must not inflate num_questions.
   for (const ev of events) {
-    if (ev.type === "claude_ask_question") numQuestions++;
+    if (ev.type === "claude_ask_question" && ev.hit_judge_for_native_ask !== false) numQuestions++;
     if (ev.type === "ask_question_full_info_mode") numQuestionsFullInfo++;
+    if (ev.type === "skill8_ask_human_suppressed") {
+      if (ev.reason === "cooldown") numAskHumanCooldownDenied += 1;
+      else if (ev.reason === "cap") numAskHumanCapped += 1;
+    }
   }
 
   for (const ev of events) {
@@ -511,6 +593,8 @@ function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
     num_questions_approval:  numQuestionsApproval,
     num_total_questions:     numQuestions + numQuestionsApproval,
     num_questions_full_info: numQuestionsFullInfo,
+    num_ask_human_capped:    numAskHumanCapped,
+    num_ask_human_cooldown_denied: numAskHumanCooldownDenied,
     num_blockers_resolved:   numBlockersResolved,
     num_blockers_total:      numBlockersTotal,
   };
@@ -548,6 +632,40 @@ async function main() {
     await installClaudeSkill(WORKSPACE, SKILL_TOOL_REF.claude);
   }
 
+  // 2b. Tweak B — per-task CLAUDE.md hint (auto-injected by the Claude Code SDK
+  // via its memdir subsystem). Only written in ask_human mode and when the
+  // CLAUDE_MD_HINT flag is set, so the skill3 baseline is unchanged by default.
+  if (MODE === "ask_human" && CLAUDE_MD_HINT) {
+    let numBlockersForHint = 0;
+    try {
+      const reg = JSON.parse(
+        await fs.readFile(path.join(TASK_DIR, "blocker_registry.json"), "utf8"),
+      );
+      numBlockersForHint = (reg.entries || reg.blockers || []).length;
+    } catch { /* metadata-only fallback */ }
+    const hint = buildPerTaskMemoryHint({
+      uid,
+      numBlockers: numBlockersForHint,
+      sdk: "claude",
+    });
+    try {
+      await fs.writeFile(path.join(WORKSPACE, "CLAUDE.md"), hint, "utf8");
+      pushEvent({
+        type: "claude_md_hint_written",
+        timestamp: new Date().toISOString(),
+        path: path.join(WORKSPACE, "CLAUDE.md"),
+        num_blockers_hinted: numBlockersForHint,
+        bytes: Buffer.byteLength(hint),
+      });
+    } catch (err) {
+      pushEvent({
+        type: "claude_md_hint_error",
+        timestamp: new Date().toISOString(),
+        error: String(err?.message || err),
+      });
+    }
+  }
+
   // 3. Write attempt metadata
   const attemptMeta = {
     run_id: RUN_ID,
@@ -583,9 +701,6 @@ async function main() {
         ...(ASK_HUMAN_MODEL ? { modelId: ASK_HUMAN_MODEL } : {}),
       })
     : null;
-  const customAskHumanMcp = WITH_CUSTOM_TOOL
-    ? createCustomAskHumanMcpServer({ router: humanRouter, pushEvent })
-    : null;
 
   // 5. Run agent with up to 3 attempts
   // Retries occur only on transient SDK errors; timeouts and clean completions
@@ -599,9 +714,23 @@ async function main() {
 
   const env = claudeApiEnv();
 
+  let numBlockersTotal = 0;
+  try {
+    const regPath = path.join(TASK_DIR, "blocker_registry.json");
+    const reg = JSON.parse(await fs.readFile(regPath, "utf8"));
+    numBlockersTotal = (reg.entries || reg.blockers || []).length;
+  } catch { /* stats will show 0 */ }
+
   for (let _attempt = 1; _attempt <= MAX_RETRIES; _attempt++) {
     sdkError = null;
     allEvents.length = 0;   // clear in-place so pushEvent closure remains valid
+
+    const skill8Tracker = humanRouter
+      ? createSkill8AskLimitTracker({ numBlockersTotal })
+      : null;
+    const customAskHumanMcp = WITH_CUSTOM_TOOL
+      ? createCustomAskHumanMcpServer({ router: humanRouter, pushEvent, skill8Tracker })
+      : null;
 
     const PER_ATTEMPT_TIMEOUT_MS = LITELLM_CALL_TIMEOUT_MS;
     const remainingMs    = TIMEOUT_MS - (Date.now() - _runStart);
@@ -649,8 +778,14 @@ async function main() {
             if (isAskUserQuestionTool(_toolName)) {
               if (humanRouter) {
                 // ask_human mode: route to the LLM-backed human simulator.
-                const { answerText, answers, questions: qs } = await answerClaudeAskUserQuestion({
-                  router: humanRouter, input: _input, permission,
+                const {
+                  answerText, answers, questions: qs, hitJudgeAny,
+                } = await answerClaudeAskUserQuestion({
+                  router: humanRouter,
+                  input: _input,
+                  permission,
+                  skill8Tracker,
+                  pushEvent,
                 });
                 // Emit a structured event so extractTrajectorySteps records the
                 // ask/answer pair in trajectory.json with a clean obs.
@@ -667,6 +802,7 @@ async function main() {
                   qa_pairs:    qaPairs,
                   tool_use_id: permission.toolUseID,
                   source:      "native",
+                  hit_judge_for_native_ask: hitJudgeAny,
                 });
                 // Return behavior:"allow" with pre-filled answers so the model receives
                 // a proper AskUserQuestion tool-success result:
@@ -735,6 +871,9 @@ async function main() {
               });
               return { behavior: "deny", toolUseID: permission.toolUseID, message: `Denied: ${decision.reason}`, decisionClassification: "user_temporary" };
             }
+            for (const fp of extractReadPathsForSkill9(_toolName, _input)) {
+              skill8Tracker?.noteFileRead?.(fp);
+            }
             return { behavior: "allow", updatedInput: _input || {}, toolUseID: permission.toolUseID, decisionClassification: "user_temporary" };
           },
           systemPrompt: MODE === "ask_human"
@@ -792,14 +931,6 @@ async function main() {
     stop_reason: stopReason,
   });
   const trajectorySteps = extractTrajectorySteps(allEvents);
-
-  // Load actual blocker count from blocker_registry.json for ask metrics
-  let numBlockersTotal = 0;
-  try {
-    const regPath = path.join(TASK_DIR, "blocker_registry.json");
-    const reg = JSON.parse(await fs.readFile(regPath, "utf8"));
-    numBlockersTotal = (reg.entries || reg.blockers || []).length;
-  } catch { /* ignore — stats will show 0 */ }
 
   const stats = computeTrajectoryStats(allEvents, trajectorySteps, numBlockersTotal);
   await writeJson(path.join(OUTPUT_DIR, "trajectory.json"), trajectorySteps);

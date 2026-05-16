@@ -1,9 +1,9 @@
 /**
- * ask_human MCP bridge for run_opencode.mjs
+ * ask_human MCP bridge — used by Codex (and optionally OpenCode) as a subprocess.
  *
  * Minimal stdio JSON-RPC 2.0 MCP server that exposes a single `ask_human`
- * tool to OpenCode (which can only call external tools via MCP).  Each call
- * is proxied to the existing ask_human_sidecar.mjs HTTP server.
+ * tool. Each call is proxied to ask_human_sidecar.mjs unless Skill8 guards
+ * (MAX_ASKS_PER_PASS / IRRELEVANT_COOLDOWN) short-circuit locally.
  *
  * OpenCode starts this process as a local MCP subprocess.  Environment vars
  * expected at launch (set by run_opencode.mjs via the MCP config `env` map):
@@ -18,9 +18,14 @@
  * turn — identical to the behaviour of the Python ADK ask_human function.
  */
 
+import fs      from "node:fs";
 import http    from "node:http";
+import path    from "node:path";
 import process from "node:process";
 import readline from "node:readline";
+
+import { createSkill8AskLimitTracker } from "./skill8_ask_limits.mjs";
+import { richAskHumanToolDescriptionForHarness } from "./constants.mjs";
 
 const SIDECAR_URL = process.env.SIDECAR_URL;
 if (!SIDECAR_URL) {
@@ -30,6 +35,17 @@ if (!SIDECAR_URL) {
 
 const CANT_ANSWER      = "can't answer (perhaps transient hiccup)";
 const PROTOCOL_VERSION = "2024-11-05";
+
+const TASK_DIR = process.env.TASK_DIR || "/task";
+let numBlockersTotal = 0;
+try {
+  const reg = JSON.parse(
+    fs.readFileSync(path.join(TASK_DIR, "blocker_registry.json"), "utf8"),
+  );
+  numBlockersTotal = (reg.entries || reg.blockers || []).length;
+} catch { /* ignore */ }
+
+const skill8Tracker = createSkill8AskLimitTracker({ numBlockersTotal });
 
 function fallbackSidecarResult(question = "") {
   const requestId = `codex_customtool_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
@@ -149,10 +165,10 @@ async function sidecarAsk(question) {
 
 const ASK_HUMAN_TOOL = {
   name:        "ask_human",
-  description: (
+  description: richAskHumanToolDescriptionForHarness() ?? (
     "Ask a human expert a focused question about the implementation requirements. " +
-    "Submit only ONE specific question at a time. " +
-    "The expert can only answer questions about what the code should do, not how to implement it."
+      "Submit only ONE specific question at a time. " +
+      "The expert can only answer questions about what the code should do, not how to implement it."
   ),
   inputSchema: {
     type:       "object",
@@ -215,12 +231,44 @@ rl.on("line", async (line) => {
 
     const question = String(args.question ?? "");
 
+    const gate = skill8Tracker.checkBeforeJudge();
+    if (gate.shortCircuit) {
+      const ts = new Date().toISOString();
+      const synth = {
+        resolution: gate.responseText,
+        selected_labels: [gate.responseText],
+        blocker_id: "unknown",
+        status: "skill8_suppressed",
+        events: [
+          {
+            type: "skill8_ask_human_suppressed",
+            timestamp: ts,
+            reason: gate.reason,
+            question,
+            sdk: "codex_mcp",
+          },
+        ],
+      };
+      success(id, {
+        content: [{ type: "text", text: gate.responseText }],
+        structuredContent: synth,
+        isError: false,
+      });
+      return;
+    }
+
+    skill8Tracker.notifyRoutedToJudge();
+
     let sidecarResult;
     try {
       sidecarResult = await sidecarAsk(question);
     } catch {
       sidecarResult = fallbackSidecarResult(question);
     }
+    skill8Tracker.recordJudgeResolution(sidecarResult.resolution, {
+      blockerId: sidecarResult.blocker_id,
+      status: sidecarResult.status,
+    });
 
     success(id, {
       content: [{ type: "text", text: String(sidecarResult.resolution ?? CANT_ANSWER) }],
