@@ -3,6 +3,7 @@
 Comprehensive comparison of Trust Horizon HiL-SWE runs on the 20-attempt test set, versus original HiL-Bench references, Alina's PR baselines ([trust_horizon#1](https://github.com/melfeki-11/trust_horizon/pull/1)), and the skill7→skill9 iteration.
 
 **Primary data:** [Trust Horizon Agent Performance - 20-Attempt Test Set.csv](../Trust%20Horizon%20Agent%20Performance%20-%2020-Attempt%20Test%20Set.csv)  
+**20-UID test set:** [data/hil_swe_20_attempt_test_set_uids.txt](../data/hil_swe_20_attempt_test_set_uids.txt) (same UIDs as `scripts/run_skill9_full_scale.sh`)  
 **Skill9 runs:** `runs/_swe_skill9_full_{claude,codex}/`  
 **Short summary:** [smoke_logs/skill9_vs_alina.md](../smoke_logs/skill9_vs_alina.md)
 
@@ -12,7 +13,7 @@ Comprehensive comparison of Trust Horizon HiL-SWE runs on the 20-attempt test se
 
 ### Scope and caveats
 
-- **Apple-to-apple:** Rows using the same HiL-SWE harness on the **same 20 UIDs × 3 passes** (`claude-code` / `codex`).
+- **Apple-to-apple:** Rows using the same HiL-SWE harness on the **same 20 UIDs × 3 passes** (`claude-code` / `codex`). Canonical UID list: [data/hil_swe_20_attempt_test_set_uids.txt](../data/hil_swe_20_attempt_test_set_uids.txt).
 - **Not apple-to-apple:** Row 1 (“Original HiL-Bench SWE-agent”) uses different agent labels (`claude-opus-4-7`, `gpt 5.5`, etc.) and a different stack—use only as a **historical north star**.
 - **Alina baselines:** P/R from project acceptance constants (20-UID runs on PR #1 config). Pass@1/Pass@3 for Alina were not stored in-repo; CSV rows leave Pass@k blank unless backfilled from Alina's run artifacts. F1 computed as `2PR/(P+R)`.
 
