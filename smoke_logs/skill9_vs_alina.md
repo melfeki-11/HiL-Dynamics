@@ -35,9 +35,9 @@ See [`smoke_logs/skill9_ablation_summary.md`](skill9_ablation_summary.md). Winne
 - [`scripts/run_skill9_ablation.sh`](../scripts/run_skill9_ablation.sh) — 2-UID profiles
 - [`scripts/aggregate_skill9_ablation.py`](../scripts/aggregate_skill9_ablation.py)
 - [`scripts/acceptance_skill9.py`](../scripts/acceptance_skill9.py)
-- [`tests/skill8_ask_limits.test.mjs`](../tests/skill8_ask_limits.test.mjs)
+- [`tests/ask_limits.test.mjs`](../tests/ask_limits.test.mjs)
 
-Harness: [`src/hil_swe/skill8_ask_limits.mjs`](../src/hil_swe/skill8_ask_limits.mjs) (per-pass cap and optional guards).
+Harness: [`src/hil_swe/ask_limits.mjs`](../src/hil_swe/ask_limits.mjs) (per-pass cap and optional guards).
 
 ## 20-UID metrics
 

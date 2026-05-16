@@ -1,6 +1,6 @@
 /**
- * Skill8/9 precision guards: per-pass ask cap, irrelevant cooldown, optional
- * irrelevant-first throttle (K) and blocker-scaled cap (J).
+ * HiL-SWE ask limits: per-pass cap, irrelevant cooldown, optional
+ * irrelevant-first throttle and blocker-scaled cap (env-gated).
  */
 
 import { UNKNOWN_RESOLUTION } from "../shared/human_input.mjs";
@@ -60,7 +60,7 @@ export function resolveMaxAsksPerPass(numBlockersTotal = 0) {
   return Math.min(6, n + 1);
 }
 
-export function createSkill8AskLimitTracker(opts = {}) {
+export function createAskLimitTracker(opts = {}) {
   const maxAsksPerPass = opts.maxAsksPerPass ?? resolveMaxAsksPerPass(opts.numBlockersTotal ?? 0);
   const irrelevantCooldownThreshold = opts.irrelevantCooldownThreshold ?? parseIrrelevantCooldown();
   const irrelevantFirstThrottle = opts.irrelevantFirstThrottle ?? isIrrelevantFirstThrottleEnabled();

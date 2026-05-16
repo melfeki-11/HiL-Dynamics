@@ -709,7 +709,7 @@ function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
   for (const ev of events) {
     if (ev.type === "codex_ask_question") numQuestions++;
     if (ev.type === "ask_question_full_info_mode") numQuestionsFullInfo++;
-    if (ev.type === "skill8_ask_human_suppressed") {
+    if (ev.type === "ask_human_suppressed") {
       if (ev.reason === "cooldown") numAskHumanCooldownDenied += 1;
       else if (ev.reason === "cap") numAskHumanCapped += 1;
     }

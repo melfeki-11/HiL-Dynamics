@@ -76,7 +76,7 @@ Comprehensive comparison of Trust Horizon HiL-SWE runs on the 20-attempt test se
 | Utility ≠ procedure; “corrupt success” when task passes but procedure violates constraints (§1, §5.1; Eq. 9 gated utility) | `gated_pass@k` in `scripts/metrics_hil_swe.py` (lines 375–377, 443–446): success credited only if ≥1 judge question was asked on that pass |
 | Interaction quality axis (question burden, fulfillment) | Micro **ask_precision** / **ask_recall** in `scripts/metrics_hil_swe.py` (lines 13–17, 450–454); judge router in `src/shared/human_input.mjs` |
 | Multi-axis gating for deployment readiness | `scripts/acceptance_skill9.py` (lines 8–42): require P/R ≥ both Alina custom-tool and skill+guidance floors |
-| Read → communicate → write consistency (tripartite actions §3.1) | Tweak **F**: `READ_BEFORE_ASK` in `src/hil_swe/skill8_ask_limits.mjs` (lines 120–126); Claude `canUseTool` calls `noteFileRead` in `src/hil_swe/run_claude.mjs` (lines 136–147, ~846) |
+| Read → communicate → write consistency (tripartite actions §3.1) | Tweak **F**: `READ_BEFORE_ASK` in `src/hil_swe/ask_limits.mjs` (lines 120–126); Claude `canUseTool` calls `noteFileRead` in `src/hil_swe/run_claude.mjs` (lines 136–147, ~846) |
 
 ### 2. Vinod Krane — Agent evaluation (tools, trajectories, LLM-as-judge)
 
@@ -131,12 +131,12 @@ Evidence: 2-UID ablation = `smoke_logs/skill9_ablation_summary.md`; 20-UID = `ru
 | B | `CLAUDE_MD_HINT` | R↑ | R↑ | skill7 ABD | skill7 | **Works** | `src/hil_swe/constants.mjs` (77–79, 285+); `scripts/run_hil_swe.py` (253) |
 | D | `RICH_ASK_TOOL_DESC` | R↑ | R↑ | skill7 ABD | skill7 | **Works** | `src/hil_swe/constants.mjs` (204–270); `run_claude.mjs` `createCustomAskHumanMcpServer` (150–157) |
 | H | `SOFTEN_CATEGORY_MANDATE` | Alone: P↓ | **Best** | skill8/9 abl. | Codex split | **Codex yes; Claude needs HE** | `constants.mjs` (84–86, 255–269); `scripts/run_skill9_ablation.sh` (67–68) |
-| E | `MAX_ASKS_PER_PASS=5` | **HE** | Cuts R | skill8/9 abl. | Claude split | **Claude yes** | `src/hil_swe/skill8_ask_limits.mjs` (20–23, 141–147); `run_claude.mjs` (699–701) |
-| G | `IRRELEVANT_COOLDOWN=2` | Over-prune | Over-prune | skill8 HEG | — | **Hurts recall** | `skill8_ask_limits.mjs` (25–28, 136–138); `smoke_logs/skill8_ablation_summary.md` |
-| J | `BLOCKER_SCALED_CAP` | 0 BR | 0 BR | skill9 JK | Not winner | **Fails with K+L** | `skill8_ask_limits.mjs` (55–61); `scripts/run_skill9_ablation.sh` (72–74) |
-| K | `IRRELEVANT_FIRST_THROTTLE` | 0 BR | 0 BR | skill9 JK | Not winner | **Fails with J+L** | `skill8_ask_limits.mjs` (34–36, 141–143) |
-| L | `STOP_WHEN_BLOCKERS_RESOLVED` | 0 BR | 0 BR | skill9 JK | Not winner | **Fails** | `skill8_ask_limits.mjs` (38–40, 128–134) |
-| F | `READ_BEFORE_ASK` | 0 BR | 0 BR | skill9 JKF | Not winner | **Implemented, not selected** | `skill8_ask_limits.mjs` (42–48, 120–126); `run_claude.mjs` (136–147) |
+| E | `MAX_ASKS_PER_PASS=5` | **HE** | Cuts R | skill8/9 abl. | Claude split | **Claude yes** | `src/hil_swe/ask_limits.mjs` (20–23, 141–147); `run_claude.mjs` (699–701) |
+| G | `IRRELEVANT_COOLDOWN=2` | Over-prune | Over-prune | skill8 HEG | — | **Hurts recall** | `ask_limits.mjs` (25–28, 136–138); `smoke_logs/skill8_ablation_summary.md` |
+| J | `BLOCKER_SCALED_CAP` | 0 BR | 0 BR | skill9 JK | Not winner | **Fails with K+L** | `ask_limits.mjs` (55–61); `scripts/run_skill9_ablation.sh` (72–74) |
+| K | `IRRELEVANT_FIRST_THROTTLE` | 0 BR | 0 BR | skill9 JK | Not winner | **Fails with J+L** | `ask_limits.mjs` (34–36, 141–143) |
+| L | `STOP_WHEN_BLOCKERS_RESOLVED` | 0 BR | 0 BR | skill9 JK | Not winner | **Fails** | `ask_limits.mjs` (38–40, 128–134) |
+| F | `READ_BEFORE_ASK` | 0 BR | 0 BR | skill9 JKF | Not winner | **Implemented, not selected** | `ask_limits.mjs` (42–48, 120–126); `run_claude.mjs` (136–147) |
 | M | Claude native-only | — | — | skill9 M | — | **Not validated 20-UID** | `scripts/run_skill9_ablation.sh` (81–85); `--with-custom-tool` in `run_hil_swe.py` (865–929) |
 | **split** | Codex H; Claude HE | Pareto | Pareto | ✓ | ✓ | **Production** | `scripts/run_skill9_full_scale.sh`; `scripts/acceptance_skill9.py` |
 | Infra | LiteLLM judge fallback | — | — | — | Required | **Critical** | `src/hil_swe/constants.mjs` (29–44, 46–54); `scripts/run_hil_swe.py` (891–903) |
@@ -157,7 +157,7 @@ Evidence: 2-UID ablation = `smoke_logs/skill9_ablation_summary.md`; 20-UID = `ru
 - **Config:** `SOFTEN_CATEGORY_MANDATE=1` + `MAX_ASKS_PER_PASS=5` — `scripts/run_skill9_full_scale.sh` (Claude branch); ablation `split` lines 67–68.
 - **20-UID:** P=0.71, R=0.71, pass@1=0.28, pass@3=0.33 — `runs/_swe_skill9_full_claude/metrics/summary.json`; CSV row 34.
 - **Harness:** `src/hil_swe/run_claude.mjs` — `installClaudeSkill` (604); `createCustomAskHumanMcpServer` (703); native path `answerClaudeAskUserQuestion` (755); stats via `computeTrajectoryStats` (906).
-- **Why:** Claude over-asked before cap + soften; cap enforced in `skill8_ask_limits.mjs`; soften via `richAskHumanToolDescriptionForHarness` in `constants.mjs`.
+- **Why:** Claude over-asked before cap + soften; cap enforced in `ask_limits.mjs`; soften via `richAskHumanToolDescriptionForHarness` in `constants.mjs`.
 - **Channels:** Both native and custom MCP routed through `createHumanInputRouter` in `src/shared/human_input.mjs` (665–673).
 
 ### Production profile
@@ -198,7 +198,7 @@ Implementation: `scripts/run_skill9_full_scale.sh`, `scripts/run_hil_swe.py`
 | `scripts/run_skill9_full_scale.sh` | 20-UID production profile |
 | `scripts/acceptance_skill9.py` | Gate vs both Alina P/R baselines |
 | `scripts/metrics_hil_swe.py` | Official metrics + gated_pass@k |
-| `tests/skill8_ask_limits.test.mjs` | Cap/throttle unit tests |
+| `tests/ask_limits.test.mjs` | Cap/throttle unit tests |
 
 ---
 
@@ -261,7 +261,7 @@ Trust Horizon implements the same concepts in the files below.
 | Pareto acceptance vs Alina | `scripts/acceptance_skill9.py` |
 | LLM judge router & selector | `src/shared/human_input.mjs` |
 | Judge env / LiteLLM fallback | `src/hil_swe/constants.mjs` (ASK_HUMAN_BASE_URL, ASK_HUMAN_MODEL) |
-| Read-before-ask gate | `src/hil_swe/skill8_ask_limits.mjs` |
+| Read-before-ask gate | `src/hil_swe/ask_limits.mjs` |
 #### Section B — Claude Code parity (harness)
 
 | Topic | File path |
@@ -281,7 +281,7 @@ Trust Horizon implements the same concepts in the files below.
 | Topic | File path |
 |-------|-----------|
 | Skill9 split ablation | `scripts/aggregate_skill9_ablation.py`, `scripts/run_skill9_ablation.sh`, `smoke_logs/skill9_ablation_summary.md` |
-| Ask-limit unit tests | `tests/skill8_ask_limits.test.mjs` |
+| Ask-limit unit tests | `tests/ask_limits.test.mjs` |
 
 #### Section D — production profile and full-scale runs
 

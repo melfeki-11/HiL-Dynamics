@@ -24,7 +24,7 @@ import path    from "node:path";
 import process from "node:process";
 import readline from "node:readline";
 
-import { createSkill8AskLimitTracker } from "./skill8_ask_limits.mjs";
+import { createAskLimitTracker } from "./ask_limits.mjs";
 import { richAskHumanToolDescriptionForHarness } from "./constants.mjs";
 
 const SIDECAR_URL = process.env.SIDECAR_URL;
@@ -45,7 +45,7 @@ try {
   numBlockersTotal = (reg.entries || reg.blockers || []).length;
 } catch { /* ignore */ }
 
-const skill8Tracker = createSkill8AskLimitTracker({ numBlockersTotal });
+const askLimitTracker = createAskLimitTracker({ numBlockersTotal });
 
 function fallbackSidecarResult(question = "") {
   const requestId = `codex_customtool_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
@@ -231,17 +231,17 @@ rl.on("line", async (line) => {
 
     const question = String(args.question ?? "");
 
-    const gate = skill8Tracker.checkBeforeJudge();
+    const gate = askLimitTracker.checkBeforeJudge();
     if (gate.shortCircuit) {
       const ts = new Date().toISOString();
       const synth = {
         resolution: gate.responseText,
         selected_labels: [gate.responseText],
         blocker_id: "unknown",
-        status: "skill8_suppressed",
+        status: "ask_limit_suppressed",
         events: [
           {
-            type: "skill8_ask_human_suppressed",
+            type: "ask_human_suppressed",
             timestamp: ts,
             reason: gate.reason,
             question,
@@ -257,7 +257,7 @@ rl.on("line", async (line) => {
       return;
     }
 
-    skill8Tracker.notifyRoutedToJudge();
+    askLimitTracker.notifyRoutedToJudge();
 
     let sidecarResult;
     try {
@@ -265,7 +265,7 @@ rl.on("line", async (line) => {
     } catch {
       sidecarResult = fallbackSidecarResult(question);
     }
-    skill8Tracker.recordJudgeResolution(sidecarResult.resolution, {
+    askLimitTracker.recordJudgeResolution(sidecarResult.resolution, {
       blockerId: sidecarResult.blocker_id,
       status: sidecarResult.status,
     });

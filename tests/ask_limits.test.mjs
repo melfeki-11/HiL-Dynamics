@@ -1,14 +1,14 @@
 /**
- * Unit tests for skill8/9 ask limit tracker.
- * Run: node --test tests/skill8_ask_limits.test.mjs
+ * Unit tests for HiL-SWE ask limit tracker.
+ * Run: node --test tests/ask_limits.test.mjs
  */
 import test from "node:test";
 import assert from "node:assert/strict";
 import { UNKNOWN_RESOLUTION } from "../src/shared/human_input.mjs";
 import {
-  createSkill8AskLimitTracker,
+  createAskLimitTracker,
   resolveMaxAsksPerPass,
-} from "../src/hil_swe/skill8_ask_limits.mjs";
+} from "../src/hil_swe/ask_limits.mjs";
 
 test("resolveMaxAsksPerPass: blocker-scaled min(6, n+1)", () => {
   const prev = process.env.BLOCKER_SCALED_CAP;
@@ -22,7 +22,7 @@ test("resolveMaxAsksPerPass: blocker-scaled min(6, n+1)", () => {
 });
 
 test("cap short-circuits after K routed judge calls", () => {
-  const t = createSkill8AskLimitTracker({
+  const t = createAskLimitTracker({
     maxAsksPerPass: 2,
     irrelevantCooldownThreshold: 0,
     irrelevantFirstThrottle: false,
@@ -39,7 +39,7 @@ test("cap short-circuits after K routed judge calls", () => {
 });
 
 test("irrelevant-first: cap not active until after first irrelevant", () => {
-  const t = createSkill8AskLimitTracker({
+  const t = createAskLimitTracker({
     maxAsksPerPass: 2,
     irrelevantFirstThrottle: true,
     irrelevantFirstMin: 1,
@@ -58,7 +58,7 @@ test("irrelevant-first: cap not active until after first irrelevant", () => {
 });
 
 test("cooldown short-circuits after N consecutive irrelevant resolutions", () => {
-  const t = createSkill8AskLimitTracker({
+  const t = createAskLimitTracker({
     maxAsksPerPass: 0,
     irrelevantCooldownThreshold: 2,
     irrelevantFirstThrottle: false,
@@ -75,7 +75,7 @@ test("cooldown short-circuits after N consecutive irrelevant resolutions", () =>
 });
 
 test("read-before-ask blocks until enough files noted", () => {
-  const t = createSkill8AskLimitTracker({
+  const t = createAskLimitTracker({
     readBeforeAsk: true,
     readBeforeAskMin: 2,
     maxAsksPerPass: 0,
@@ -90,7 +90,7 @@ test("read-before-ask blocks until enough files noted", () => {
 });
 
 test("registry stop after blockers resolved", () => {
-  const t = createSkill8AskLimitTracker({
+  const t = createAskLimitTracker({
     maxAsksPerPass: 0,
     registryStop: true,
     numBlockersTotal: 3,

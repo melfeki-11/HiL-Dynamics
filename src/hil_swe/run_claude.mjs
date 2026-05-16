@@ -53,7 +53,7 @@ import {
   buildPerTaskMemoryHint,
   THOUGHT_CAP, ACT_CAP, OBS_CAP, cap, gitDiff,
 } from "./constants.mjs";
-import { createSkill8AskLimitTracker } from "./skill8_ask_limits.mjs";
+import { createAskLimitTracker } from "./ask_limits.mjs";
 
 // Claude's native question-asking tool is AskUserQuestion. The recall-tweak
 // flags (SEED_BLOCKER_TODOS / etc.) modulate the appended guidance internally.
@@ -151,7 +151,7 @@ function extractReadPathsForSkill9(toolName, input) {
   return paths.map((p) => String(p)).filter(Boolean);
 }
 
-function createCustomAskHumanMcpServer({ router, pushEvent, skill8Tracker }) {
+function createCustomAskHumanMcpServer({ router, pushEvent, askLimitTracker }) {
   const toolDesc =
     richAskHumanToolDescriptionForHarness() ??
     "Ask a focused clarification question about task requirements.";
@@ -182,11 +182,11 @@ function createCustomAskHumanMcpServer({ router, pushEvent, skill8Tracker }) {
               });
               return { content: [{ type: "text", text: UNKNOWN_RESOLUTION }] };
             }
-            if (skill8Tracker) {
-              const gate = skill8Tracker.checkBeforeJudge();
+            if (askLimitTracker) {
+              const gate = askLimitTracker.checkBeforeJudge();
               if (gate.shortCircuit) {
                 pushEvent({
-                  type: "skill8_ask_human_suppressed",
+                  type: "ask_human_suppressed",
                   timestamp: new Date().toISOString(),
                   reason: gate.reason,
                   question,
@@ -194,7 +194,7 @@ function createCustomAskHumanMcpServer({ router, pushEvent, skill8Tracker }) {
                 });
                 return { content: [{ type: "text", text: gate.responseText }] };
               }
-              skill8Tracker.notifyRoutedToJudge();
+              askLimitTracker.notifyRoutedToJudge();
             }
             const result = await router.route({
               requestType,
@@ -205,7 +205,7 @@ function createCustomAskHumanMcpServer({ router, pushEvent, skill8Tracker }) {
               context: { source: "claude_mcp_tool" },
             });
             const resolution = result.resolution || UNKNOWN_RESOLUTION;
-            skill8Tracker?.recordJudgeResolution(resolution, {
+            askLimitTracker?.recordJudgeResolution(resolution, {
               blockerId: result.blocker_id,
               status: result.status,
             });
@@ -260,7 +260,7 @@ function createCustomAskHumanMcpServer({ router, pushEvent, skill8Tracker }) {
   });
 }
 
-async function answerClaudeAskUserQuestion({ router, input, permission, skill8Tracker, pushEvent }) {
+async function answerClaudeAskUserQuestion({ router, input, permission, askLimitTracker, pushEvent }) {
   const questions = Array.isArray(input?.questions) ? input.questions : [input];
   const answerParts = [];
   // AskUserQuestionOutput.answers is keyed by question text (not header).
@@ -272,11 +272,11 @@ async function answerClaudeAskUserQuestion({ router, input, permission, skill8Tr
     const prompt = question?.question || "Clarification request";
     let answerStr;
 
-    if (skill8Tracker) {
-      const gate = skill8Tracker.checkBeforeJudge();
+    if (askLimitTracker) {
+      const gate = askLimitTracker.checkBeforeJudge();
       if (gate.shortCircuit) {
         pushEvent?.({
-          type: "skill8_ask_human_suppressed",
+          type: "ask_human_suppressed",
           timestamp: new Date().toISOString(),
           reason: gate.reason,
           question: prompt,
@@ -284,7 +284,7 @@ async function answerClaudeAskUserQuestion({ router, input, permission, skill8Tr
         });
         answerStr = gate.responseText;
       } else {
-        skill8Tracker.notifyRoutedToJudge();
+        askLimitTracker.notifyRoutedToJudge();
         const result = await router.route({
           requestType: "clarification",
           nativeEventType: "claude.AskUserQuestion.canUseTool",
@@ -294,7 +294,7 @@ async function answerClaudeAskUserQuestion({ router, input, permission, skill8Tr
           context: { source: "claude_builtin_AskUserQuestion" },
         });
         answerStr = result.resolution || UNKNOWN_RESOLUTION;
-        skill8Tracker.recordJudgeResolution(answerStr, {
+        askLimitTracker.recordJudgeResolution(answerStr, {
           blockerId: result.blocker_id,
           status: result.status,
         });
@@ -538,12 +538,12 @@ function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
   }
 
   // One native AskUserQuestion use should count as one question regardless of
-  // how many sub-questions were bundled — but Skill8 suppressions bypass the judge
+  // how many sub-questions were bundled — but ask-limit suppressions bypass the judge
   // and must not inflate num_questions.
   for (const ev of events) {
     if (ev.type === "claude_ask_question" && ev.hit_judge_for_native_ask !== false) numQuestions++;
     if (ev.type === "ask_question_full_info_mode") numQuestionsFullInfo++;
-    if (ev.type === "skill8_ask_human_suppressed") {
+    if (ev.type === "ask_human_suppressed") {
       if (ev.reason === "cooldown") numAskHumanCooldownDenied += 1;
       else if (ev.reason === "cap") numAskHumanCapped += 1;
     }
@@ -725,11 +725,11 @@ async function main() {
     sdkError = null;
     allEvents.length = 0;   // clear in-place so pushEvent closure remains valid
 
-    const skill8Tracker = humanRouter
-      ? createSkill8AskLimitTracker({ numBlockersTotal })
+    const askLimitTracker = humanRouter
+      ? createAskLimitTracker({ numBlockersTotal })
       : null;
     const customAskHumanMcp = WITH_CUSTOM_TOOL
-      ? createCustomAskHumanMcpServer({ router: humanRouter, pushEvent, skill8Tracker })
+      ? createCustomAskHumanMcpServer({ router: humanRouter, pushEvent, askLimitTracker })
       : null;
 
     const PER_ATTEMPT_TIMEOUT_MS = LITELLM_CALL_TIMEOUT_MS;
@@ -784,7 +784,7 @@ async function main() {
                   router: humanRouter,
                   input: _input,
                   permission,
-                  skill8Tracker,
+                  askLimitTracker,
                   pushEvent,
                 });
                 // Emit a structured event so extractTrajectorySteps records the
@@ -872,7 +872,7 @@ async function main() {
               return { behavior: "deny", toolUseID: permission.toolUseID, message: `Denied: ${decision.reason}`, decisionClassification: "user_temporary" };
             }
             for (const fp of extractReadPathsForSkill9(_toolName, _input)) {
-              skill8Tracker?.noteFileRead?.(fp);
+              askLimitTracker?.noteFileRead?.(fp);
             }
             return { behavior: "allow", updatedInput: _input || {}, toolUseID: permission.toolUseID, decisionClassification: "user_temporary" };
           },
