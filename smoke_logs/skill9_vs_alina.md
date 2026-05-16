@@ -58,7 +58,6 @@ Driver / aggregator / acceptance:
 - [`scripts/run_skill9_ablation.sh`](../scripts/run_skill9_ablation.sh)
 - [`scripts/aggregate_skill9_ablation.py`](../scripts/aggregate_skill9_ablation.py)
 - [`scripts/run_skill9_full_scale.sh`](../scripts/run_skill9_full_scale.sh)
-- [`scripts/update_skill9_csv.py`](../scripts/update_skill9_csv.py)
 - [`scripts/acceptance_skill9.py`](../scripts/acceptance_skill9.py)
 - [`scripts/diag_skill78_slice.py`](../scripts/diag_skill78_slice.py) → [`skill78_diag_slice.md`](skill78_diag_slice.md)
 - Tests: [`tests/skill8_ask_limits.test.mjs`](../tests/skill8_ask_limits.test.mjs) — 6/6 passing.
@@ -78,11 +77,7 @@ vLLM-only model slug. Fixes:
 
 Single-pass smoke after fix: BR=4/5, P=1.00, R=0.80 on UID `698139c7…`.
 
-## CSV row
+## 20-UID metrics (summary)
 
-Appended to [`Trust Horizon Agent Performance - 20-Attempt Test Set.csv`](../Trust%20Horizon%20Agent%20Performance%20-%2020-Attempt%20Test%20Set.csv):
-
-```
-Skill9 Pareto split profile on Skill7 ABD (*_swe_skill9), claude-code: pass@1=0.28 pass@3=0.33 P=0.71 R=0.71 F1=0.71
-                                                          codex:       pass@1=0.60 pass@3=0.65 P=0.75 R=0.94 F1=0.84
-```
+Claude: pass@1=0.28, pass@3=0.33, P=0.71, R=0.71, F1=0.71  
+Codex: pass@1=0.60, pass@3=0.65, P=0.75, R=0.94, F1=0.84

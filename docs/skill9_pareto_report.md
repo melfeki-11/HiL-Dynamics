@@ -2,7 +2,6 @@
 
 Comprehensive comparison of Trust Horizon HiL-SWE runs on the 20-attempt test set, versus original HiL-Bench references, Alina's PR baselines ([trust_horizon#1](https://github.com/melfeki-11/trust_horizon/pull/1)), and the skill7→skill9 iteration.
 
-**Primary data:** [Trust Horizon Agent Performance - 20-Attempt Test Set.csv](../Trust%20Horizon%20Agent%20Performance%20-%2020-Attempt%20Test%20Set.csv)  
 **20-UID test set:** [data/hil_swe_20_attempt_test_set_uids.txt](../data/hil_swe_20_attempt_test_set_uids.txt) (same UIDs as `scripts/run_skill9_full_scale.sh`)  
 **Skill9 runs:** `runs/_swe_skill9_full_{claude,codex}/`  
 **Short summary:** [smoke_logs/skill9_vs_alina.md](../smoke_logs/skill9_vs_alina.md)
@@ -124,7 +123,7 @@ Those directories are **not present** under `/mnt/efs/weijunluo/trust_horizon` i
 
 ## C. What works vs what does not
 
-Evidence columns: 2-UID ablation = `smoke_logs/skill7_ablation_summary.md`, `smoke_logs/skill8_ablation_summary.md`, `smoke_logs/skill9_ablation_summary.md`; 20-UID = CSV + `runs/_swe_skill9_full_*`.
+Evidence columns: 2-UID ablation = `smoke_logs/skill7_ablation_summary.md`, `smoke_logs/skill8_ablation_summary.md`, `smoke_logs/skill9_ablation_summary.md`; 20-UID = `runs/_swe_skill9_full_*` / `smoke_logs/skill9_vs_alina.md`.
 
 | ID | Change | Claude | Codex | 2-UID | 20-UID | Verdict | Primary source files |
 |----|--------|--------|-------|-------|--------|---------|----------------------|
@@ -190,7 +189,7 @@ Implementation: `scripts/run_skill9_full_scale.sh`, `scripts/run_hil_swe.py`
 2. **CI** — `python3 scripts/acceptance_skill9.py` on scheduled 20-UID runs.
 3. **Metrics** — report P, R, F1, pass@k, and gated_pass@k together.
 4. **Ops** — use LiteLLM judge when local vLLM (`ASK_HUMAN_BASE_URL=localhost:8808`) is down; see `constants.mjs` fallback.
-5. **CSV** — backfill Alina Pass@1/Pass@3 when available from PR run logs.
+5. **Metrics** — Alina Pass@1/Pass@3 can be backfilled from PR run logs when available.
 6. **Optional** — re-run Alina configs on same 20 UIDs for strict Pass@k parity.
 
 ### Key scripts
@@ -296,7 +295,6 @@ Trust Horizon implements the same concepts in the files below.
 |-------|-----------|
 | 20-UID production driver | `scripts/run_skill9_full_scale.sh` |
 | Full-scale run artifacts | `runs/_swe_skill9_full_claude/`, `runs/_swe_skill9_full_codex/` |
-| CSV append helper | `scripts/update_skill9_csv.py` |
 | Short results summary | `smoke_logs/skill9_vs_alina.md` |
 
 #### Run output schema (metrics inputs)
