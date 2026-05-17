@@ -34,6 +34,7 @@ Usage:
   python3 scripts/build_harness_images.py --p-set private             # 50 private tasks only
   python3 scripts/build_harness_images.py --sdk claude                # explicit claude
   python3 scripts/build_harness_images.py --sdk codex --p-set public  # codex, public only
+  python3 scripts/build_harness_images.py --sdk all --p-set private   # all 4 SDKs, private only
   python3 scripts/build_harness_images.py --uids 69bc1094... 69a9... 69c6...
   python3 scripts/build_harness_images.py --workers 4                 # parallel builds
   python3 scripts/build_harness_images.py --force                     # rebuild even if present
@@ -162,9 +163,9 @@ def main() -> None:
         description="Build trust_horizon harness Docker images for ingested HiL-bench SWE tasks."
     )
     parser.add_argument(
-        "--sdk", choices=list(SDK_REGISTRY), default=DEFAULT_SDK,
+        "--sdk", choices=[*list(SDK_REGISTRY), "all"], default=DEFAULT_SDK,
         help=f"Agent SDK to build harness for (default: {DEFAULT_SDK}). "
-             f"Each SDK uses a different Dockerfile and image tag prefix. "
+             "Use 'all' to build all SDK harnesses (claude/codex/adk/opencode). "
              f"Supported: {', '.join(SDK_REGISTRY)}.",
     )
     parser.add_argument("--uids", nargs="+", metavar="UID",
@@ -184,8 +185,13 @@ def main() -> None:
                         help="Rebuild even if harness image already exists.")
     args = parser.parse_args()
 
-    image_prefix, dockerfile = SDK_REGISTRY[args.sdk]
-    print(f"SDK: {args.sdk}  →  image prefix: {image_prefix}  Dockerfile: {dockerfile.name}")
+    if args.sdk == "all":
+        selected_sdks = list(SDK_REGISTRY.keys())
+        print(f"SDKs: all  →  {', '.join(selected_sdks)}")
+    else:
+        selected_sdks = [args.sdk]
+        image_prefix, dockerfile = SDK_REGISTRY[args.sdk]
+        print(f"SDK: {args.sdk}  →  image prefix: {image_prefix}  Dockerfile: {dockerfile.name}")
 
     tasks = load_tasks_index()
     by_uid = {t["uid"]: t for t in tasks}
@@ -201,34 +207,43 @@ def main() -> None:
         print(f"p-set: {args.p_set}  →  {len(target_tasks)} task(s) selected from {len(tasks)} ingested")
 
     workers = args.workers if args.workers is not None else min(len(target_tasks), 2)
-    print(f"Building harness images for {len(target_tasks)} task(s) with {workers} worker(s)...\n",
-          flush=True)
+    total_jobs = len(target_tasks) * len(selected_sdks)
+    print(
+        f"Building harness images for {len(target_tasks)} task(s) across "
+        f"{len(selected_sdks)} SDK(s) = {total_jobs} build job(s) with {workers} worker(s)...\n",
+        flush=True,
+    )
 
     successes = []
     failures = []
 
-    def build_one(task: dict) -> tuple[str, bool, str]:
-        return build_harness_image(
-            uid=task["uid"],
-            base_image=task["image_name"],
-            force=args.force,
-            image_prefix=image_prefix,
-            dockerfile=dockerfile,
-            sdk=args.sdk,
-        )
+    for sdk_name in selected_sdks:
+        image_prefix, dockerfile = SDK_REGISTRY[sdk_name]
+        print(f"[sdk={sdk_name}] image prefix: {image_prefix}  Dockerfile: {dockerfile.name}")
 
-    if workers == 1:
-        for task in tqdm(target_tasks, desc="Building", unit="image"):
-            uid, ok, msg = build_one(task)
-            (successes if ok else failures).append((uid, msg))
-    else:
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {executor.submit(build_one, t): t["uid"] for t in target_tasks}
-            with tqdm(total=len(target_tasks), desc="Building", unit="image") as pbar:
-                for future in as_completed(futures):
-                    uid, ok, msg = future.result()
-                    (successes if ok else failures).append((uid, msg))
-                    pbar.update(1)
+        def build_one(task: dict) -> tuple[str, bool, str]:
+            uid, ok, msg = build_harness_image(
+                uid=task["uid"],
+                base_image=task["image_name"],
+                force=args.force,
+                image_prefix=image_prefix,
+                dockerfile=dockerfile,
+                sdk=sdk_name,
+            )
+            return uid, ok, f"[sdk={sdk_name}] {msg}"
+
+        if workers == 1:
+            for task in tqdm(target_tasks, desc=f"Building ({sdk_name})", unit="image"):
+                uid, ok, msg = build_one(task)
+                (successes if ok else failures).append((uid, msg))
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {executor.submit(build_one, t): t["uid"] for t in target_tasks}
+                with tqdm(total=len(target_tasks), desc=f"Building ({sdk_name})", unit="image") as pbar:
+                    for future in as_completed(futures):
+                        uid, ok, msg = future.result()
+                        (successes if ok else failures).append((uid, msg))
+                        pbar.update(1)
 
     print(f"\n{'='*60}")
     print(f"Done: {len(successes)} succeeded, {len(failures)} failed.")
