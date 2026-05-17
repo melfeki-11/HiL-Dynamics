@@ -30,7 +30,7 @@ Comprehensive comparison of Trust Horizon HiL-SWE runs on the 20-attempt test se
 | **Alina skill + guidance** | — | — | **0.65** | **0.35** | **0.45** |
 | Skill7 ABD (on Alina PR) | 0.20 | 0.30 | 0.49 | 0.74 | 0.59 |
 | Skill8 HE | 0.15 | 0.25 | 0.58 | 0.59 | 0.59 |
-| **Skill9 split (winner)** | **0.28** | **0.33** | **0.71** | **0.71** | **0.71** |
+| **Skill9 split (winner)** | **0.28** | **0.33** | **0.67** | **0.64** | **0.65** |
 
 **Skill9 vs Alina custom:** P +0.13, R +0.34  
 **Skill9 vs Alina guidance:** P +0.06, R +0.36
@@ -49,7 +49,7 @@ Comprehensive comparison of Trust Horizon HiL-SWE runs on the 20-attempt test se
 | **Alina skill + guidance** | — | — | **0.74** | **0.42** | **0.54** |
 | Skill7 ABD | 0.40 | 0.60 | 0.63 | 0.96 | 0.76 |
 | Skill8 HE | 0.25 | 0.50 | 0.69 | 0.80 | 0.74 |
-| **Skill9 split** | **0.60** | **0.65** | **0.75** | **0.94** | **0.84** |
+| **Skill9 split** | **0.60** | **0.65** | **0.78** | **0.91** | **0.84** |
 
 **Skill9 vs Alina custom:** P +0.19, R +0.29  
 **Skill9 vs Alina guidance:** P +0.01, R +0.52
@@ -74,7 +74,7 @@ Comprehensive comparison of Trust Horizon HiL-SWE runs on the 20-attempt test se
 | PAE idea (paper) | Trust Horizon implementation |
 |------------------|------------------------------|
 | Utility ≠ procedure; “corrupt success” when task passes but procedure violates constraints (§1, §5.1; Eq. 9 gated utility) | `gated_pass@k` in `scripts/metrics_hil_swe.py` (lines 375–377, 443–446): success credited only if ≥1 judge question was asked on that pass |
-| Interaction quality axis (question burden, fulfillment) | Micro **ask_precision** / **ask_recall** in `scripts/metrics_hil_swe.py` (lines 13–17, 450–454); judge router in `src/shared/human_input.mjs` |
+| Interaction quality axis (question burden, fulfillment) | Macro **ask_precision** / **ask_recall** (paper average-of-ratios, unique blocker IDs per pass) in `scripts/metrics_hil_swe.py`; judge router in `src/shared/human_input.mjs` |
 | Multi-axis gating for deployment readiness | `scripts/acceptance_skill9.py` (lines 8–42): require P/R ≥ both Alina custom-tool and skill+guidance floors |
 | Read → communicate → write consistency (tripartite actions §3.1) | Tweak **F**: `READ_BEFORE_ASK` in `src/hil_swe/ask_limits.mjs` (lines 120–126); Claude `canUseTool` calls `noteFileRead` in `src/hil_swe/run_claude.mjs` (lines 136–147, ~846) |
 

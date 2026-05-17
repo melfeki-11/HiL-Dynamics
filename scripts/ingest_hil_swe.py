@@ -562,6 +562,15 @@ def load_csv_uids(csv_path: Path) -> list[str]:
     return list(load_csv_rows_by_uid(csv_path).keys())
 
 
+def load_uid_file(path: Path) -> list[str]:
+    uids: list[str] = []
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            uids.append(line)
+    return uids
+
+
 def write_tasks_index(results: list[dict]) -> None:
     index_path = DATA_DIR / "tasks_index.json"
     merged: dict[str, dict[str, Any]] = {}
@@ -614,6 +623,12 @@ def main() -> None:
     )
     group.add_argument("--csv", type=Path, metavar="CSV_PATH",
                        help="CSV file with attempt_id column.")
+    group.add_argument(
+        "--uid-file",
+        type=Path,
+        metavar="PATH",
+        help="Text file with one attempt UID per line (# comments allowed).",
+    )
     parser.add_argument(
         "--p-set",
         choices=["public", "private", "both"],
@@ -650,6 +665,9 @@ def main() -> None:
     elif args.csv:
         target_uids = load_csv_uids(args.csv)
         print(f"Loaded {len(target_uids)} UIDs from CSV.")
+    elif args.uid_file:
+        target_uids = load_uid_file(args.uid_file)
+        print(f"Loaded {len(target_uids)} UIDs from {args.uid_file}.")
     else:
         target_uids = args.uids
 

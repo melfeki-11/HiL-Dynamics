@@ -181,7 +181,7 @@ function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
   let numQuestions          = 0;
   let numQuestionsApproval  = 0;
   let numQuestionsFullInfo  = 0;
-  let numBlockersResolved   = 0;
+  const resolvedBlockerIds  = new Set();
   const seenRawEventIds     = new Set();
   const seenResultEventIds  = new Set();
   const requestStatusById   = new Map();
@@ -211,7 +211,7 @@ function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
       if (rid) seenResultEventIds.add(rid);
       const bid = ev.result?.blocker_id;
       if (bid && bid !== UNKNOWN_BLOCKER_ID && ev.result?.status === "answered")
-        numBlockersResolved++;
+        resolvedBlockerIds.add(bid);
     }
   }
 
@@ -221,7 +221,7 @@ function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
     num_questions_approval:   numQuestionsApproval,
     num_total_questions:      numQuestions + numQuestionsApproval,
     num_questions_full_info:  numQuestionsFullInfo,
-    num_blockers_resolved:    numBlockersResolved,
+    num_blockers_resolved:    resolvedBlockerIds.size,
     num_blockers_total:       numBlockersTotal,
   };
 }
@@ -570,6 +570,16 @@ test("computeTrajectoryStats: approval events counted as num_questions_approval"
   assert.equal(stats.num_questions, 0);
   assert.equal(stats.num_questions_approval, 2);
   assert.equal(stats.num_total_questions, 2);
+});
+
+test("computeTrajectoryStats: duplicate answered blocker IDs count once", () => {
+  const events = [
+    { type: "human_input_result", result: { blocker_id: "b1", status: "answered" } },
+    { type: "human_input_result", result: { blocker_id: "b1", status: "answered" } },
+    { type: "human_input_result", result: { blocker_id: "b1", status: "answered" } },
+  ];
+  const stats = computeTrajectoryStats(events, [], 5);
+  assert.equal(stats.num_blockers_resolved, 1);
 });
 
 test("computeTrajectoryStats: answered blocker results counted as resolved", () => {

@@ -520,7 +520,7 @@ function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
   let numQuestionsFullInfo = 0;
   let numAskHumanCapped    = 0;
   let numAskHumanCooldownDenied = 0;
-  let numBlockersResolved  = 0;
+  const resolvedBlockerIds = new Set();
   const seenRawEventIds    = new Set();
   const seenResultEventIds = new Set();
   const requestMetaById    = new Map();
@@ -582,7 +582,7 @@ function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
 
       const bid = ev.result?.blocker_id;
       if (bid && bid !== UNKNOWN_BLOCKER_ID && ev.result?.status === "answered") {
-        numBlockersResolved++;
+        resolvedBlockerIds.add(bid);
       }
     }
   }
@@ -595,8 +595,9 @@ function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
     num_questions_full_info: numQuestionsFullInfo,
     num_ask_human_capped:    numAskHumanCapped,
     num_ask_human_cooldown_denied: numAskHumanCooldownDenied,
-    num_blockers_resolved:   numBlockersResolved,
+    num_blockers_resolved:   resolvedBlockerIds.size,
     num_blockers_total:      numBlockersTotal,
+    stats_schema_version:    2,
   };
 }
 
