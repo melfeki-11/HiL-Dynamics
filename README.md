@@ -10,7 +10,7 @@ quadrantChart
     x-axis "Silent (never asks)" --> "Over-asks"
     y-axis "Wrong outcomes" --> "Correct outcomes"
     quadrant-1 Asks too much
-    quadrant-2 Ideal — selective escalation
+    quadrant-2 Ideal: selective escalation
     quadrant-3 Silently wrong
     quadrant-4 Lucky guesser
 ```
