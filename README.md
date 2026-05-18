@@ -72,7 +72,25 @@ In the original paper, we introduced Ask-F1 to balance models' ability to ask re
 - Tool/harness variants can move recall substantially. GPT-5.5 Native Codex Tool reaches `61.5%` recall, versus Native Codex at `38.0%`.
 
 
-## Result 3: Harnesses Change Strategy, Not Just Scores
+## Result 3: Recovery After A Bad First Ask
+
+We can also ask whether a failed first question is recoverable. This matters because a realistic interactive agent will sometimes ask a vague, mistargeted, or tool-shaped question before it has fully localized the missing information. The stronger system is not necessarily the one that never asks a bad question; it is the one that notices the miss, asks a better follow-up, and still completes the task.
+
+Using trace-level ask sequences, we mark the first failed or irrelevant `ask_human()` response as `I` and a later blocker-resolving response as `R`. For Codex Tool, we filter out MCP permission prompts such as "Allow the human_input MCP server to run tool `ask_human`?" because those are harness permission events, not actual clarification questions.
+
+| system | first failed ask runs | solved after first failed ask | solved after later relevant ask |
+|---|---:|---:|---:|
+| `GPT-5.5 / SWE-agent` | 135 | 21 runs / 15 tasks | 21 runs / 15 tasks |
+| `GPT-5.5 / Native Codex` | 88 | 4 runs / 2 tasks | 1 run / 1 task |
+| `GPT-5.5 / Native Codex Tool` | 97 | 12 runs / 10 tasks | 10 runs / 9 tasks |
+| `Claude Opus 4.7 / Native Claude Code` | 62 | 4 runs / 2 tasks | 0 |
+| `Claude Opus 4.7 / Native Claude Code Tool` | 51 | 0 | 0 |
+| `Gemini 3.1 Pro / Native ADK` | 86 | 3 runs / 3 tasks | 3 runs / 3 tasks |
+
+The recovery result is consistent with the broader story. GPT-5.5 is still the strongest recovery case under SWE-agent, and the Codex Tool variant preserves part of that behavior in the native harness setting. Native Codex alone has high precision when it asks, but much weaker recovery after an initial miss. Claude Code has a few solves after a failed first ask, but none where the solve follows a later relevant clarification in this deterministic trace proxy.
+
+
+## Result 4: Harnesses Change Strategy, Not Just Scores
 
 
 This section presents:
@@ -80,7 +98,7 @@ This section presents:
 1. New trace analysis on the SWE-agent runs shows that similar model families often have similar strategy shapes under the same harness.
 2. Once we vary harnesses, the same model family can move to a different asking strategy.
 
-### Result 3a: SWE-Agent Reveals Family-Level Strategy Shapes
+### Result 4a: SWE-Agent Reveals Family-Level Strategy Shapes
 
 The original paper varied models under SWE-agent and reported outcome/ask metrics. We now ask: when the harness is held fixed, do related models behave similarly?
 
@@ -89,7 +107,7 @@ The answer seems to be yes. Model families seem to have similar strategy shapes 
 
 ![SWE-agent model-family strategy](figures/13_swe_agent_model_family_strategy.svg)
 
-### Result 3b: Asking Strategy Is Also Affected by Harness
+### Result 4b: Asking Strategy Is Also Affected by Harness
 
 While models within the same family had similar strategies, the tendency is not invariant to harness choice. Under Codex, which discourages asking in the system prompt, GPT's preference to ask early disappears. Claude under Claude Code has a lot more thinking turns than before. Even for less opinionated harnesses, like ADK, we see far less testing.
 
@@ -103,7 +121,7 @@ While models within the same family had similar strategies, the tendency is not 
 
 
 
-### Result 3c: Timing and Strategy Vary
+### Result 4c: Timing and Strategy Vary
 
 We bin the generic strategies to make the harness effect more visible. SWE-agent often pushes asking earlier; Native Codex tends to explore before asking; the Codex Tool variant shifts further toward explore-then-ask while also improving recall. They are different collaboration policies induced by the model-harness system. 
 
@@ -125,7 +143,7 @@ Likewise, the timing of the asks change. Some models like Claude Opus 4.7 will a
 - `GLM-5P1 / Native OpenCode`: roughly split between explored-then-asked and no-ask, with the OpenCode parser/harness caveat below.
 
 
-## Result 4: Terminal States Show Different Failure Anatomy
+## Result 5: Terminal States Show Different Failure Anatomy
 
 Failed AskHuman trajectories end in different deterministic terminal states. This is useful for diagnosing how systems fail after, before, or around the help-seeking step. Again, we find that failures vary not only by the model, but also by the harness itself.
 
