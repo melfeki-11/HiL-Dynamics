@@ -1,0 +1,13 @@
+.git
+.venv
+node_modules
+runs
+evals
+logs
+scratch
+data/hil_bench
+data/hil_bench_swe*
+data/clarification_smoke*.json*
+vendor
+*.trace.log
+.DS_Store

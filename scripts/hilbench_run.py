@@ -67,13 +67,36 @@ def _load_yaml(path: Path) -> dict:
     return data
 
 
+def _load_uids_file(path_value: str) -> list[str]:
+    path = Path(path_value)
+    if not path.is_absolute():
+        path = ROOT / path
+    uids: list[str] = []
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        uids.append(line)
+    if not uids:
+        raise ValueError(f"No UIDs found in {path}")
+    return uids
+
+
 def _auto_run_id(sdk: str, slice_name: str) -> str:
     ts = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
     stem = Path(slice_name).stem  # handles both "smoke" and "configs/slices/smoke.yaml"
     return f"{sdk}_{stem}_{ts}"
 
 
-def build_argv(harness: dict, slice_cfg: dict, run_id: str) -> list[str]:
+def build_argv(
+    harness: dict,
+    slice_cfg: dict,
+    run_id: str,
+    *,
+    allow_test_set: bool = False,
+    model_override: str | None = None,
+    arm_override: str | None = None,
+) -> list[str]:
     """Translate harness + slice YAML dicts into run_hil_swe.py argv."""
     sdk = harness.get("sdk", "claude")
     argv: list[str] = [
@@ -84,7 +107,7 @@ def build_argv(harness: dict, slice_cfg: dict, run_id: str) -> list[str]:
     ]
 
     # Model override (passed as --env KEY=VALUE)
-    model = harness.get("model")
+    model = model_override or harness.get("model")
     if model:
         model_env_key = _SDK_MODEL_ENV.get(sdk, f"{sdk.upper()}_MODEL")
         argv += ["--env", f"{model_env_key}={model}"]
@@ -96,8 +119,11 @@ def build_argv(harness: dict, slice_cfg: dict, run_id: str) -> list[str]:
 
     # UIDs or p_set (mutually exclusive in run_hil_swe.py)
     uids = slice_cfg.get("uids")
+    uids_file = slice_cfg.get("uids_file")
     p_set = slice_cfg.get("p_set")
-    if uids:
+    if uids_file:
+        argv += ["--uids"] + _load_uids_file(str(uids_file))
+    elif uids:
         argv += ["--uids"] + [str(u) for u in uids]
     elif p_set:
         argv += ["--p-set", str(p_set)]
@@ -105,7 +131,7 @@ def build_argv(harness: dict, slice_cfg: dict, run_id: str) -> list[str]:
         raise ValueError("Slice config must specify either 'uids' or 'p_set'")
 
     # Modes
-    modes = slice_cfg.get("modes", ["ask_human"])
+    modes = [arm_override] if arm_override else slice_cfg.get("modes", ["neutral"])
     argv += ["--modes"] + [str(m) for m in modes]
 
     # Passes
@@ -122,6 +148,9 @@ def build_argv(harness: dict, slice_cfg: dict, run_id: str) -> list[str]:
     max_turns = slice_cfg.get("max_turns")
     if max_turns is not None:
         argv += ["--max-turns", str(max_turns)]
+
+    if slice_cfg.get("held_out") and not allow_test_set:
+        raise ValueError("Slice is marked held_out; pass --allow-test-set to run it.")
 
     # Phase skips
     if slice_cfg.get("skip_eval"):
@@ -156,6 +185,22 @@ def main() -> int:
         help="Override the auto-generated run-id (default: <sdk>_<slice>_<timestamp>).",
     )
     parser.add_argument(
+        "--model",
+        default=None,
+        help="Override the model from the harness config.",
+    )
+    parser.add_argument(
+        "--arm",
+        choices=["full_info", "neutral", "skill", "no_tool"],
+        default=None,
+        help="Run a single experimental arm, overriding slice modes.",
+    )
+    parser.add_argument(
+        "--allow-test-set",
+        action="store_true",
+        help="Allow running a slice marked held_out: true.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print the assembled command without executing it.",
@@ -171,7 +216,14 @@ def main() -> int:
     sdk = harness_cfg.get("sdk", "claude")
     run_id = args.run_id or _auto_run_id(sdk, args.slice)
 
-    argv = build_argv(harness_cfg, slice_cfg, run_id)
+    argv = build_argv(
+        harness_cfg,
+        slice_cfg,
+        run_id,
+        allow_test_set=args.allow_test_set,
+        model_override=args.model,
+        arm_override=args.arm,
+    )
 
     if args.dry_run:
         print("Would run:")

@@ -15,10 +15,10 @@
  * Optional env vars:
  *   OPENCODE_MODEL          model slug (default: fireworks_ai/glm-5p1)
  *   OPENCODE_REASONING_EFFORT reasoning effort hint (low|medium|high|xhigh|max)
- *   MODE                    ask_human (default) | full_info
+ *   MODE                    neutral (default) | skill | full_info | no_tool
  *   PASS_INDEX              1-based pass number (default: 1)
  *   RUN_ID                  run identifier string
- *   MAX_TURNS               max agent steps (default: 200)
+ *   MAX_TURNS               max agent steps (default: 0 = unbounded)
  *   ATTEMPT_TIMEOUT_MS      hard timeout in ms (default: 10800000 = 3 h)
  *   OPENCODE_STARTUP_TIMEOUT_MS
  *                           startup watchdog in ms before first stdout line
@@ -32,8 +32,9 @@
  *   ANTHROPIC_AUTH_TOKEN    fallback API key
  *
  * ask_human tool behaviour:
- *   ask_human mode  — MCP ask_human tool registered + guided; questions routed through
- *                     ask_human_sidecar → human_input.mjs; ask-human SKILL.md installed.
+ *   neutral mode    — MCP ask_human tool registered; questions routed through
+ *                     ask_human_sidecar → human_input.mjs.
+ *   skill mode      — same as neutral plus an ask-human SKILL.md.
  *   full_info mode  — NO MCP ask_human tool, NO ask-human guidance in system prompt,
  *                     and NO ask-human skill on disk.
  *
@@ -54,11 +55,12 @@ import { buildSwePrompt } from "./prompt.mjs";
 import { installOpenCodeSkill, removeInstalledAskHumanSkills, SKILL_TOOL_REF } from "./skills.mjs";
 import {
   WORKSPACE, TASK_DIR, OUTPUT_DIR,
-  MODE, PASS_INDEX, RUN_ID, TIMEOUT_MS,
+  MODE, ASK_HUMAN_ENABLED, SKILL_ENABLED, FULL_INFO_ENABLED,
+  ASK_HUMAN_GUIDANCE_ENABLED, PASS_INDEX, RUN_ID, TIMEOUT_MS,
   LITELLM_CALL_TIMEOUT_MS, STEP_LITELLM_TRIES,
   ASK_HUMAN_BASE_URL, ASK_HUMAN_MODEL,
   buildAskHumanGuidance,
-  THOUGHT_CAP, ACT_CAP, OBS_CAP, cap, gitDiff,
+  THOUGHT_CAP, ACT_CAP, OBS_CAP, cap, computeResourceStats, gitDiff,
 } from "./constants.mjs";
 
 import { writeJson, writeText, ensureDir } from "../shared/io.mjs";
@@ -69,7 +71,7 @@ import {
 
 // ── Configuration from env ────────────────────────────────────────────────────
 
-const MAX_TURNS       = Number(process.env.MAX_TURNS || "200");
+const MAX_TURNS       = Number(process.env.MAX_TURNS || "0");
 const OPENCODE_MODEL  = process.env.OPENCODE_MODEL || "fireworks_ai/glm-5p1";
 const OPENCODE_REASONING_EFFORT = (
   process.env.OPENCODE_REASONING_EFFORT ||
@@ -84,6 +86,15 @@ const OPENCODE_STARTUP_TIMEOUT_MS = Number(process.env.OPENCODE_STARTUP_TIMEOUT_
 const _modelId = OPENCODE_MODEL.startsWith("litellm/")
   ? OPENCODE_MODEL.slice("litellm/".length)
   : OPENCODE_MODEL;
+
+function isGeminiModel(model) {
+  const lowered = String(model || "").trim().toLowerCase();
+  return lowered.startsWith("gemini/") || lowered.startsWith("google/gemini") || lowered.includes("/gemini");
+}
+
+const OPENCODE_REASONING_FOR_PROVIDER = isGeminiModel(_modelId)
+  ? false
+  : OPENCODE_REASONING;
 
 // Rewrite localhost → host.docker.internal so OpenCode (running inside the container)
 // can reach the LiteLLM proxy on the host.  The orchestrator adds
@@ -107,13 +118,25 @@ const SIDECAR_SCRIPT   = path.join(__dirname, "ask_human_sidecar.mjs");
 const BRIDGE_SCRIPT    = path.join(__dirname, "ask_human_mcp_bridge.mjs");
 const LLM_PROXY_SCRIPT = path.join(__dirname, "litellm_drop_params_proxy.mjs");
 
+function makeTailBuffer(maxChars = 12_000) {
+  let text = "";
+  return {
+    push(chunk) {
+      text += chunk.toString();
+      if (text.length > maxChars) text = text.slice(-maxChars);
+    },
+    read() {
+      return text;
+    },
+  };
+}
+
 // ── System prompt constants ───────────────────────────────────────────────────
 
 const _BASE_SYSTEM = "You are a helpful assistant that can interact with a computer to solve tasks.";
 
-/** Mirrors _build_instruction(mode) in run_adk.py exactly. */
-function buildInstruction(mode) {
-  if (mode === "ask_human") {
+function buildInstruction() {
+  if (ASK_HUMAN_ENABLED && ASK_HUMAN_GUIDANCE_ENABLED) {
     return `${_BASE_SYSTEM}\n\n${buildAskHumanGuidance("ask_human")}`;
   }
   return _BASE_SYSTEM;
@@ -199,14 +222,16 @@ async function startLiteLLMProxy() {
     ...process.env,
     REAL_LITELLM_URL: LITELLM_BASE_URL,
     LITELLM_API_KEY,
+    LITELLM_PROXY_TARGET_MODEL: _modelId,
   };
 
+  const stderrTail = makeTailBuffer();
   const proc = spawn("node", [LLM_PROXY_SCRIPT], {
     env,
     stdio: ["ignore", "pipe", "pipe"],
   });
 
-  proc.stderr.on("data", () => {});
+  proc.stderr.on("data", (chunk) => { stderrTail.push(chunk); });
 
   const portLine = await new Promise((resolve, reject) => {
     let buf = "";
@@ -228,12 +253,53 @@ async function startLiteLLMProxy() {
   }
   const port = parseInt(portLine.split("=")[1], 10);
   const url  = `http://127.0.0.1:${port}`;
-  return { proc, url };
+  return { proc, url, stderrTail };
 }
 
 function stopLiteLLMProxy(proc) {
   if (!proc) return;
   try { proc.kill("SIGTERM"); } catch { /* ignore */ }
+}
+
+async function getLiteLLMProxyStats(url, stderrTail) {
+  if (!url) {
+    return {
+      type: "llm_proxy_stats",
+      llm_call_count: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      total_tokens: 0,
+      error_count: 0,
+      recent_errors: [],
+      stderr_tail: stderrTail?.read?.() || "",
+    };
+  }
+  try {
+    const stats = await httpGetJson(`${url}/__stats`);
+    return {
+      type: "llm_proxy_stats",
+      llm_call_count: Number(stats?.llm_call_count || 0),
+      input_tokens: Number(stats?.input_tokens || 0),
+      output_tokens: Number(stats?.output_tokens || 0),
+      total_tokens: Number(stats?.total_tokens || 0),
+      error_count: Number(stats?.error_count || 0),
+      status_counts: stats?.status_counts || {},
+      stripped_params: stats?.stripped_params || {},
+      recent_errors: Array.isArray(stats?.recent_errors) ? stats.recent_errors : [],
+      stderr_tail: stderrTail?.read?.() || "",
+    };
+  } catch (err) {
+    return {
+      type: "llm_proxy_stats",
+      llm_call_count: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      total_tokens: 0,
+      error_count: 1,
+      recent_errors: [`failed to fetch proxy stats: ${err}`],
+      stderr_tail: stderrTail?.read?.() || "",
+    };
+  }
 }
 
 // ── HTTP helpers ──────────────────────────────────────────────────────────────
@@ -307,7 +373,7 @@ function httpPostJson(url, body = {}) {
  * Mirrors computeTrajectoryStats in run_claude.mjs exactly.
  * Input `events` are plain objects: human_input_* events from sidecar
  * (retrieved via GET /events after the run) and ask_question_full_info_mode
- * events (pushed directly by the sidecar when MODE !== "ask_human").
+ * events (pushed directly by the sidecar when ask_human is disabled).
  */
 function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
   let numQuestions         = 0;
@@ -451,6 +517,30 @@ function unwrapSdkResponse(value) {
   return value && typeof value === "object" && "data" in value ? value.data : value;
 }
 
+function summarizeOpenCodeEventError(properties) {
+  const candidates = [
+    properties?.error,
+    properties?.cause,
+    properties?.message,
+    properties?.data?.error,
+    properties?.data,
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    if (typeof candidate === "string") return candidate.slice(0, 2000);
+    try {
+      const text = JSON.stringify(candidate);
+      if (text && text !== "{}") return text.slice(0, 2000);
+    } catch {
+      // Keep trying other candidates.
+    }
+  }
+  try {
+    return `opencode session error: ${JSON.stringify(properties).slice(0, 2000)}`;
+  } catch {
+    return "opencode session error";
+  }
+}
+
 async function allocateLoopbackPort() {
   return new Promise((resolve, reject) => {
     const srv = net.createServer();
@@ -470,6 +560,7 @@ async function allocateLoopbackPort() {
 
 async function main() {
   await ensureDir(OUTPUT_DIR);
+  const runStartedAtMs = Date.now();
 
   // 1. Read task data
   const metadata         = JSON.parse(await fs.readFile(path.join(TASK_DIR, "metadata.json"), "utf8"));
@@ -484,23 +575,22 @@ async function main() {
     const registry = JSON.parse(await fs.readFile(registryPath, "utf8"));
     const entries  = registry.entries || registry.blockers || (Array.isArray(registry) ? registry : []);
     numBlockersTotal = entries.length;
-    if (MODE === "full_info") {
+    if (FULL_INFO_ENABLED) {
       blockers = entries.map((e) => ({
         description: e.description || "",
         resolution:  e.resolution  || "",
       }));
     }
   } catch {
-    // Registry absent → no blockers (still valid for ask_human mode)
+    // Registry absent → no blockers (still valid for neutral/skill modes)
   }
 
   // 3. Build prompt and system instruction
   const prompt      = buildSwePrompt({ problemStatement, mode: MODE, blockers });
-  const instruction = buildInstruction(MODE);
-  const askHumanToolEnabled = MODE === "ask_human";
-  if (!askHumanToolEnabled) {
-    await removeInstalledAskHumanSkills(WORKSPACE);
-  } else {
+  const instruction = buildInstruction();
+  const askHumanToolEnabled = ASK_HUMAN_ENABLED;
+  await removeInstalledAskHumanSkills(WORKSPACE);
+  if (SKILL_ENABLED) {
     await installOpenCodeSkill(WORKSPACE, SKILL_TOOL_REF.opencode);
   }
 
@@ -512,7 +602,7 @@ async function main() {
     pass_index: PASS_INDEX,
     harness:    "opencode",
     model:      OPENCODE_MODEL,
-    max_turns:  MAX_TURNS,
+    max_turns:  MAX_TURNS > 0 ? MAX_TURNS : null,
     timeout_ms: TIMEOUT_MS,
     workspace:  WORKSPACE,
     task_dir:   TASK_DIR,
@@ -520,6 +610,11 @@ async function main() {
     started_at: nowIso(),
     prompt,
     ask_human_tool_enabled: askHumanToolEnabled,
+    skill_enabled: SKILL_ENABLED,
+    guidance_enabled: ASK_HUMAN_GUIDANCE_ENABLED,
+    ask_human_model: ASK_HUMAN_MODEL,
+    reasoning_effort_configured: OPENCODE_REASONING_EFFORT || null,
+    reasoning_enabled_for_provider: OPENCODE_REASONING_FOR_PROVIDER,
   });
 
   // 5a. Start ask_human sidecar only when ask_human tool is enabled.
@@ -553,8 +648,9 @@ async function main() {
   //     parameters for the target model.
   let llmProxyProc = null;
   let llmProxyUrl  = "";
+  let llmProxyStderrTail = null;
   try {
-    ({ proc: llmProxyProc, url: llmProxyUrl } = await startLiteLLMProxy());
+    ({ proc: llmProxyProc, url: llmProxyUrl, stderrTail: llmProxyStderrTail } = await startLiteLLMProxy());
   } catch (err) {
     const sdkErr = `Failed to start LiteLLM drop-params proxy: ${err}`;
     process.stderr.write(`[run_opencode] ERROR: ${sdkErr}\n`);
@@ -596,11 +692,13 @@ async function main() {
   //              prompt=unset + --dir /app → works.  The system instruction is instead
   //              prepended to the user message (stdin), which the model sees first and
   //              treats as authoritative instructions before the task description.
-  //    • "agent.build.steps" = MAX_TURNS — caps the number of agentic steps.
-  //    • "mcp.ask_human" is present ONLY in ask_human mode. In full_info mode
-  //      no ask_human tool is exposed to the agent.
+  //    • "agent.build.steps" is set only when MAX_TURNS > 0.
+  //    • "mcp.ask_human" is present only in neutral/skill mode.
   //    • "autoupdate: false" prevents the agent from downloading updates mid-run.
   //    • "environment" (not "env") is the correct key in OpenCode's MCP local config schema.
+  //    • Gemini routes keep the configured reasoning effort in metadata, but do
+  //      not enable OpenCode's OpenAI-style reasoning field; LiteLLM rejects
+  //      that parameter for Gemini chat-completions routes.
   const opencodeConfig = {
     provider: {
       litellm: {
@@ -618,7 +716,7 @@ async function main() {
           [_modelId]: {
             name:      _modelId,
             tool_call: true,
-            reasoning: OPENCODE_REASONING,
+            reasoning: OPENCODE_REASONING_FOR_PROVIDER,
           },
         },
       },
@@ -631,7 +729,7 @@ async function main() {
       build: {
         model:  `litellm/${_modelId}`,
         mode:   "primary",
-        steps:  MAX_TURNS,
+        ...(MAX_TURNS > 0 ? { steps: MAX_TURNS } : {}),
         permission: {
           // SDK/server mode does not use --dangerously-skip-permissions, so allow
           // edit/bash directly inside the container sandbox (same trust boundary
@@ -784,11 +882,7 @@ async function main() {
 
           // Capture explicit session error events early.
           if (type === "session.error") {
-            const message = String(
-              properties?.error?.message ||
-              properties?.message ||
-              "opencode session error"
-            );
+            const message = summarizeOpenCodeEventError(properties);
             if (!sdkError) sdkError = message;
             rejectRunDone(new Error(message));
             continue;
@@ -807,7 +901,7 @@ async function main() {
               continue;
             }
             if (status === "error" || status === "failed" || status === "aborted") {
-              const message = String(properties?.error?.message || properties?.message || `session status ${status}`);
+              const message = summarizeOpenCodeEventError(properties) || `session status ${status}`;
               if (!sdkError) sdkError = message;
               rejectRunDone(new Error(message));
               continue;
@@ -904,9 +998,21 @@ async function main() {
   }
 
   // 9. Collect patch and build trajectory + stats
+  const proxyStats = await getLiteLLMProxyStats(llmProxyUrl, llmProxyStderrTail);
+  const proxyDiagnostic = [
+    ...(Array.isArray(proxyStats.recent_errors) ? proxyStats.recent_errors : []),
+    proxyStats.stderr_tail || "",
+  ].filter(Boolean).join("\n").slice(-4000);
+
   const patch = await gitDiff(WORKSPACE);
   const trajectorySteps = extractTrajectory(opencodeEvents);
-  const stats = computeTrajectoryStats(allEvents, trajectorySteps, numBlockersTotal);
+  const stats = {
+    ...computeTrajectoryStats(allEvents, trajectorySteps, numBlockersTotal),
+    ...computeResourceStats([...opencodeEvents, ...allEvents, proxyStats], trajectorySteps, runStartedAtMs),
+    llm_proxy_error_count: proxyStats.error_count || 0,
+    llm_proxy_status_counts: proxyStats.status_counts || {},
+    llm_proxy_stripped_params: proxyStats.stripped_params || {},
+  };
 
   // 10. Write output files (same order / format as run_claude.mjs + run_adk.py)
   await writeText(path.join(OUTPUT_DIR, "patch.diff"),       patch);
@@ -916,7 +1022,7 @@ async function main() {
     patch_bytes:  Buffer.byteLength(patch, "utf8"),
     num_steps:    stats.num_steps,
     completed_at: nowIso(),
-    sdk_error:    sdkError,
+    sdk_error:    sdkError && proxyDiagnostic ? `${sdkError}\n\nLiteLLM proxy diagnostics:\n${proxyDiagnostic}` : sdkError,
     timeout:      timedOut,
     stop_reason:  stopReason,
   });

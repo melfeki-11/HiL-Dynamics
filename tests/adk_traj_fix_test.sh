@@ -12,18 +12,17 @@ TEST_OUTPUT="${ROOT_DIR}/runs/adk_traj_fix_test"
 mkdir -p "$TEST_OUTPUT"
 rm -f "$TEST_OUTPUT"/*.json "$TEST_OUTPUT"/*.diff
 
-echo "Running ADK harness (10 turns, ask_human mode)..."
+echo "Running ADK harness (10 turns, neutral mode)..."
 docker run --rm \
-  -e MODE=ask_human \
+  -e MODE=neutral \
   -e PASS_INDEX=1 \
   -e RUN_ID=adk_traj_fix_test \
   -e MAX_TURNS=10 \
   -e ATTEMPT_TIMEOUT_MS=300000 \
-  -e ADK_MODEL="gemini/gemini-3.1-pro-preview-customtools" \
+  -e ADK_MODEL="gemini/gemini-3.1-pro" \
   -e LITELLM_BASE_URL="${LITELLM_BASE_URL}" \
   -e LITELLM_API_KEY="${LITELLM_API_KEY}" \
-  -e ASK_HUMAN_BASE_URL="http://host.docker.internal:8808/v1" \
-  -e ASK_HUMAN_MODEL="casperhansen/llama-3.3-70b-instruct-awq" \
+  -e ASK_HUMAN_MODEL="llmengine/llama-3-3-70b-instruct" \
   -e TASK_DIR=/task \
   -e OUTPUT_DIR=/output \
   -e ADK_SUPPRESS_GEMINI_LITELLM_WARNINGS=true \

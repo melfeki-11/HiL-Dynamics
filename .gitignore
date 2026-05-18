@@ -5,6 +5,7 @@ __pycache__/
 
 # JavaScript dependencies and run artifacts
 node_modules/
+.DS_Store
 evals/
 logs/
 *.trace.log

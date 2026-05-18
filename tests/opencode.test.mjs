@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -26,9 +27,9 @@ test("OpenCode LiteLLM config uses the default provider/model shape without leak
   process.env.LITELLM_BASE_URL = "http://127.0.0.1:4000";
   try {
     const defaultConfig = await opencodeConfig();
-    assert.equal(defaultConfig.model, "litellm/bedrock/qwen.qwen3-32b-v1:0");
+    assert.equal(defaultConfig.model, "litellm/fireworks_ai/glm-5p1");
     assert.equal(defaultConfig.provider.litellm.options.apiKey, "{env:LITELLM_API_KEY}");
-    assert.equal(defaultConfig.provider.litellm.models["bedrock/qwen.qwen3-32b-v1:0"].tool_call, true);
+    assert.equal(defaultConfig.provider.litellm.models["fireworks_ai/glm-5p1"].tool_call, true);
 
     const config = await opencodeConfig({ model: "gemini/gemini-3.1-pro-preview-customtools" });
     assert.equal(config.model, "litellm/gemini/gemini-3.1-pro-preview-customtools");
@@ -37,6 +38,7 @@ test("OpenCode LiteLLM config uses the default provider/model shape without leak
     assert.equal(config.provider.litellm.options.apiKey, "{env:LITELLM_API_KEY}");
     assert.equal(JSON.stringify(config).includes("unit-test-litellm-key"), false);
     assert.equal(config.provider.litellm.models["gemini/gemini-3.1-pro-preview-customtools"].tool_call, true);
+    assert.equal(config.provider.litellm.models["gemini/gemini-3.1-pro-preview-customtools"].reasoning, false);
   } finally {
     if (oldKey === undefined) delete process.env.LITELLM_API_KEY;
     else process.env.LITELLM_API_KEY = oldKey;
@@ -177,4 +179,85 @@ test("OpenCode native events normalize into shared trajectory fields", async () 
   assert.equal(events[0].tool_args.permission_id, "perm-1");
   assert.equal(events[1].event_type, "file_edit");
   assert.deepEqual(events[1].files_changed, ["src/labeler.py"]);
+});
+
+test("OpenCode LiteLLM proxy strips Gemini-unsupported params and reports usage", async () => {
+  const receivedBodies = [];
+  const upstream = http.createServer((req, res) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      receivedBodies.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        id: "chatcmpl-test",
+        choices: [],
+        usage: { prompt_tokens: 3, completion_tokens: 5, total_tokens: 8 },
+      }));
+    });
+  });
+  await new Promise((resolve, reject) => {
+    upstream.once("error", reject);
+    upstream.listen(0, "127.0.0.1", resolve);
+  });
+
+  const upstreamPort = upstream.address().port;
+  const proxy = spawn(process.execPath, ["src/hil_swe/litellm_drop_params_proxy.mjs"], {
+    env: {
+      ...process.env,
+      REAL_LITELLM_URL: `http://127.0.0.1:${upstreamPort}`,
+      LITELLM_API_KEY: "unit-test-key",
+      LITELLM_PROXY_TARGET_MODEL: "gemini/gemini-3.1-pro",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  let stderr = "";
+  proxy.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+  try {
+    const portLine = await new Promise((resolve, reject) => {
+      let stdout = "";
+      proxy.stdout.on("data", (chunk) => {
+        stdout += chunk.toString();
+        const nl = stdout.indexOf("\n");
+        if (nl !== -1) resolve(stdout.slice(0, nl).trim());
+      });
+      proxy.on("exit", (code) => reject(new Error(`proxy exited early ${code}: ${stderr}`)));
+      proxy.on("error", reject);
+    });
+    assert.match(portLine, /^PROXY_PORT=\d+$/);
+    const proxyPort = Number(portLine.split("=")[1]);
+
+    const response = await fetch(`http://127.0.0.1:${proxyPort}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gemini/gemini-3.1-pro",
+        messages: [{ role: "user", content: "ping" }],
+        tool_choice: "auto",
+        reasoning_effort: "high",
+        reasoning: { effort: "high" },
+      }),
+    });
+    assert.equal(response.status, 200);
+    await response.json();
+
+    assert.equal(receivedBodies.length, 1);
+    assert.equal(receivedBodies[0].tool_choice, undefined);
+    assert.equal(receivedBodies[0].reasoning_effort, undefined);
+    assert.equal(receivedBodies[0].reasoning, undefined);
+    assert.equal(receivedBodies[0].drop_params, true);
+
+    const stats = await (await fetch(`http://127.0.0.1:${proxyPort}/__stats`)).json();
+    assert.equal(stats.llm_call_count, 1);
+    assert.equal(stats.input_tokens, 3);
+    assert.equal(stats.output_tokens, 5);
+    assert.equal(stats.total_tokens, 8);
+    assert.equal(stats.stripped_params.tool_choice, 1);
+    assert.equal(stats.stripped_params.reasoning_effort, 1);
+    assert.equal(stats.stripped_params.reasoning, 1);
+  } finally {
+    proxy.kill("SIGTERM");
+    await new Promise((resolve) => upstream.close(resolve));
+  }
 });

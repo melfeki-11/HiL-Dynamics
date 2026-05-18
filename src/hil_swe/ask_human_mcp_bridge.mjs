@@ -18,13 +18,12 @@
  * turn — identical to the behaviour of the Python ADK ask_human function.
  */
 
-import fs      from "node:fs";
-import http    from "node:http";
-import path    from "node:path";
 import process from "node:process";
 import readline from "node:readline";
 
 import { createAskLimitTracker } from "./ask_limits.mjs";
+import { CANT_ANSWER } from "../shared/human_input.mjs";
+import { sidecarAsk } from "./ask_human_sidecar_client.mjs";
 import { richAskHumanToolDescriptionForHarness } from "./constants.mjs";
 
 const SIDECAR_URL = process.env.SIDECAR_URL;
@@ -33,55 +32,9 @@ if (!SIDECAR_URL) {
   process.exit(1);
 }
 
-const CANT_ANSWER      = "can't answer (perhaps transient hiccup)";
 const PROTOCOL_VERSION = "2024-11-05";
 
-const TASK_DIR = process.env.TASK_DIR || "/task";
-let numBlockersTotal = 0;
-try {
-  const reg = JSON.parse(
-    fs.readFileSync(path.join(TASK_DIR, "blocker_registry.json"), "utf8"),
-  );
-  numBlockersTotal = (reg.entries || reg.blockers || []).length;
-} catch { /* ignore */ }
-
-const askLimitTracker = createAskLimitTracker({ numBlockersTotal });
-
-function fallbackSidecarResult(question = "") {
-  const requestId = `codex_customtool_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-  return {
-    resolution: CANT_ANSWER,
-    selected_labels: [CANT_ANSWER],
-    blocker_id: "unknown",
-    status: "error",
-    events: [
-      {
-        type: "human_input_raw_event",
-        timestamp: new Date().toISOString(),
-        request_id: requestId,
-        request_type: "clarification",
-        native_event_type: "codex.mcp.ask_human",
-        question: String(question || ""),
-        options: [],
-        context: { source: "codex_mcp_bridge_error_fallback" },
-        raw_event: { question: String(question || "") },
-      },
-      {
-        type: "human_input_result",
-        timestamp: new Date().toISOString(),
-        request_id: requestId,
-        request_type: "clarification",
-        native_event_type: "codex.mcp.ask_human",
-        result: {
-          resolution: CANT_ANSWER,
-          selected_labels: [CANT_ANSWER],
-          blocker_id: "unknown",
-          status: "error",
-        },
-      },
-    ],
-  };
-}
+const askLimitTracker = createAskLimitTracker();
 
 // ── JSON-RPC helpers ──────────────────────────────────────────────────────────
 
@@ -95,70 +48,6 @@ function success(id, result) {
 
 function error(id, code, message) {
   sendMsg({ jsonrpc: "2.0", id, error: { code, message } });
-}
-
-// ── Sidecar HTTP call ─────────────────────────────────────────────────────────
-
-async function sidecarAsk(question) {
-  const payload = JSON.stringify({
-    question,
-    options:           [],
-    context:           {},
-    request_type:      "clarification",
-    native_event_type: "codex.mcp.ask_human",
-    raw_event:         { question },
-  });
-
-  return new Promise((resolve) => {
-    let urlObj;
-    try {
-      urlObj = new URL(`${SIDECAR_URL}/ask`);
-    } catch {
-      resolve(fallbackSidecarResult(question));
-      return;
-    }
-
-    const options = {
-      hostname: urlObj.hostname,
-      port:     urlObj.port || 80,
-      path:     urlObj.pathname,
-      method:   "POST",
-      headers:  {
-        "Content-Type":   "application/json",
-        "Content-Length": Buffer.byteLength(payload),
-      },
-    };
-
-    const req = http.request(options, (res) => {
-      let data = "";
-      res.on("data",  (chunk) => { data += chunk; });
-      res.on("end",   () => {
-        try {
-          const parsed = JSON.parse(data);
-          resolve({
-            resolution: String(parsed.resolution ?? CANT_ANSWER),
-            selected_labels: Array.isArray(parsed.selected_labels) ? parsed.selected_labels : [String(parsed.resolution ?? CANT_ANSWER)],
-            blocker_id: String(parsed.blocker_id ?? "unknown"),
-            status: String(parsed.status ?? "unknown"),
-            events: Array.isArray(parsed.events) ? parsed.events : [],
-          });
-        } catch {
-          resolve(fallbackSidecarResult(question));
-        }
-      });
-    });
-
-    req.on("error", () => resolve(fallbackSidecarResult(question)));
-
-    // 20-minute timeout — the LLM judge can be slow on large codebases
-    req.setTimeout(1_200_000, () => {
-      req.destroy();
-      resolve(fallbackSidecarResult(question));
-    });
-
-    req.write(payload);
-    req.end();
-  });
 }
 
 // ── MCP tool definition ───────────────────────────────────────────────────────
@@ -259,12 +148,13 @@ rl.on("line", async (line) => {
 
     askLimitTracker.notifyRoutedToJudge();
 
-    let sidecarResult;
-    try {
-      sidecarResult = await sidecarAsk(question);
-    } catch {
-      sidecarResult = fallbackSidecarResult(question);
-    }
+    const sidecarResult = await sidecarAsk({
+      sidecarUrl: SIDECAR_URL,
+      question,
+      nativeEventType: "codex.mcp.ask_human",
+      rawEvent: { question },
+      fallbackSource: "codex_mcp_bridge_error_fallback",
+    });
     askLimitTracker.recordJudgeResolution(sidecarResult.resolution, {
       blockerId: sidecarResult.blocker_id,
       status: sidecarResult.status,
