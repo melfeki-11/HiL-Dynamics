@@ -31,7 +31,6 @@ Usage:
   python3 scripts/ingest_hil_swe.py --all --p-set public
   python3 scripts/ingest_hil_swe.py --all --p-set private
   python3 scripts/ingest_hil_swe.py --all --p-set both
-  python3 scripts/ingest_hil_swe.py --csv models/research_evals/hil_bench/utils/swe_delivered_tasks_and_attempts_PRIVATE.csv
 """
 
 from __future__ import annotations
@@ -74,21 +73,8 @@ DATA_DIR = ROOT / "data" / "hil_bench_swe"
 TASKS_DIR = DATA_DIR / "tasks"
 IMAGES_CACHE_DIR = DATA_DIR / "image_archives"
 SRC_ROOT = ROOT.parent
-MODELS_ROOT = SRC_ROOT / "models"
-PUBLIC_UIDS_CSV = (
-    MODELS_ROOT
-    / "research_evals"
-    / "hil_bench"
-    / "utils"
-    / "swe_delivered_tasks_and_attempts_PUBLIC.csv"
-)
-PRIVATE_UIDS_CSV = (
-    MODELS_ROOT
-    / "research_evals"
-    / "hil_bench"
-    / "utils"
-    / "swe_delivered_tasks_and_attempts_PRIVATE.csv"
-)
+PUBLIC_UIDS_CSV = Path(os.environ.get("HIL_BENCH_PUBLIC_UIDS_CSV", "")) or None
+PRIVATE_UIDS_CSV = Path(os.environ.get("HIL_BENCH_PRIVATE_UIDS_CSV", "")) or None
 
 
 @dataclass(frozen=True)
@@ -123,7 +109,7 @@ def read_hf_token() -> str | None:
     token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN")
     if token:
         return token
-    # Try the research_evals .env first (primary source)
+    # Try the configured .env first (primary source)
     token = _parse_token_from_env_file(_RESEARCH_EVALS_ENV)
     if token:
         return token
@@ -135,36 +121,12 @@ def read_hf_token() -> str | None:
 
 
 def _ensure_models_import_paths() -> None:
-    for path in (
-        MODELS_ROOT,
-        MODELS_ROOT / "genai",
-        MODELS_ROOT / "research_evals" / "hil_bench",
-        SRC_ROOT
-        / "scaleapi"
-        / "packages"
-        / "customer-data-service"
-        / "clients"
-        / "customer_data_service_python_helper",
-        SRC_ROOT
-        / "scaleapi"
-        / "packages"
-        / "customer-data-service"
-        / "clients"
-        / "python",
-        SRC_ROOT
-        / "scaleapi"
-        / "packages"
-        / "s2sauth-helper-client"
-        / "s2sauth_python_helper",
-        SRC_ROOT
-        / "scaleapi"
-        / "packages"
-        / "s2sauth"
-        / "clients"
-        / "python",
-    ):
-        s = str(path)
-        if path.exists() and s not in sys.path:
+    """Add any extra import paths needed for optional private-ingest helpers."""
+    extra = os.environ.get("HIL_BENCH_EXTRA_PYTHONPATH", "")
+    for entry in extra.split(os.pathsep) if extra else []:
+        p = Path(entry)
+        s = str(p)
+        if p.exists() and s not in sys.path:
             sys.path.insert(0, s)
 
 
@@ -198,7 +160,8 @@ def _load_paper_pipeline_helpers():
     except Exception as e:  # pragma: no cover - import errors are environment-dependent
         raise RuntimeError(
             "Failed importing paper_pipeline SWE helpers required for private ingest. "
-            f"Expected repo path under {MODELS_ROOT}. Original error: {e}"
+            "Set HIL_BENCH_EXTRA_PYTHONPATH to include the path containing "
+            f"research_evals/. Original error: {e}"
         ) from e
     return create_data_object, setup_task_environment, validate_swe_runtime_task
 
@@ -635,7 +598,7 @@ def main() -> None:
         help=(
             "Partition set used by --all. "
             "'public' uses swe_delivered_tasks_and_attempts_PUBLIC.csv, "
-            "'private' uses swe_delivered_tasks_and_attempts_PRIVATE.csv."
+            "'private' requires HIL_BENCH_PRIVATE_UIDS_CSV to be set."
         ),
     )
     parser.add_argument("--skip-if-exists", action="store_true", default=True,

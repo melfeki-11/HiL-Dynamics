@@ -13,14 +13,10 @@ export const autonomyCalibrationRoot = process.env.AUTONOMY_CALIBRATION_ROOT || 
 // right file is picked up on any developer's machine or in CI without extra setup:
 //   1. LITELLM_CREDENTIALS_FILE env var (explicit override)
 //   2. trust_horizon/.env  (conventional location in this repo)
-//   3. hil_bench/.env      (the canonical Scale-internal credentials file)
-//   4. Legacy LOCAL_LITELLM_CREDENTIALS.env in autonomy_calibration
 function _findCredentialsFile() {
   if (process.env.LITELLM_CREDENTIALS_FILE) return process.env.LITELLM_CREDENTIALS_FILE;
   const candidates = [
     path.join(rootDir, ".env"),
-    path.join(rootDir, "..", "research_evals", "hil_bench", ".env"),
-    path.join(autonomyCalibrationRoot, "LOCAL_LITELLM_CREDENTIALS.env"),
   ];
   for (const p of candidates) {
     if (fs.existsSync(p)) return p;
