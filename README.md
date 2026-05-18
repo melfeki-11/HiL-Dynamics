@@ -11,7 +11,7 @@ Supported harnesses:
 | Claude Code | `claude-opus-4-7` | `xhigh` |
 | Codex | `gpt-5.5` | `xhigh` |
 | ADK | `gemini/gemini-3.1-pro-preview-customtools` | `high` |
-| OpenCode | `fireworks_ai/glm-5p1` | `xhigh` |
+| OpenCode | `fireworks_ai/glm-5p1` | `high` |
 
 The default benchmark mode is `ask_human`. The `full_info` mode is the paper-style baseline where blocker information is given upfront.
 
