@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_ASK_HUMAN_MODEL } from "../shared/config.mjs";
+import { DEFAULT_ASK_HUMAN_MODEL, PAPER_ASK_HUMAN_MODEL_BEDROCK } from "../shared/config.mjs";
 
 // ── Container layout ──────────────────────────────────────────────────────────
 
@@ -44,12 +44,17 @@ export const ASK_HUMAN_BASE_URL = (() => {
   return litellmV1;
 })();
 
-// vLLM-only slugs (e.g. casperhansen/...) fail on LiteLLM; use the bedrock default instead.
+// vLLM-only slugs (e.g. casperhansen/...) fail on LiteLLM; fall back to the
+// Bedrock-hosted Llama equivalent (not Qwen) to stay aligned with the paper judge.
 export const ASK_HUMAN_MODEL = (() => {
   const requested = process.env.ASK_HUMAN_MODEL || process.env.PAPER_ASK_HUMAN_MODEL || "";
   const usingLitellm = /litellm/i.test(ASK_HUMAN_BASE_URL);
   const looksVllmOnly = /casperhansen\/|\/.*-awq|-awq$/i.test(requested);
-  if (usingLitellm && looksVllmOnly) return DEFAULT_ASK_HUMAN_MODEL;
+  if (usingLitellm && looksVllmOnly) {
+    // eslint-disable-next-line no-console
+    console.warn(`[judge] vLLM-only model requested; falling back to ${PAPER_ASK_HUMAN_MODEL_BEDROCK}`);
+    return PAPER_ASK_HUMAN_MODEL_BEDROCK;
+  }
   return requested || DEFAULT_ASK_HUMAN_MODEL;
 })();
 
@@ -270,6 +275,12 @@ export function richAskHumanToolDescriptionForHarness() {
 }
 
 export function buildAskHumanGuidance(toolName, sdk = "claude") {
+  // Native baseline (RICH_ASK_TOOL_DESC off): minimal one-line reminder only.
+  // Full guidance template + seed are reserved for HiL-augmented arms to avoid
+  // double-prompting the native agent's built-in asking behavior.
+  if (!RICH_ASK_TOOL_DESC) {
+    return `Use the \`${toolName || "ask_human"}\` tool when you need information to proceed.`;
+  }
   const base = ASK_HUMAN_GUIDANCE_TEMPLATE.replaceAll(
     "{{TOOL_NAME}}",
     String(toolName || ""),
@@ -285,12 +296,11 @@ export function buildAskHumanGuidance(toolName, sdk = "claude") {
 // Tweak B — per-task memory hint. Written as CLAUDE.md (Claude auto-injects)
 // or AGENTS.md (Codex auto-injects) into WORKSPACE at attempt start.
 //
-// Composed dynamically using metadata so the hint references the actual number
-// of blockers the registry expects, anchoring the model's intent register.
-export function buildPerTaskMemoryHint({ uid, numBlockers, sdk }) {
-  const blockerCountSentence = numBlockers > 0
-    ? `This task has approximately ${numBlockers} unresolved blocker(s) drawn from the categories below.`
-    : "Tasks in this benchmark typically have 3-5 unresolved blockers drawn from the categories below.";
+// Uses a generic blocker-count range rather than the exact registry count to
+// avoid leaking privileged ground-truth metadata into the agent's context.
+export function buildPerTaskMemoryHint({ uid, sdk }) {
+  const blockerCountSentence =
+    "Tasks in this benchmark typically have 3–5 unresolved blockers drawn from the categories below.";
   const toolReminder = sdk === "codex"
     ? "Use `requestUserInput` (Codex's native ask tool) or the custom `human_input.ask_human` MCP tool when blocked."
     : "Use the `AskUserQuestion` tool or the custom `human_input.ask_human` MCP tool when blocked.";

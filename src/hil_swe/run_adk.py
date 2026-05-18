@@ -330,6 +330,11 @@ Do not start implementation until remaining uncertainties are consciously chosen
 
 
 def _build_ask_human_guidance(tool_name: str) -> str:
+    # Native baseline (RICH_ASK_TOOL_DESC off): minimal one-line reminder only.
+    # Full guidance template + seed are reserved for HiL-augmented arms to avoid
+    # double-prompting the native agent's built-in asking behavior.
+    if not _env_flag("RICH_ASK_TOOL_DESC"):
+        return f"Use the `{tool_name or 'ask_human'}` tool when you need information to proceed."
     base = _ask_human_guidance_template().replace("{{TOOL_NAME}}", str(tool_name or ""))
     if not _env_flag("SEED_BLOCKER_TODOS"):
         return base
