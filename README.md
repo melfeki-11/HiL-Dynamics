@@ -4,6 +4,17 @@ Escalation Lens is a HiL-Bench diagnostic: it measures how `<model, harness>` pa
 
 The tool runs a prepared benchmark task through pluggable harnesses, collects structured trajectories, and computes ask precision/recall/F1 alongside pass@k. The output shows how far each `<agent, harness>` pair is from the *selective escalation* ideal: asking exactly when needed, with questions that resolve actual blockers.
 
+```mermaid
+quadrantChart
+    title Agent Ask Behavior on Under-Specified Tasks
+    x-axis "Silent (never asks)" --> "Over-asks"
+    y-axis "Wrong outcomes" --> "Correct outcomes"
+    quadrant-1 Asks too much
+    quadrant-2 Ideal — selective escalation
+    quadrant-3 Silently wrong
+    quadrant-4 Lucky guesser
+```
+
 Supported harnesses:
 
 | Harness | Default model | Default reasoning |
