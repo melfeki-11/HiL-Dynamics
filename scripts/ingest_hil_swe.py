@@ -62,8 +62,7 @@ SWEAP_LOG_PARSER = "sweap_json"
 
 HF_DATASET = "ScaleAI/hil-bench"
 HF_TOKEN_FILE = Path.home() / ".cache" / "huggingface" / "stored_tokens"
-# Canonical location for the research_evals HF token
-_RESEARCH_EVALS_ENV = Path("/mnt/efs/tutrinh/src/models/research_evals/hil_bench/.env")
+_RESEARCH_EVALS_ENV: Path | None = None  # set via LITELLM_CREDENTIALS_FILE env var
 
 DOCKER_LOADED_IMAGE_RE = re.compile(r"Loaded image:\s*(\S+)")
 DOCKER_LOADED_IMAGE_ID_RE = re.compile(r"Loaded image ID:\s*(\S+)")

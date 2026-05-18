@@ -19,10 +19,11 @@ from typing import Any
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_AUTONOMY_ROOT = Path(os.environ.get("AUTONOMY_CALIBRATION_ROOT", "/mnt/efs/mohamedelfeki/Codes/autonomy_calibration"))
-DEFAULT_INPUT = DEFAULT_AUTONOMY_ROOT / "data" / "hil_bench" / "hil_swe_skyrl.zip"
+_autonomy_root_env = os.environ.get("AUTONOMY_CALIBRATION_ROOT")
+DEFAULT_AUTONOMY_ROOT = Path(_autonomy_root_env) if _autonomy_root_env else None
+DEFAULT_INPUT = DEFAULT_AUTONOMY_ROOT / "data" / "hil_bench" / "hil_swe_skyrl.zip" if DEFAULT_AUTONOMY_ROOT else None
 DEFAULT_OUT = ROOT / "data" / "hil_bench_swe_first10"
-DEFAULT_SOURCE_JSONL = DEFAULT_AUTONOMY_ROOT / "data" / "swebench_pro_samples.jsonl"
+DEFAULT_SOURCE_JSONL = DEFAULT_AUTONOMY_ROOT / "data" / "swebench_pro_samples.jsonl" if DEFAULT_AUTONOMY_ROOT else None
 DEFAULT_SOURCE_CSV = DEFAULT_AUTONOMY_ROOT / "data" / "swebench_pro_samples.csv"
 DEFAULT_BASELINE_MANIFEST = ROOT.parent / "hil-bench" / "local_data" / "hil_swe_first3" / "manifest.json"
 

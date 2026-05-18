@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_AUTONOMY_ROOT = Path(os.environ.get("AUTONOMY_CALIBRATION_ROOT", "/mnt/efs/mohamedelfeki/Codes/autonomy_calibration"))
+DEFAULT_AUTONOMY_ROOT = Path(os.environ["AUTONOMY_CALIBRATION_ROOT"]) if os.environ.get("AUTONOMY_CALIBRATION_ROOT") else None
 
 
 def default_eval_workers() -> int:
