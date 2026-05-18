@@ -47,11 +47,18 @@ We extend the paper by introducing new harnesses per model. We experiment with:
 
 
 
+## Metrics and Denominators
+
+Unless otherwise noted, `pass@3` is computed over tasks with up to three attempts per system. Result 1 compares FullInfo and AskHuman on the intersected native-harness task set, so each system is evaluated on the same task subset in both modes. AskHuman means the agent must decide whether and when to ask for missing task-critical information; FullInfo means that information is supplied up front. Blocker Recall measures the share of known blockers resolved by the agent's questions, while Ask Precision measures the share of questions that targeted real blockers. Trace-derived strategy and recovery labels are deterministic proxies over logged events, not semantic judge labels.
+
+
 ## Result 1: Stronger Harnesses Still Have A Large Context Drop-Off
 
-Native/current harnesses have high performance with all information supplied (FullInfo) but much lower AskHuman performance on the same tasks. With full information, most agentic systems score at 75-81% pass@3. However, when forcing the same systems to decide when and how to ask for clarifications, pass@3 drops to 13-22%. Our results from HIL-Bench extend beyond just SWE-agent and into other harnesses.
+Native/current harnesses have high performance with all information supplied (FullInfo) but much lower AskHuman performance on the same tasks. With full information, most agentic systems score at 75-81% pass@3. However, when the same systems must decide whether and when to use AskHuman, pass@3 drops to 13-22%. Our results from HIL-Bench extend beyond just SWE-agent and into other harnesses.
 
 ![FullInfo vs AskHuman pass@3](figures/01_same_model_different_scaffold.png)
+
+All four native harnesses sit far below the no-drop-off diagonal, despite high FullInfo pass@3.
 
 - FullInfo pass@3 on the intersection is high: ADK/Gemini `81.0%`, OpenCode/GLM `79.0%`, Codex/GPT-5.5 `76.0%`, Claude Code/Claude Opus `75.0%`.
 - AskHuman pass@3 on the same intersected tasks is much lower: ADK/Gemini `20.0%`, OpenCode/GLM `13.0%`, Codex/GPT-5.5 `22.0%`, Claude Code/Claude Opus `15.2%`.
@@ -59,35 +66,40 @@ Native/current harnesses have high performance with all information supplied (Fu
 
 ## Result 2: Trustworthiness and Agency
 
-In the original paper, we introduced Ask-F1 to balance models' ability to ask relevant questions without over-asking. We break down the metric to Blocker Recall (how many blockers did the agent resolve) and Ask Precision (how many of the questions it asked were relevant). This gives a sense of how trustworthy an agentic system is (if there's a blocker, can I trust it to clarify) and how agentic it is (can it finish its work without pinging the user indiscriminately). While harness variations can improve recall or precision substantially (Gemini 3.1 Pro on ADK raises both substantially from A/B -> C/D), all agent systems still struggle with blocker recall. They currently cannot be trusted to surface blockers. When the agents do ask, however, they do so with reasonable precision.
+In the original paper, we introduced Ask-F1 to balance models' ability to ask relevant questions without over-asking. We break down the metric into Blocker Recall (how many blockers did the agent resolve) and Ask Precision (how many of the questions it asked were relevant). This gives a sense of how trustworthy an agentic system is (if there's a blocker, can I trust it to clarify) and how agentic it is (can it finish its work without pinging the user indiscriminately). While harness variations can improve Blocker Recall or Ask Precision substantially (Gemini 3.1 Pro on ADK raises both substantially from A/B -> C/D), all agent systems still struggle with Blocker Recall. In these default harness/policy settings, systems are better at targeting blockers once they ask than at deciding that a blocker must be surfaced.
 
 
 
 
 ![Detection vs targeting](figures/02_detection_targeting.png)
 
+Ask Precision is often reasonable, but Blocker Recall remains the larger failure mode.
 
 - Several systems have high blocker-targeting precision under the current metadata: Native Codex/GPT-5.5 `71.8%`, Native Codex Tool/GPT-5.5 `67.2%`, Native Claude Code/Claude Opus `65.4%`, Native OpenCode/GLM `63.1%`.
-- Blocker recall is much weaker for many systems: Native Claude Code/Claude Opus `26.7%`, Native OpenCode/GLM `34.5%`, Native Codex/GPT-5.5 `38.0%`.
-- Tool/harness variants can move recall substantially. GPT-5.5 Native Codex Tool reaches `61.5%` recall, versus Native Codex at `38.0%`.
+- Blocker Recall is much weaker for many systems: Native Claude Code/Claude Opus `26.7%`, Native OpenCode/GLM `34.5%`, Native Codex/GPT-5.5 `38.0%`.
+- Tool/harness variants can move Blocker Recall substantially. GPT-5.5 Native Codex Tool reaches `61.5%` Blocker Recall, versus Native Codex at `38.0%`.
 
 
 ## Result 3: Recovery After A Bad First Ask
 
-We can also ask whether a failed first question is recoverable. This matters because a realistic interactive agent will sometimes ask a vague, mistargeted, or tool-shaped question before it has fully localized the missing information. The stronger system is not necessarily the one that never asks a bad question; it is the one that notices the miss, asks a better follow-up, and still completes the task.
+We also ask whether an irrelevant first question is recoverable. In real scenarios, we hope that an agent would be able to re-align themselves after a poor question. We argue that a strong system would not simply never ask a bad question, but one that notices the miss and sharpens the question to complete the task.
 
-Using trace-level ask sequences, we mark the first failed or irrelevant `ask_human()` response as `I` and a later blocker-resolving response as `R`. For Codex Tool, we filter out MCP permission prompts such as "Allow the human_input MCP server to run tool `ask_human`?" because those are harness permission events, not actual clarification questions.
+Using the trace-level AskHuman sequences, we deterministically mark the first irrelevant or incorrect `ask_human()` as `I` and a blocker resolution as `R`. For Codex, we filter out MCP permission prompts such as "Allow the human_input MCP server to run tool `ask_human`?" because those are harness permission events, not actual clarification questions.
 
-| system | first failed ask runs | solved after first failed ask | solved after later relevant ask |
-|---|---:|---:|---:|
-| `GPT-5.5 / SWE-agent` | 135 | 21 runs / 15 tasks | 21 runs / 15 tasks |
-| `GPT-5.5 / Native Codex` | 88 | 4 runs / 2 tasks | 1 run / 1 task |
-| `GPT-5.5 / Native Codex Tool` | 97 | 12 runs / 10 tasks | 10 runs / 9 tasks |
-| `Claude Opus 4.7 / Native Claude Code` | 62 | 4 runs / 2 tasks | 0 |
-| `Claude Opus 4.7 / Native Claude Code Tool` | 51 | 0 | 0 |
-| `Gemini 3.1 Pro / Native ADK` | 86 | 3 runs / 3 tasks | 3 runs / 3 tasks |
+Counts and percentages below use first-failed-ask runs as the denominator.
 
-The recovery result is consistent with the broader story. GPT-5.5 is still the strongest recovery case under SWE-agent, and the Codex Tool variant preserves part of that behavior in the native harness setting. Native Codex alone has high precision when it asks, but much weaker recovery after an initial miss. Claude Code has a few solves after a failed first ask, but none where the solve follows a later relevant clarification in this deterministic trace proxy.
+| system | first failed ask runs | solved after first failed ask | asked later relevant question | solved after later relevant question |
+|---|---:|---:|---:|---:|
+| `GPT-5.5 / SWE-agent` | 135 | 21 / 135 (15.6%) | 96 / 135 (71.1%) | 21 / 135 (15.6%) |
+| `GPT-5.5 / Native Codex` | 88 | 4 / 88 (4.5%) | 15 / 88 (17.0%) | 1 / 88 (1.1%) |
+| `GPT-5.5 / Native Codex Tool` | 97 | 12 / 97 (12.4%) | 51 / 97 (52.6%) | 10 / 97 (10.3%) |
+| `Claude Opus 4.7 / SWE-agent` | 158 | 8 / 158 (5.1%) | 74 / 158 (46.8%) | 7 / 158 (4.4%) |
+| `Claude Opus 4.7 / Native Claude Code` | 62 | 4 / 62 (6.5%) | 14 / 62 (22.6%) | 0 / 62 (0.0%) |
+| `Claude Opus 4.7 / Native Claude Code Tool` | 51 | 0 / 51 (0.0%) | 10 / 51 (19.6%) | 0 / 51 (0.0%) |
+| `Gemini 3.1 Pro / SWE-agent` | 0 | n/a | n/a | n/a |
+| `Gemini 3.1 Pro / Native ADK` | 86 | 3 / 86 (3.5%) | 45 / 86 (52.3%) | 3 / 86 (3.5%) |
+
+GPT-5.5 is still the strongest recovery case under SWE-agent, and the Codex Tool variant preserves part of that behavior. Surprisingly, Native Codex alone has high precision when it asks, but much weaker recovery after an initial miss. Claude Code has a few solves after a failed first ask, but none where the solve follows a later relevant clarification in this deterministic trace proxy.
 
 
 ## Result 4: Harnesses Change Strategy, Not Just Scores
@@ -123,13 +135,13 @@ While models within the same family had similar strategies, the tendency is not 
 
 ### Result 4c: Timing and Strategy Vary
 
-We bin the generic strategies to make the harness effect more visible. SWE-agent often pushes asking earlier; Native Codex tends to explore before asking; the Codex Tool variant shifts further toward explore-then-ask while also improving recall. They are different collaboration policies induced by the model-harness system. 
+We bin the generic strategies to make the harness effect more visible. SWE-agent often pushes asking earlier; Native Codex tends to explore before asking; the Codex Tool variant shifts further toward explore-then-ask while also improving Blocker Recall. They are different collaboration policies induced by the model-harness system.
 
 
 ![Strategy buckets](figures/05_strategy_buckets.png)
 
 
-Likewise, the timing of the asks change. Some models like Claude Opus 4.7 will ask later on Claude Code as oppposed to SWE-agent. 
+Likewise, the timing of the asks change. Some models like Claude Opus 4.7 will ask later on Claude Code as opposed to SWE-agent.
 
 ![First ask timing](figures/08_first_ask_timing.png)
 
@@ -151,9 +163,9 @@ Failed AskHuman trajectories end in different deterministic terminal states. Thi
 ![Terminal evidence mix](figures/04_terminal_evidence_mix.png)
 
 
-## Constructive Punchline: HIL-Bench As Harness-Design Feedback
+## Result 6: HIL-Bench As Harness-Design Feedback
 
-This section should become the forward-looking ending, especially if prompted-skill / HIL-tuned harness runs show improvement.
+The constructive punchline should be that HIL-Bench is useful not only as a model benchmark, but as feedback for how we build engineering agents. In real engineering workflows, we do not rely on the base model alone: we add project-specific skills, tools, conventions, and escalation policies. If prompted-skill / HIL-tuned harness runs improve pass@3, Blocker Recall, or Ask-F1, we should report them explicitly as harness-level interventions rather than silently merging them into the native baseline.
 
 
 **Intended figure:** TODO, probably a compact panel comparing:
@@ -164,6 +176,4 @@ This section should become the forward-looking ending, especially if prompted-sk
 - HIL-tuned skill harness
 - custom ask tool, if useful
 
-**Draft prose placeholder:**
-
-> blah blah TODO: If prompted-skill runs improve pass@3, recall, or Ask-F1, report them explicitly as harness-level interventions. Do not silently merge them into the native baseline. Explanation of what Weijun did.
+**Waiting on results:** coauthor-provided prompted-skill / custom-tool numbers.
