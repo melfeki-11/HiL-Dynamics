@@ -66,10 +66,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ASK_HUMAN_GUIDANCE_TEMPLATE_PATH = path.join(__dirname, "templates", "ask_human_guidance.txt");
 const ASK_HUMAN_GUIDANCE_TEMPLATE = fs.readFileSync(ASK_HUMAN_GUIDANCE_TEMPLATE_PATH, "utf8");
 
-// ── Recall-tweak feature flags (Skill7 layer on top of Alina's PR) ────────────
+// ── Recall-tweak feature flags ────────────────────────────────────────────────
 //
-// Each flag is independently togglable so we can ablate +A / +A+B / +A+B+D.
-// All default OFF so the skill3/skill+guidance baseline is preserved.
+// Each flag is independently togglable so we can ablate individual tweaks.
+// All default OFF so the base guidance-only baseline is preserved.
 
 export const SEED_BLOCKER_TODOS = /^(1|true|yes|on)$/i.test(
   String(process.env.SEED_BLOCKER_TODOS || ""),
@@ -199,7 +199,7 @@ const BLOCKER_TODOS_SEED_CODEX_SOFT = [
 ].join("\n");
 
 // Tweak D — rich description for the custom MCP ask_human tool. Carries the
-// `read first, then ask one specific question` skill5 wording so the model sees
+// `read first, then ask one specific question` wording so the model sees
 // it scoped to the tool itself rather than only in the global system prompt.
 export const RICH_ASK_HUMAN_TOOL_DESCRIPTION_STRICT = [
   "Ask a human expert ONE focused, identifier-anchored question about task",

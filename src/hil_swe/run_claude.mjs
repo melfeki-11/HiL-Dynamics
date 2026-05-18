@@ -635,7 +635,7 @@ async function main() {
 
   // 2b. Tweak B — per-task CLAUDE.md hint (auto-injected by the Claude Code SDK
   // via its memdir subsystem). Only written in ask_human mode and when the
-  // CLAUDE_MD_HINT flag is set, so the skill3 baseline is unchanged by default.
+  // CLAUDE_MD_HINT flag is set, so the base baseline is unchanged by default.
   if (MODE === "ask_human" && CLAUDE_MD_HINT) {
     let numBlockersForHint = 0;
     try {

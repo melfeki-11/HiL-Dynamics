@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 
 export const rootDir = path.resolve(new URL("../..", import.meta.url).pathname);
-export const autonomyCalibrationRoot = process.env.AUTONOMY_CALIBRATION_ROOT || "/mnt/efs/mohamedelfeki/Codes/autonomy_calibration";
+export const autonomyCalibrationRoot = process.env.AUTONOMY_CALIBRATION_ROOT || "";
 
 // Find the credentials .env file.  Check locations in priority order so the
 // right file is picked up on any developer's machine or in CI without extra setup:

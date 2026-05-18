@@ -248,7 +248,7 @@ FORWARDED_ENV_KEYS = [
     "LITELLM_CALL_TIMEOUT_MS",
     "STEP_LITELLM_TRIES",
     "WITH_CUSTOM_TOOL",
-    # Recall-tweak flags (skill7 layer on top of Alina's PR)
+    # Recall-tweak feature flags
     "SEED_BLOCKER_TODOS",
     "CLAUDE_MD_HINT",
     "RICH_ASK_TOOL_DESC",
@@ -973,7 +973,7 @@ def main() -> None:
     if not base_url:
         print(
             "ERROR: No base URL found.  Set LITELLM_BASE_URL in trust_horizon/.env "
-            "(e.g. https://litellm-proxy.ml-serving-internal.scale.com).",
+            "(e.g. https://<your-litellm-endpoint>).",
             file=sys.stderr,
         )
         sys.exit(1)

@@ -33,7 +33,7 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT_DIR"
 
 K=3
-CREDENTIALS_ENV="${LITELLM_CREDENTIALS_ENV:-/mnt/efs/mohamedelfeki/Codes/autonomy_calibration/LOCAL_LITELLM_CREDENTIALS.env}"
+CREDENTIALS_ENV="${LITELLM_CREDENTIALS_ENV:-}"
 CLARIFICATION_PROFILE="generic-v1"
 CLAUDE_MODEL_CANDIDATES="claude-sonnet-4-6"
 CLAUDE_THINKING="${CLAUDE_CODE_THINKING:-disabled}"
@@ -156,8 +156,7 @@ python3 scripts/hil_swe_report.py \
 
 npm run hil:swe:audit -- \
   --run-id "$RUN_ID" \
-  --prepared-dir "$PREPARED_DIR" \
-  --baseline-report /mnt/efs/mohamedelfeki/Codes/trust_horizon/hil-bench/results/gpt55_xhigh_first3_ask_human/final_report.md
+  --prepared-dir "$PREPARED_DIR"
 
 echo ""
 python3 - "$RUN_ID" "$PREPARED_DIR" <<'PY'

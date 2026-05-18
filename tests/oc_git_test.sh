@@ -1,8 +1,8 @@
 #!/bin/bash
 set -e
 # Start the drop-params proxy
-REAL_LITELLM_URL=https://litellm-proxy.ml-serving-internal.scale.com \
-  LITELLM_API_KEY=sk-n2KfL0zcdbzodHgbP9nwpQ \
+REAL_LITELLM_URL="${LITELLM_BASE_URL}" \
+  LITELLM_API_KEY="${LITELLM_API_KEY}" \
   node /opt/trust_horizon/src/hil_swe/litellm_drop_params_proxy.mjs >/tmp/pp.txt 2>/dev/null &
 PROXY_PID=$!
 sleep 2
@@ -17,7 +17,7 @@ cfg = {
         "litellm": {
             "npm": "@ai-sdk/openai-compatible",
             "name": "LiteLLM",
-            "options": {"apiKey": "sk-n2KfL0zcdbzodHgbP9nwpQ", "baseURL": "http://127.0.0.1:PORT_PLACEHOLDER/v1"},
+            "options": {"apiKey": os.environ.get("LITELLM_API_KEY", ""), "baseURL": "http://127.0.0.1:PORT_PLACEHOLDER/v1"},
             "models": {"fireworks_ai/glm-5p1": {"name": "fireworks_ai/glm-5p1", "tool_call": True, "reasoning": False}}
         }
     },

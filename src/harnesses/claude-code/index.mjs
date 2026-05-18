@@ -20,7 +20,6 @@ async function claudeCodeExecutablePath() {
     process.env.CLAUDE_CODE_EXECUTABLE,
     process.env.CLAUDE_CODE_PATH,
     process.env.CLAUDE_PATH,
-    "/mnt/efs/mohamedelfeki/.nvm/versions/node/v18.20.8/bin/claude",
   ].filter(Boolean);
   for (const candidate of candidates) {
     if (!candidate.includes(path.sep)) return candidate;
