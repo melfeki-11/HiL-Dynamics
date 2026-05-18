@@ -6,10 +6,9 @@ usage() {
 Usage:
   scripts/run_hil_swe_modes_first_n.sh <num_samples>
 
-Runs the deterministic HiL-Bench SWE first-N fixture in the two modes needed
-for the Claude Code, Codex, and OpenCode extension:
+Runs the deterministic HiL-Bench SWE first-N fixture in two legacy modes:
   - full_info: blocker resolutions are included upfront; no ask_human KB is wired
-  - ask_human: blockers stay hidden and the ask_human/request_user_input router is wired
+  - neutral: blockers stay hidden and the ask_human/request_user_input router is wired
 
 The script uses the local autonomy_calibration data/vendor defaults unless
 AUTONOMY_CALIBRATION_ROOT or SWEBENCH_PRO_VENDOR_DIR override them.
@@ -34,21 +33,21 @@ cd "$ROOT_DIR"
 K=3
 CREDENTIALS_ENV="${LITELLM_CREDENTIALS_ENV:-}"
 CLARIFICATION_PROFILE="generic-v1"
-CLAUDE_MODEL_CANDIDATES="claude-sonnet-4-6"
-CLAUDE_THINKING="${CLAUDE_CODE_THINKING:-disabled}"
-CLAUDE_EFFORT="${CLAUDE_CODE_EFFORT:-low}"
+CLAUDE_MODEL_CANDIDATES="claude-opus-4-7"
+CLAUDE_THINKING="${CLAUDE_CODE_THINKING:-enabled}"
+CLAUDE_EFFORT="${CLAUDE_CODE_EFFORT:-xhigh}"
 CODEX_MODEL="gpt-5.5"
-CODEX_REASONING_EFFORT="low"
-OPENCODE_MODEL="bedrock/qwen.qwen3-32b-v1:0"
-ASK_HUMAN_MODEL="bedrock/qwen.qwen3-32b-v1:0"
+CODEX_REASONING_EFFORT="xhigh"
+OPENCODE_MODEL="fireworks_ai/glm-5p1"
+ASK_HUMAN_MODEL="llmengine/llama-3-3-70b-instruct"
 ATTEMPT_TIMEOUT_MS="${HARNESS_ATTEMPT_TIMEOUT_MS:-1800000}"
-MAX_TURNS="${HARNESS_MAX_TURNS:-200}"
+MAX_TURNS="${HARNESS_MAX_TURNS:-0}"
 GENERATE_CONCURRENCY="${HARNESS_CONCURRENCY:-2}"
 EVAL_WORKERS="${SWEBENCH_EVAL_WORKERS:-}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 PREPARED_DIR="data/hil_bench_swe_first${NUM_SAMPLES}"
 FULL_INFO_RUN_ID="hil-swe-first${NUM_SAMPLES}-all-full-info-${STAMP}"
-ASK_HUMAN_RUN_ID="hil-swe-first${NUM_SAMPLES}-all-ask-human-${STAMP}"
+ASK_HUMAN_RUN_ID="hil-swe-first${NUM_SAMPLES}-all-neutral-${STAMP}"
 PREFLIGHT_DIR="evals/hil-swe-first${NUM_SAMPLES}-modes-preflight-${STAMP}"
 ASK_HUMAN_CHECK_DIR="${PREPARED_DIR}/ask_human_check_${STAMP}"
 

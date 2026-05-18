@@ -13,6 +13,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -56,6 +57,15 @@ def _load_slice_uids(slice_arg: str | None) -> list[str]:
     if not path or not path.exists():
         return []
     data = yaml.safe_load(path.read_text()) or {}
+    if data.get("uids_file"):
+        uid_path = Path(str(data["uids_file"]))
+        if not uid_path.is_absolute():
+            uid_path = ROOT / uid_path
+        return [
+            line.strip()
+            for line in uid_path.read_text().splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
     return [str(u) for u in data.get("uids", [])]
 
 
@@ -111,29 +121,71 @@ def check_docker() -> bool:
     return True
 
 
-def check_env() -> tuple[bool, dict[str, str]]:
+def check_env() -> tuple[bool, dict[str, str], Path | None]:
     env_path = find_env_file()
-    if not env_path:
-        _fail(".env file not found",
-              fix="cp .env.example .env  then fill in LITELLM_BASE_URL, LITELLM_API_KEY, HF_TOKEN")
-        return False, {}
-    env = load_dotenv(env_path)
-    _ok(f".env found at {env_path}")
+    env: dict[str, str] = {}
+    if env_path:
+        env = load_dotenv(env_path)
+        _ok(f"credential env found at {env_path}")
+    else:
+        _ok("no credential env file found; checking process environment")
 
-    has_base_url = bool(env.get("LITELLM_BASE_URL"))
-    has_key = bool(env.get("LITELLM_API_KEY") or env.get("ANTHROPIC_AUTH_TOKEN") or env.get("LITELLM_PROXY_API_KEY"))
+    # Process env wins over files, matching the run harness behavior.
+    for key in (
+        "LITELLM_BASE_URL",
+        "ANTHROPIC_BASE_URL",
+        "OPENAI_BASE_URL",
+        "LITELLM_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "LITELLM_PROXY_API_KEY",
+        "OPENAI_API_KEY",
+        "LITELLM_AWS_SECRET_ID",
+        "AWS_SECRET_ID",
+        "LITELLM_AWS_SECRET_KEY",
+        "AWS_SECRET_KEY_NAME",
+        "AWS_PROFILE",
+        "AWS_REGION",
+    ):
+        if os.environ.get(key):
+            env[key] = os.environ[key]
+
+    has_base_url = bool(env.get("LITELLM_BASE_URL") or env.get("ANTHROPIC_BASE_URL") or env.get("OPENAI_BASE_URL"))
+    has_direct_key = bool(env.get("LITELLM_API_KEY") or env.get("ANTHROPIC_AUTH_TOKEN") or env.get("LITELLM_PROXY_API_KEY") or env.get("OPENAI_API_KEY"))
+    has_aws_key = bool(
+        (env.get("LITELLM_AWS_SECRET_ID") or env.get("AWS_SECRET_ID"))
+        and (env.get("LITELLM_AWS_SECRET_KEY") or env.get("AWS_SECRET_KEY_NAME"))
+    )
 
     if not has_base_url:
-        _fail("LITELLM_BASE_URL missing from .env",
-              fix="Set LITELLM_BASE_URL=https://<your-litellm-endpoint> in .env")
-        return False, env
-    if not has_key:
-        _fail("No API key found (need LITELLM_API_KEY or ANTHROPIC_AUTH_TOKEN)",
-              fix="Set LITELLM_API_KEY=sk-... in .env")
-        return False, env
+        _fail("LiteLLM base URL missing",
+              fix="Set LITELLM_BASE_URL in .env, LITELLM_CREDENTIALS_FILE, or the process environment")
+        return False, env, env_path
+    if not (has_direct_key or has_aws_key):
+        _fail("No API key source found",
+              fix="Set LITELLM_API_KEY/ANTHROPIC_AUTH_TOKEN or AWS secret env vars")
+        return False, env, env_path
 
     _ok("LITELLM credentials present")
-    return True, env
+    return True, env, env_path
+
+
+def check_ask_human_judge(env: dict[str, str], env_path: Path | None) -> bool:
+    run_env = os.environ.copy()
+    run_env.update(env)
+    if env_path:
+        run_env.setdefault("LITELLM_CREDENTIALS_FILE", str(env_path))
+    run_env.setdefault("ASK_HUMAN_MODEL", "llmengine/llama-3-3-70b-instruct")
+    cmd = ["node", "tests/judge_calibration/run.mjs", "--quick"]
+    result = subprocess.run(cmd, cwd=ROOT, env=run_env, capture_output=True, text=True, timeout=180)
+    if result.returncode == 0:
+        _ok(f"ask_human judge probe ({run_env['ASK_HUMAN_MODEL']})")
+        return True
+    detail = (result.stderr or result.stdout or "").strip()
+    _fail(
+        f"ask_human judge probe failed for {run_env['ASK_HUMAN_MODEL']}",
+        fix=detail[-1000:] if detail else "Verify LITELLM credentials and ASK_HUMAN_MODEL.",
+    )
+    return False
 
 
 def check_tasks_index() -> bool:
@@ -211,6 +263,11 @@ def main() -> int:
         help="Slice config name or path (e.g. smoke, test20, configs/slices/smoke.yaml). "
              "Used to determine which Docker images to check.",
     )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Also run live ask_human judge calibration probe.",
+    )
     args = parser.parse_args()
 
     print(f"\n{_BOLD}Escalation Lens — setup check{_RESET}\n")
@@ -220,8 +277,10 @@ def main() -> int:
     results.append(check_python())
     results.append(check_node())
     results.append(check_docker())
-    env_ok, _ = check_env()
+    env_ok, env, env_path = check_env()
     results.append(env_ok)
+    if args.strict and env_ok:
+        results.append(check_ask_human_judge(env, env_path))
     results.append(check_tasks_index())
     results.append(check_runs_dir())
 

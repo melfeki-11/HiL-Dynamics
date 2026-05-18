@@ -1,7 +1,7 @@
 /**
  * SWE task prompt construction for trust_horizon.
  *
- * ask_human mode: standard SWE-bench instance template + clarification instruction
+ * neutral/skill/no_tool modes: standard SWE-bench instance template
  * full_info  mode: standard SWE-bench instance template + blocker resolutions
  *                  (matches hil_bench/templates/problem_full_info.jinja2)
  *
@@ -41,15 +41,15 @@ function instanceTemplate(problemStatement) {
  *
  * @param {object} opts
  * @param {string} opts.problemStatement  - raw problem statement from problem_statement.txt
- * @param {"ask_human"|"full_info"} opts.mode
+ * @param {"neutral"|"skill"|"no_tool"|"full_info"|"ask_human"} opts.mode
  * @param {Array<{description: string, resolution: string}>} [opts.blockers]
- *   - only needed for full_info mode; ignored for ask_human
+ *   - only needed for full_info mode; ignored otherwise
  * @returns {string}
  */
 export function buildSwePrompt({ problemStatement, mode, blockers = [] }) {
   if (mode === "full_info") return buildFullInfoPrompt(problemStatement, blockers);
-  if (mode === "ask_human") return buildAskHumanPrompt(problemStatement);
-  throw new Error(`Unknown SWE prompt mode: ${mode}. Expected "ask_human" or "full_info".`);
+  if (["neutral", "skill", "no_tool", "ask_human"].includes(mode)) return buildBasePrompt(problemStatement);
+  throw new Error(`Unknown SWE prompt mode: ${mode}. Expected neutral, skill, no_tool, or full_info.`);
 }
 
 /**
@@ -87,9 +87,8 @@ function buildFullInfoPrompt(problemStatement, blockers) {
 }
 
 /**
- * ask_human prompt — instance template (no blocker info) so the agent has to ask.
- * The system prompt (configured in run_claude.mjs) provides the ask_human instructions.
+ * Base prompt — instance template without blocker info or extra ask guidance.
  */
-function buildAskHumanPrompt(problemStatement) {
+function buildBasePrompt(problemStatement) {
   return instanceTemplate(problemStatement);
 }

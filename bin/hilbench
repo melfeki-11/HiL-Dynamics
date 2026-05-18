@@ -4,18 +4,19 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PYTHON_BIN="${PYTHON:-python3}"
 CMD="${1:-help}"
 shift || true
 
 case "$CMD" in
   setup)
-    python3 "$REPO_ROOT/scripts/hilbench_setup.py" "$@"
+    "$PYTHON_BIN" "$REPO_ROOT/scripts/hilbench_setup.py" "$@"
     ;;
   run)
-    python3 "$REPO_ROOT/scripts/hilbench_run.py" "$@"
+    "$PYTHON_BIN" "$REPO_ROOT/scripts/hilbench_run.py" "$@"
     ;;
   analyze)
-    python3 "$REPO_ROOT/scripts/hilbench_analyze.py" "$@"
+    "$PYTHON_BIN" "$REPO_ROOT/scripts/hilbench_analyze.py" "$@"
     ;;
   help|--help|-h)
     cat <<'HELP'

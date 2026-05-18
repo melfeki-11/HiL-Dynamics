@@ -1,0 +1,9 @@
+# Public development split: 80 public UIDs excluding the held-out test20 set.
+# Use this split for skill iteration and tuning experiments.
+uids_file: data/hil_swe_80_remaining_public_uids.txt
+modes:
+  - full_info
+  - neutral
+  - skill
+passes: 3
+workers: 10

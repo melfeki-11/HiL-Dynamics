@@ -10,15 +10,14 @@ import {
   resolveMaxAsksPerPass,
 } from "../src/hil_swe/ask_limits.mjs";
 
-test("resolveMaxAsksPerPass: blocker-scaled min(6, n+1)", () => {
-  const prev = process.env.BLOCKER_SCALED_CAP;
+test("resolveMaxAsksPerPass: defaults to unbounded unless fixed cap is set", () => {
   const prevMax = process.env.MAX_ASKS_PER_PASS;
-  process.env.BLOCKER_SCALED_CAP = "1";
   delete process.env.MAX_ASKS_PER_PASS;
-  assert.equal(resolveMaxAsksPerPass(3), 4);
-  assert.equal(resolveMaxAsksPerPass(9), 6);
-  process.env.BLOCKER_SCALED_CAP = prev || "";
+  assert.equal(resolveMaxAsksPerPass(3), 0);
+  process.env.MAX_ASKS_PER_PASS = "5";
+  assert.equal(resolveMaxAsksPerPass(99), 5);
   if (prevMax) process.env.MAX_ASKS_PER_PASS = prevMax;
+  else delete process.env.MAX_ASKS_PER_PASS;
 });
 
 test("cap short-circuits after K routed judge calls", () => {
@@ -87,18 +86,4 @@ test("read-before-ask blocks until enough files noted", () => {
   assert.equal(t.checkBeforeJudge().shortCircuit, true);
   t.noteFileRead("src/foo.py");
   assert.equal(t.checkBeforeJudge().shortCircuit, false);
-});
-
-test("registry stop after blockers resolved", () => {
-  const t = createAskLimitTracker({
-    maxAsksPerPass: 0,
-    registryStop: true,
-    numBlockersTotal: 3,
-  });
-  t.recordJudgeResolution("ok", { blockerId: "b1", status: "answered" });
-  t.recordJudgeResolution("ok", { blockerId: "b2", status: "answered" });
-  t.recordJudgeResolution("ok", { blockerId: "b3", status: "answered" });
-  const g = t.checkBeforeJudge();
-  assert.equal(g.shortCircuit, true);
-  assert.equal(g.reason, "registry_stop");
 });

@@ -13,10 +13,12 @@ export const autonomyCalibrationRoot = process.env.AUTONOMY_CALIBRATION_ROOT || 
 // right file is picked up on any developer's machine or in CI without extra setup:
 //   1. LITELLM_CREDENTIALS_FILE env var (explicit override)
 //   2. trust_horizon/.env  (conventional location in this repo)
+//   3. ../litellm/LOCAL_LITELLM_CREDENTIALS.env for the local dev checkout
 function _findCredentialsFile() {
   if (process.env.LITELLM_CREDENTIALS_FILE) return process.env.LITELLM_CREDENTIALS_FILE;
   const candidates = [
     path.join(rootDir, ".env"),
+    path.join(path.dirname(rootDir), "litellm", "LOCAL_LITELLM_CREDENTIALS.env"),
   ];
   for (const p of candidates) {
     if (fs.existsSync(p)) return p;
@@ -29,13 +31,12 @@ export const evalsDir = path.join(rootDir, "evals");
 export const vendorDir = process.env.SWEBENCH_PRO_VENDOR_DIR || path.join(autonomyCalibrationRoot, "vendor", "SWE-bench_Pro-os");
 
 export const DEFAULT_BASE_URL = "";
-export const DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-6";
+export const DEFAULT_CLAUDE_MODEL = "claude-opus-4-7";
 export const DEFAULT_CODEX_MODEL = "gpt-5.5";
-export const DEFAULT_CODEX_REASONING_EFFORT = "low";
-export const DEFAULT_OPENCODE_MODEL = "bedrock/qwen.qwen3-32b-v1:0";
+export const DEFAULT_CODEX_REASONING_EFFORT = "xhigh";
+export const DEFAULT_OPENCODE_MODEL = "fireworks_ai/glm-5p1";
 export const DEFAULT_OPENCODE_PROVIDER = "litellm";
-export const PAPER_ASK_HUMAN_MODEL = "casperhansen/llama-3.3-70b-instruct-awq";
-export const DEFAULT_ASK_HUMAN_MODEL = "bedrock/qwen.qwen3-32b-v1:0";
+export const DEFAULT_ASK_HUMAN_MODEL = "llmengine/llama-3-3-70b-instruct";
 export const DEFAULT_ASK_HUMAN_SEED = 20260501;
 export const AWS_SECRET_ID = process.env.LITELLM_AWS_SECRET_ID || process.env.AWS_SECRET_ID || "";
 export const AWS_REGION = process.env.AWS_REGION || "";
@@ -231,6 +232,11 @@ function opencodeModelId(model) {
   return value;
 }
 
+function isGeminiModel(model) {
+  const lowered = String(model || "").trim().toLowerCase();
+  return lowered.startsWith("gemini/") || lowered.startsWith("google/gemini") || lowered.includes("/gemini");
+}
+
 export async function opencodeEnv(extra = {}) {
   const token = await getLiteLLMKey();
   const baseUrl = getResponsesBaseUrl();
@@ -269,7 +275,7 @@ export async function opencodeConfig({ model = DEFAULT_OPENCODE_MODEL, mcp = {},
           [modelId]: {
             name: modelId,
             tool_call: true,
-            reasoning: true,
+            reasoning: !isGeminiModel(modelId),
           },
         },
       },

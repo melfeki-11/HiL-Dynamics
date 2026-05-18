@@ -1,6 +1,7 @@
-# Canonical 20-UID HiL-Bench test set.
-# Protocol: 20 UIDs x 3 passes (ask_human mode).
+# Canonical 20-UID HiL-Bench held-out public test set.
+# Do not use for skill iteration. hilbench_run.py requires --allow-test-set.
 # Source: data/hil_swe_20_attempt_test_set_uids.txt
+held_out: true
 uids:
   - 69a7a4d1617c0b97d4d6aacd
   - 69a9e77602049c14d2793bb5
@@ -23,6 +24,8 @@ uids:
   - 69c6ac9f46a2e65fc3988794
   - 698139c7dc5e90df07566a6c
 modes:
-  - ask_human
+  - full_info
+  - neutral
+  - skill
 passes: 3
 workers: 5

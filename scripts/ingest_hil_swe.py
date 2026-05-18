@@ -61,7 +61,6 @@ SWEAP_LOG_PARSER = "sweap_json"
 
 HF_DATASET = "ScaleAI/hil-bench"
 HF_TOKEN_FILE = Path.home() / ".cache" / "huggingface" / "stored_tokens"
-_EXTRA_ENV: Path | None = None  # set via LITELLM_CREDENTIALS_FILE env var
 
 DOCKER_LOADED_IMAGE_RE = re.compile(r"Loaded image:\s*(\S+)")
 DOCKER_LOADED_IMAGE_ID_RE = re.compile(r"Loaded image ID:\s*(\S+)")
@@ -73,8 +72,16 @@ DATA_DIR = ROOT / "data" / "hil_bench_swe"
 TASKS_DIR = DATA_DIR / "tasks"
 IMAGES_CACHE_DIR = DATA_DIR / "image_archives"
 SRC_ROOT = ROOT.parent
-PUBLIC_UIDS_CSV = Path(os.environ.get("HIL_BENCH_PUBLIC_UIDS_CSV", "")) or None
-PRIVATE_UIDS_CSV = Path(os.environ.get("HIL_BENCH_PRIVATE_UIDS_CSV", "")) or None
+
+
+def _optional_env_path(name: str) -> Path | None:
+    raw = os.environ.get(name, "").strip()
+    return Path(raw).expanduser() if raw else None
+
+
+PUBLIC_UIDS_CSV = _optional_env_path("HIL_BENCH_PUBLIC_UIDS_CSV")
+PRIVATE_UIDS_CSV = _optional_env_path("HIL_BENCH_PRIVATE_UIDS_CSV")
+_EXTRA_ENV = _optional_env_path("LITELLM_CREDENTIALS_FILE")
 
 
 @dataclass(frozen=True)
@@ -161,6 +168,19 @@ def _load_paper_pipeline_helpers():
     try:
         import importlib
         module = importlib.import_module(pipeline_module)
+        missing = [
+            name for name in (
+                "create_data_object",
+                "setup_task_environment",
+                "validate_swe_runtime_task",
+            )
+            if not callable(getattr(module, name, None))
+        ]
+        if missing:
+            raise RuntimeError(
+                f"Configured module {pipeline_module!r} is missing required callable(s): "
+                f"{', '.join(missing)}"
+            )
         return module.create_data_object, module.setup_task_environment, module.validate_swe_runtime_task
     except Exception as e:  # pragma: no cover - import errors are environment-dependent
         raise RuntimeError(
@@ -618,13 +638,26 @@ def main() -> None:
     if not token:
         print("Warning: No HF token found. Set HF_TOKEN env var or run `huggingface-cli login`.")
 
-    public_csv_rows = load_csv_rows_by_uid(PUBLIC_UIDS_CSV) if PUBLIC_UIDS_CSV.exists() else {}
-    private_csv_rows = load_csv_rows_by_uid(PRIVATE_UIDS_CSV) if PRIVATE_UIDS_CSV.exists() else {}
+    public_csv_rows = (
+        load_csv_rows_by_uid(PUBLIC_UIDS_CSV)
+        if PUBLIC_UIDS_CSV is not None and PUBLIC_UIDS_CSV.exists()
+        else {}
+    )
+    private_csv_rows = (
+        load_csv_rows_by_uid(PRIVATE_UIDS_CSV)
+        if PRIVATE_UIDS_CSV is not None and PRIVATE_UIDS_CSV.exists()
+        else {}
+    )
 
+    preloaded_hf_rows: list[dict[str, Any]] | None = None
     if args.all:
         target_uids: list[str] = []
         if args.p_set in {"public", "both"}:
-            target_uids.extend(public_csv_rows.keys())
+            if public_csv_rows:
+                target_uids.extend(public_csv_rows.keys())
+            else:
+                preloaded_hf_rows = load_hf_dataset(token)
+                target_uids.extend(str(row["uid"]) for row in preloaded_hf_rows)
         if args.p_set in {"private", "both"}:
             target_uids.extend(private_csv_rows.keys())
     elif args.csv:
@@ -661,7 +694,7 @@ def main() -> None:
     need_hf = any(h in {"hf", "unknown"} for h in hints.values())
     rows_by_uid: dict[str, dict[str, Any]] = {}
     if need_hf:
-        swe_rows = load_hf_dataset(token)
+        swe_rows = preloaded_hf_rows if preloaded_hf_rows is not None else load_hf_dataset(token)
         rows_by_uid = {str(r["uid"]): r for r in swe_rows}
 
     work_items: list[WorkItem] = []

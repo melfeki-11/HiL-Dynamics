@@ -15,14 +15,13 @@ The harness mirrors run_claude.mjs and run_codex.mjs in structure and output
 format so eval_hil_swe.py and metrics_hil_swe.py work without modification.
 
 ask_human tool behaviour:
-  ask_human mode  — registered + guided; questions routed through ask_human_sidecar.mjs;
-                    ask-human SKILL.md installed under /app/skills.
-  full_info mode  — ask_human tool is NOT registered; NO ask-human skill on disk; NO
-                    guidance in system prompt.
+  neutral mode    — registered; questions routed through ask_human_sidecar.mjs.
+  skill mode      — neutral + ask-human SKILL.md installed under /app/skills.
+  full_info mode  — ask_human tool is NOT registered; NO ask-human skill on disk.
 
 SWE-agent-like tool surface:
-  ask_human mode: bash + str_replace_editor + ask_human
-  full_info mode: bash + str_replace_editor
+  neutral/skill modes: bash + str_replace_editor + ask_human
+  full_info/no_tool modes: bash + str_replace_editor
 """
 
 from __future__ import annotations
@@ -59,15 +58,45 @@ WORKSPACE  = "/app"
 TASK_DIR   = os.environ.get("TASK_DIR",   "/task")
 OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "/output")
 
-MODE       = os.environ.get("MODE",       "ask_human")
+def _normalize_mode(value: str | None) -> str:
+    raw = (value or "").strip()
+    if not raw or raw == "ask_human":
+        return "neutral"
+    if raw in {"neutral", "skill", "full_info", "no_tool"}:
+        return raw
+    raise ValueError(f"Unknown MODE={raw!r}. Expected neutral, skill, full_info, or no_tool.")
+
+
+MODE       = _normalize_mode(os.environ.get("MODE", "neutral"))
+ASK_HUMAN_ENABLED = MODE in {"neutral", "skill"}
+SKILL_ENABLED = MODE == "skill"
+FULL_INFO_ENABLED = MODE == "full_info"
+ASK_HUMAN_GUIDANCE_ENABLED = str(os.environ.get("ASK_HUMAN_GUIDANCE", "")).strip().lower() in ("1", "true", "yes", "on")
 PASS_INDEX = int(os.environ.get("PASS_INDEX",  "1"))
 RUN_ID     = os.environ.get("RUN_ID",     "swe-run")
 TIMEOUT_MS = int(os.environ.get("ATTEMPT_TIMEOUT_MS", str(3 * 3_600_000)))
 LITELLM_CALL_TIMEOUT_S = float(os.environ.get("LITELLM_CALL_TIMEOUT_MS", str(20 * 60 * 1000))) / 1000.0
 STEP_LITELLM_TRIES = int(os.environ.get("STEP_LITELLM_TRIES", "3"))
-MAX_TURNS  = int(os.environ.get("MAX_TURNS", "200"))
-ADK_MODEL  = os.environ.get("ADK_MODEL",  "gemini/gemini-3.1-pro-preview-customtools")
+MAX_TURNS  = int(os.environ.get("MAX_TURNS", "0"))
+ADK_MODEL  = os.environ.get("ADK_MODEL",  "gemini/gemini-3.1-pro")
 ADK_REASONING_EFFORT = (os.environ.get("ADK_REASONING_EFFORT", "") or "").strip().lower()
+
+
+def _is_gemini_model(model: str) -> bool:
+    lowered = (model or "").strip().lower()
+    return lowered.startswith("gemini/") or lowered.startswith("google/gemini") or "/gemini" in lowered
+
+
+def _adk_reasoning_effort_for_litellm(model: str, effort: str) -> str:
+    """Return an OpenAI-style reasoning_effort only for providers that accept it."""
+    if not effort:
+        return ""
+    # LiteLLM's Gemini handler currently rejects OpenAI-style
+    # reasoning_effort. Keep the configured effort in metadata, but do not
+    # forward this unsupported parameter through ADK/LiteLlm.
+    if _is_gemini_model(model):
+        return ""
+    return effort
 
 # LiteLLM proxy routing.
 # The harness containers have NO GCP Application Default Credentials and no
@@ -162,10 +191,13 @@ def _remove_workspace_ask_human_skill_dirs(workspace: str) -> None:
 
 def _build_agent_tools(mode: str, bash_tool, editor_tool, ask_human_tool, skill_toolsets: list[Any]) -> list[Any]:
     """Return the mode-specific ADK tool surface."""
+    normalized_mode = _normalize_mode(mode)
     base_tools: list[Any] = [bash_tool, editor_tool]
-    if mode == "ask_human":
+    if normalized_mode in {"neutral", "skill"}:
         base_tools.append(ask_human_tool)
-    return [*base_tools, *skill_toolsets]
+    if normalized_mode == "skill":
+        return [*base_tools, *skill_toolsets]
+    return base_tools
 
 
 def _normalize_workspace_path(path_value: str) -> tuple[Optional[Path], Optional[str]]:
@@ -269,9 +301,9 @@ def _build_full_info_prompt(problem_statement: str, blockers: list[dict]) -> str
 def build_swe_prompt(problem_statement: str, mode: str, blockers: list[dict]) -> str:
     if mode == "full_info":
         return _build_full_info_prompt(problem_statement, blockers)
-    if mode == "ask_human":
+    if mode in {"neutral", "skill", "no_tool", "ask_human"}:
         return _instance_template(problem_statement)
-    raise ValueError(f"Unknown mode: {mode!r}. Expected 'ask_human' or 'full_info'.")
+    raise ValueError(f"Unknown mode: {mode!r}. Expected neutral, skill, no_tool, or full_info.")
 
 
 # ── System prompt (instruction) ───────────────────────────────────────────────
@@ -283,66 +315,12 @@ def _ask_human_guidance_template() -> str:
     return _ASK_HUMAN_GUIDANCE_TEMPLATE_PATH.read_text(encoding="utf-8")
 
 
-def _env_flag(name: str) -> bool:
-    return str(os.environ.get(name, "")).strip().lower() in ("1", "true", "yes", "on")
-
-
-# Mirrors BLOCKER_TODOS_SEED_CODEX_* in constants.mjs (ADK has no TodoWriteTool).
-_BLOCKER_TODOS_SEED_CODEX_STRICT = """
-## Turn-1 procedure (blocker discovery — MANDATORY)
-
-BEFORE other work, pin a markdown checklist with one item per blocker category and keep it pinned across turns. The five categories you MUST cover are:
-
-1. Missing parameter values / defaults
-2. Unclear return type or output shape
-3. Ambiguous spec or contradicting tests
-4. Unclear scope / surface area
-5. Edge-case behavior (empty input, None, etc.)
-
-Walk through them one at a time. For each:
-- Read the problem statement and ~3-5 directly relevant code locations.
-- If the answer is unambiguous from the code/spec, mark the item resolved in your checklist and rewrite it as a one-line note.
-- Otherwise, ask exactly one focused, identifier-anchored question via the ask tool. After the answer arrives, mark the item resolved before moving on.
-
-Do not start writing code while any of the five items is unresolved.
-Do not collapse categories into a single mega-question.
-""".strip()
-
-_BLOCKER_TODOS_SEED_CODEX_SOFT = """
-## Turn-1 procedure (blocker discovery — MANDATORY)
-
-BEFORE other work, pin a markdown checklist with up to five **candidate** blocker items — one per category (titles below). These are hypotheses, not mandates to ask.
-
-1. Missing parameter values / defaults
-2. Unclear return type or output shape
-3. Ambiguous spec or contradicting tests
-4. Unclear scope / surface area
-5. Edge-case behavior (empty input, None, etc.)
-
-**Before any ask_human call**, read the README plus 2–3 relevant repository files; localize ambiguity to concrete identifiers. Prefer resolving checklist items via code/tests over asking. Typical tasks expose **about 3–5 true blockers** — avoid fill-in questions invented only to populate the checklist.
-
-For each unresolved item after reading:
-- If clarified from code/spec, resolve with a terse note.
-- Else ONE focused identifier-anchored question; then resolve the checklist line.
-
-Do not start implementation until remaining uncertainties are consciously chosen or answered. Never collapse categories into one umbrella question.
-""".strip()
-
-
 def _build_ask_human_guidance(tool_name: str) -> str:
-    base = _ask_human_guidance_template().replace("{{TOOL_NAME}}", str(tool_name or ""))
-    if not _env_flag("SEED_BLOCKER_TODOS"):
-        return base
-    seed = (
-        _BLOCKER_TODOS_SEED_CODEX_SOFT
-        if _env_flag("SOFTEN_CATEGORY_MANDATE")
-        else _BLOCKER_TODOS_SEED_CODEX_STRICT
-    )
-    return f"{base}\n\n{seed}"
+    return _ask_human_guidance_template().replace("{{TOOL_NAME}}", str(tool_name or ""))
 
 
 def _build_instruction(mode: str) -> str:
-    if mode == "ask_human":
+    if _normalize_mode(mode) in {"neutral", "skill"} and ASK_HUMAN_GUIDANCE_ENABLED:
         return f"{_BASE_SYSTEM}\n\n{_build_ask_human_guidance('ask_human')}"
     return _BASE_SYSTEM
 
@@ -667,10 +645,62 @@ def compute_stats(
     }
 
 
+def _numeric_field(obj: Any, names: tuple[str, ...]) -> Optional[int]:
+    if not isinstance(obj, dict):
+        return None
+    for name in names:
+        value = obj.get(name)
+        if isinstance(value, (int, float)):
+            return int(value)
+    return None
+
+
+def _collect_token_usage(value: Any, totals: dict[str, int], seen: set[int]) -> None:
+    if not isinstance(value, (dict, list)):
+        return
+    obj_id = id(value)
+    if obj_id in seen:
+        return
+    seen.add(obj_id)
+    if isinstance(value, dict):
+        usage = value.get("usage") if isinstance(value.get("usage"), dict) else value
+        input_tokens = _numeric_field(usage, ("input_tokens", "prompt_tokens", "inputTokens", "promptTokens"))
+        output_tokens = _numeric_field(usage, ("output_tokens", "completion_tokens", "outputTokens", "completionTokens"))
+        total_tokens = _numeric_field(usage, ("total_tokens", "totalTokens"))
+        if input_tokens is not None or output_tokens is not None or total_tokens is not None:
+            totals["usage_records"] += 1
+            totals["input_tokens"] += input_tokens or 0
+            totals["output_tokens"] += output_tokens or 0
+            totals["total_tokens"] += total_tokens or ((input_tokens or 0) + (output_tokens or 0))
+        for key, item in value.items():
+            if usage is not value and key == "usage":
+                continue
+            _collect_token_usage(item, totals, seen)
+    else:
+        for item in value:
+            _collect_token_usage(item, totals, seen)
+
+
+def compute_resource_stats(events: list[dict], trajectory_steps: list[dict], started_at: float) -> dict:
+    totals = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "usage_records": 0}
+    _collect_token_usage(events, totals, set())
+    tool_calls = sum(1 for step in trajectory_steps if str(step.get("act") or "").strip())
+    return {
+        "wall_clock_ms": int(max(0.0, (time.monotonic() - started_at) * 1000)),
+        "num_llm_calls": totals["usage_records"] or None,
+        "num_tool_calls": tool_calls,
+        "num_turns_or_items": len(trajectory_steps),
+        "input_tokens": totals["input_tokens"] if totals["usage_records"] else None,
+        "output_tokens": totals["output_tokens"] if totals["usage_records"] else None,
+        "total_tokens": totals["total_tokens"] if totals["usage_records"] else None,
+    }
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 async def main() -> None:
     Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
+    run_started_at = time.monotonic()
 
     # ── 1. Read task data ─────────────────────────────────────────────────────
     metadata         = json.loads(Path(TASK_DIR, "metadata.json").read_text())
@@ -687,7 +717,7 @@ async def main() -> None:
         if isinstance(registry, list):
             entries = registry
         num_blockers_total = len(entries)
-        if MODE == "full_info":
+        if FULL_INFO_ENABLED:
             blockers = [
                 {"description": e.get("description", ""), "resolution": e.get("resolution", "")}
                 for e in entries
@@ -696,7 +726,9 @@ async def main() -> None:
     # ── 3. Build prompt and instruction ───────────────────────────────────────
     prompt      = build_swe_prompt(problem_stmt, MODE, blockers)
     instruction = _build_instruction(MODE)
-    if MODE == "full_info":
+    if FULL_INFO_ENABLED:
+        _remove_workspace_ask_human_skill_dirs(WORKSPACE)
+    else:
         _remove_workspace_ask_human_skill_dirs(WORKSPACE)
 
     # ── 4. Write attempt metadata ─────────────────────────────────────────────
@@ -707,21 +739,25 @@ async def main() -> None:
         "pass_index": PASS_INDEX,
         "harness":    "adk",
         "model":      ADK_MODEL,
-        "max_turns":  MAX_TURNS,
+        "max_turns":  MAX_TURNS if MAX_TURNS > 0 else None,
         "timeout_ms": TIMEOUT_MS,
         "workspace":  WORKSPACE,
         "task_dir":   TASK_DIR,
         "output_dir": OUTPUT_DIR,
         "started_at": _now_iso(),
         "prompt":     prompt,
-        "ask_human_tool_enabled": MODE == "ask_human",
+        "ask_human_tool_enabled": ASK_HUMAN_ENABLED,
+        "skill_enabled": SKILL_ENABLED,
+        "guidance_enabled": ASK_HUMAN_GUIDANCE_ENABLED,
+        "reasoning_effort_configured": ADK_REASONING_EFFORT or None,
+        "reasoning_effort_forwarded": _adk_reasoning_effort_for_litellm(ADK_MODEL, ADK_REASONING_EFFORT) or None,
     })
 
-    # ── 5. Start ask_human sidecar only in ask_human mode ───────────────────
+    # ── 5. Start ask_human sidecar only when the ask_human tool is exposed ──
     global _sidecar_proc, _sidecar_url
     _sidecar_proc = None
     _sidecar_url = ""
-    if MODE == "ask_human":
+    if ASK_HUMAN_ENABLED:
         try:
             _sidecar_proc, _sidecar_url = _start_sidecar(uid)
         except Exception as exc:
@@ -737,7 +773,7 @@ async def main() -> None:
             })
             return
 
-    # per-run event log: human_input_* events from sidecar (ask_human mode)
+    # per-run event log: human_input_* events from sidecar (neutral/skill modes)
     all_events: list[dict] = []
     # ADK event stream (Event objects from runner.run_async)
     adk_events: list       = []
@@ -797,7 +833,7 @@ async def main() -> None:
             # the agent can retry on the next turn.
             return "can't answer (perhaps transient hiccup)"
 
-        # Append human_input_* events (ask_human mode) so compute_stats() can count them.
+        # Append human_input_* events (neutral/skill modes) so compute_stats() can count them.
         for ev in result.get("events", []):
             all_events.append(ev)
 
@@ -944,7 +980,7 @@ async def main() -> None:
         return f"Last edit to {resolved} undone successfully."
 
     adk_skill_toolsets: list[Any] = []
-    if MODE == "ask_human":
+    if SKILL_ENABLED:
         try:
             from google.adk.skills import load_skill_from_dir
             from google.adk.tools import skill_toolset
@@ -969,9 +1005,15 @@ async def main() -> None:
     # Retry policy is enforced uniformly at the harness level via STEP_LITELLM_TRIES
     # so all SDKs get the same TOTAL OVERALL attempts.
     _litellm_kwargs["timeout"] = LITELLM_CALL_TIMEOUT_S
-    if ADK_REASONING_EFFORT:
-        # Best-effort hint forwarded to LiteLLM; unsupported providers may ignore it.
-        _litellm_kwargs["reasoning_effort"] = ADK_REASONING_EFFORT
+    _forwarded_reasoning_effort = _adk_reasoning_effort_for_litellm(ADK_MODEL, ADK_REASONING_EFFORT)
+    if _forwarded_reasoning_effort:
+        _litellm_kwargs["reasoning_effort"] = _forwarded_reasoning_effort
+    elif ADK_REASONING_EFFORT and _is_gemini_model(ADK_MODEL):
+        print(
+            f"[run_adk] INFO: not forwarding unsupported reasoning_effort={ADK_REASONING_EFFORT!r} "
+            f"to Gemini model {ADK_MODEL!r}; configured effort is recorded in attempt metadata.",
+            file=sys.stderr,
+        )
 
     # The user-turn message is constant across retry attempts.
     new_message = genai_types.Content(
@@ -1020,7 +1062,7 @@ async def main() -> None:
             app_name="trust_horizon_swe",
             user_id="swe_user",
         )
-        run_config = RunConfig(max_llm_calls=MAX_TURNS)
+        run_config = RunConfig(max_llm_calls=MAX_TURNS) if MAX_TURNS > 0 else RunConfig()
 
         # _run_agent closes over `runner`, `session`, `adk_events` (the module-level
         # list) by name — they are re-looked-up on each call, so reassigning those
@@ -1077,7 +1119,10 @@ async def main() -> None:
     patch_content = await _git_diff(WORKSPACE)
 
     trajectory_steps = extract_trajectory_steps(adk_events)
-    stats            = compute_stats(all_events, trajectory_steps, num_blockers_total)
+    stats            = {
+        **compute_stats(all_events, trajectory_steps, num_blockers_total),
+        **compute_resource_stats([*adk_events, *all_events], trajectory_steps, run_started_at),
+    }
 
     _write_json(Path(OUTPUT_DIR, "trajectory.json"), trajectory_steps)
     _write_json(Path(OUTPUT_DIR, "stats.json"),      stats)

@@ -768,7 +768,7 @@ export function createHumanInputRouter({
   approvalPolicy = "safe-looking",
   modelClient,
   // Optional: override the LLM endpoint used for the ask_human selector.
-  // Useful when the vLLM judge server is at a different URL than the agent's LiteLLM proxy.
+  // Useful when the judge route is at a different URL than the agent's LiteLLM proxy.
   baseUrl,
   apiKey,
 } = {}) {

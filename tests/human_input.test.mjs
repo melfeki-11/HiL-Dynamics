@@ -64,7 +64,7 @@ test("ask_human selects a blocker id and returns the exact registry resolution",
 });
 
 test("ask_human defaults to the local LiteLLM selector model", () => {
-  assert.equal(DEFAULT_ASK_HUMAN_MODEL, "bedrock/qwen.qwen3-32b-v1:0");
+  assert.equal(DEFAULT_ASK_HUMAN_MODEL, "llmengine/llama-3-3-70b-instruct");
 });
 
 test("unknown clarification returns exactly irrelevant question", async () => {
@@ -163,8 +163,8 @@ test("cache key changes when model id changes", async () => {
     },
   ]);
 
-  await askHuman({ request: request(), registry: kb, cachePath, modelId: "bedrock/qwen.qwen3-32b-v1:0", modelClient: async () => JSON.stringify({ blocker_id: "prefix-before-name" }) });
-  await askHuman({ request: request(), registry: kb, cachePath, modelId: "bedrock/qwen.qwen3-32b-v1:0#pinned2", modelClient: async () => JSON.stringify({ blocker_id: "prefix-before-name" }) });
+  await askHuman({ request: request(), registry: kb, cachePath, modelId: "llmengine/llama-3-3-70b-instruct", modelClient: async () => JSON.stringify({ blocker_id: "prefix-before-name" }) });
+  await askHuman({ request: request(), registry: kb, cachePath, modelId: "llmengine/llama-3-3-70b-instruct#pinned2", modelClient: async () => JSON.stringify({ blocker_id: "prefix-before-name" }) });
   const cache = JSON.parse(await fs.readFile(cachePath, "utf8"));
   assert.equal(Object.keys(cache).length, 2);
 });

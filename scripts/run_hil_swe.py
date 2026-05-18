@@ -4,7 +4,7 @@ Host-side orchestrator for trust_horizon HiL-SWE runs.
 Runs the full pipeline in one shot:
   Phase 1 — Solve:    spin up harness containers in parallel; each produces patch.diff + trajectory
   Phase 2 — Evaluate: for each completed solve, run the eval container (apply patches, run tests)
-  Phase 3 — Metrics:  compute pass@k and ask precision/recall/f1 (micro, like run_hil_bench.py)
+  Phase 3 — Metrics:  compute pass@k and paper-style macro ask precision/recall/f1
 
 All three phases can be individually skipped with --skip-eval / --skip-metrics.
 
@@ -24,18 +24,18 @@ Output layout:
       summary.json
 
 Usage examples:
-  # Single task, ask_human mode, 1 pass
+  # Single task, neutral arm, 1 pass
   python3 scripts/run_hil_swe.py \\
     --run-id my-first-run \\
     --uids 69bc1094b455a91fa20fb868 \\
-    --modes ask_human \\
+    --modes neutral \\
     --passes 1
 
-  # All 3 test tasks, both modes, 3 passes each, 12 concurrent containers
+  # All 3 smoke tasks, all primary arms, 3 passes each, 12 concurrent containers
   python3 scripts/run_hil_swe.py \\
     --run-id test3-k3 \\
     --uids 69bc1094b455a91fa20fb868 69a9e77602049c14d2793bb5 69c60cc7b6a31e9900faa779 \\
-    --modes ask_human full_info \\
+    --modes full_info neutral skill \\
     --passes 3 \\
     --workers 12
 
@@ -43,8 +43,8 @@ Usage examples:
   python3 scripts/run_hil_swe.py --run-id pilot --uids ... --skip-eval --skip-metrics
 
   # All 100 public tasks, or all 150 (default --p-set both)
-  python3 scripts/run_hil_swe.py --run-id pub100 --p-set public --modes ask_human full_info --passes 3
-  python3 scripts/run_hil_swe.py --run-id all150 --p-set both --modes ask_human --passes 1
+  python3 scripts/run_hil_swe.py --run-id pub100 --p-set public --modes full_info neutral skill --passes 3
+  python3 scripts/run_hil_swe.py --run-id all150 --p-set both --modes neutral --passes 1
 
   # Eval-only on existing solves (result.json already present, want eval_result.json):
   # Solve phase is automatically skipped (result.json exists); eval runs on already-solved passes.
@@ -66,7 +66,7 @@ Environment variables (read from host env, forwarded into each container):
     ASK_HUMAN_MODEL             override ask_human judge model slug
     CLAUDE_MODEL                model slug for the agent when --sdk claude (default: claude-opus-4-7)
     CODEX_MODEL                 model slug for the agent when --sdk codex  (default: gpt-5.5)
-    ADK_MODEL                   model slug for the agent when --sdk adk    (default: gemini/gemini-3.1-pro-preview-customtools)
+    ADK_MODEL                   model slug for the agent when --sdk adk    (default: gemini/gemini-3.1-pro)
     OPENCODE_MODEL              model slug for the agent when --sdk opencode (default: fireworks_ai/glm-5p1)
     CLAUDE_REASONING_EFFORT     reasoning effort for Claude SDK query options (low|medium|high|xhigh)
     CODEX_REASONING_EFFORT      reasoning effort for Codex app-server (none|minimal|low|medium|high|xhigh)
@@ -75,7 +75,7 @@ Environment variables (read from host env, forwarded into each container):
     OPENCODE_STARTUP_TIMEOUT_MS startup watchdog before first OpenCode stdout event (default: 300000)
     LITELLM_CALL_TIMEOUT_MS     per-LiteLLM-call timeout in ms (default: 1200000 / 20 min)
     STEP_LITELLM_TRIES          retries per agent step/call budget (default: 3)
-    MAX_TURNS                   max agent turns (default: 200)
+    MAX_TURNS                   max agent turns/items/calls where supported (default: 0 = unbounded)
     ATTEMPT_TIMEOUT_MS          per-attempt timeout in ms (default: 10800000)
     PERMISSION_MODE             claude permissionMode (default: acceptEdits)
 """
@@ -158,13 +158,57 @@ def find_env_file(explicit: str | None = None) -> Path | None:
     """Return the first .env file that exists, checking in priority order."""
     candidates = [
         Path(explicit) if explicit else None,
+        Path(os.environ["LITELLM_CREDENTIALS_FILE"]) if os.environ.get("LITELLM_CREDENTIALS_FILE") else None,
         ROOT / ".env",
+        ROOT.parent / "litellm" / "LOCAL_LITELLM_CREDENTIALS.env",
         ROOT.parent / "research_evals" / "hil_bench" / ".env",
     ]
     for p in candidates:
         if p and p.exists():
             return p
     return None
+
+
+def resolve_aws_secret_api_key(env: dict[str, str]) -> str | None:
+    """Resolve a LiteLLM API key from AWS Secrets Manager when configured.
+
+    The local credential file can store the key by reference instead of writing
+    the secret value into `.env`. Resolve it on the host and pass only the
+    resulting LiteLLM key into harness containers.
+    """
+    secret_id = env.get("LITELLM_AWS_SECRET_ID") or env.get("AWS_SECRET_ID") or ""
+    secret_key_name = env.get("LITELLM_AWS_SECRET_KEY") or env.get("AWS_SECRET_KEY_NAME") or ""
+    if not (secret_id and secret_key_name):
+        return None
+
+    cmd = ["aws"]
+    if env.get("AWS_PROFILE"):
+        cmd += ["--profile", env["AWS_PROFILE"]]
+    if env.get("AWS_REGION"):
+        cmd += ["--region", env["AWS_REGION"]]
+    cmd += [
+        "secretsmanager",
+        "get-secret-value",
+        "--secret-id",
+        secret_id,
+        "--query",
+        "SecretString",
+        "--output",
+        "text",
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        secret_text = result.stdout.strip()
+        try:
+            parsed = json.loads(secret_text)
+        except json.JSONDecodeError:
+            parsed = secret_text
+        value = parsed.get(secret_key_name) if isinstance(parsed, dict) else parsed
+        return str(value).strip() if value else None
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed resolving LiteLLM API key from AWS Secrets Manager secret {secret_id!r}: {exc}"
+        ) from exc
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data" / "hil_bench_swe"
@@ -193,7 +237,7 @@ SDK_CONFIGS = {
         "harness_image_prefix": "hilbench-swe-harness-adk",
         "entrypoint":           "/opt/trust_horizon/src/hil_swe/run_adk.py",
         "model_env_key":        "ADK_MODEL",
-        "default_model":        "gemini/gemini-3.1-pro-preview-customtools",
+        "default_model":        "gemini/gemini-3.1-pro",
         "executable_env":       "ADK_SUPPRESS_GEMINI_LITELLM_WARNINGS=true",
         # python3.adk is a versioned symlink created by Dockerfile.harness that
         # points to an isolated ADK virtualenv (Python >=3.10) with
@@ -227,12 +271,15 @@ FORWARDED_ENV_KEYS = [
     "LITELLM_BASE_URL",
     "LITELLM_API_KEY",
     "LITELLM_PROXY_API_KEY",
+    "LITELLM_AWS_SECRET_ID",
+    "LITELLM_AWS_SECRET_KEY",
+    "AWS_SECRET_ID",
+    "AWS_SECRET_KEY_NAME",
     # Direct Anthropic API key — used as fallback if LITELLM_* not set
     "ANTHROPIC_AUTH_TOKEN",
     # Ask-human judge overrides (optional — defaults to LITELLM_BASE_URL)
     "ASK_HUMAN_BASE_URL",
     "ASK_HUMAN_MODEL",
-    "PAPER_ASK_HUMAN_MODEL",
     # Agent / run parameters (all optional; harness uses built-in defaults)
     "CLAUDE_MODEL",
     "CLAUDE_REASONING_EFFORT",
@@ -248,16 +295,12 @@ FORWARDED_ENV_KEYS = [
     "LITELLM_CALL_TIMEOUT_MS",
     "STEP_LITELLM_TRIES",
     "WITH_CUSTOM_TOOL",
-    # Recall-tweak feature flags
-    "SEED_BLOCKER_TODOS",
-    "CLAUDE_MD_HINT",
+    # Optional ask-human diagnostics/interventions. All default off.
+    "ASK_HUMAN_GUIDANCE",
     "RICH_ASK_TOOL_DESC",
-    "SOFTEN_CATEGORY_MANDATE",
     "MAX_ASKS_PER_PASS",
     "IRRELEVANT_COOLDOWN",
-    "BLOCKER_SCALED_CAP",
     "IRRELEVANT_FIRST_THROTTLE",
-    "STOP_WHEN_BLOCKERS_RESOLVED",
     "READ_BEFORE_ASK",
     "READ_BEFORE_ASK_MIN_FILES",
     "MAX_TURNS",
@@ -277,7 +320,7 @@ MODEL_REASONING_DEFAULTS = [
     # Codex models
     ("gpt-5.5", {"CODEX_REASONING_EFFORT": "xhigh"}),
     # ADK model (routed through LiteLLM)
-    ("gemini/gemini-3.1-pro-preview-customtools", {"ADK_REASONING_EFFORT": "high"}),
+    ("gemini/gemini-3.1-pro", {"ADK_REASONING_EFFORT": "high"}),
     # OpenCode model
     ("fireworks_ai/glm-5p1", {"OPENCODE_REASONING_EFFORT": "xhigh"}),
 ]
@@ -627,7 +670,7 @@ def _run_attempt_inner(
         "docker", "run",
         "--rm",                         # auto-remove on clean exit
         "--name", container_name,       # named for targeted kill on timeout
-        # Allow container to reach host services (LiteLLM proxy, vLLM judge server).
+        # Allow container to reach host services (LiteLLM proxy / judge route).
         # --add-host maps host.docker.internal → host gateway (same pattern as hil-bench
         # configs/swe/ask_config_claude_opus_4-6.yaml).  Clients should use
         # http://host.docker.internal:PORT rather than http://localhost:PORT.
@@ -777,8 +820,8 @@ def main() -> None:
              f"Supported: {', '.join(SDK_CONFIGS)}.",
     )
     parser.add_argument(
-        "--modes", nargs="+", choices=["ask_human", "full_info"], default=["ask_human"],
-        help="Modes to run (default: ask_human).",
+        "--modes", nargs="+", choices=["neutral", "skill", "full_info", "no_tool", "ask_human"], default=["neutral"],
+        help="Modes to run (default: neutral). 'ask_human' is accepted as a legacy alias for neutral.",
     )
     parser.add_argument(
         "--passes", "-k", type=int, default=1,
@@ -829,7 +872,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--max-turns", type=int, default=None,
-        help="Max agent turns per attempt (default: 200). "
+        help="Max agent turns/items/calls per attempt where supported (default: 0 = unbounded). "
              "Equivalent to passing --env MAX_TURNS=N.",
     )
     parser.add_argument(
@@ -866,11 +909,14 @@ def main() -> None:
         action="store_true",
         default=False,
         help=(
-            "Enable an additional top-level custom ask_human tool for claude/codex SDK "
-            "runs only. Does not replace native question-asking tools."
+            "Force-enable the additional top-level custom ask_human MCP tool for "
+            "claude/codex SDK runs. Neutral/skill runs enable this by default; "
+            "use --env WITH_CUSTOM_TOOL=0 to hide the MCP tool while keeping native "
+            "question interception."
         ),
     )
     args = parser.parse_args()
+    args.modes = ["neutral" if mode == "ask_human" else mode for mode in args.modes]
 
     # ── Apply SDK-specific globals before any worker threads are started ─────────
     global SDK, HARNESS_IMAGE_PREFIX, ENTRYPOINT
@@ -922,7 +968,9 @@ def main() -> None:
     if not effective_env.get(model_env_key):
         effective_env[model_env_key] = sdk_cfg_for_model["default_model"]
 
-    # 4b. Optional custom ask_human tool exposure (claude/codex only)
+    # 4b. Optional override for custom ask_human MCP tool exposure (claude/codex only).
+    # The container-side runners default this on for neutral/skill modes so the
+    # explicit MCP surface and native question surface share one sidecar backend.
     if args.with_custom_tool:
         if args.sdk not in {"claude", "codex"}:
             print(
@@ -961,12 +1009,22 @@ def main() -> None:
         effective_env.get("LITELLM_PROXY_API_KEY") or
         effective_env.get("ANTHROPIC_AUTH_TOKEN")
     )
+    if not api_key:
+        try:
+            api_key = resolve_aws_secret_api_key(effective_env)
+        except RuntimeError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if api_key:
+            effective_env.setdefault("LITELLM_API_KEY", api_key)
+            effective_env.setdefault("LITELLM_PROXY_API_KEY", api_key)
+            effective_env.setdefault("ANTHROPIC_AUTH_TOKEN", api_key)
     base_url = effective_env.get("LITELLM_BASE_URL") or effective_env.get("ANTHROPIC_BASE_URL")
 
     if not api_key:
         print(
             "ERROR: No API key found.  Set LITELLM_API_KEY in trust_horizon/.env "
-            "(or ANTHROPIC_AUTH_TOKEN for direct Anthropic access).",
+            "(or ANTHROPIC_AUTH_TOKEN / LITELLM_AWS_SECRET_ID+LITELLM_AWS_SECRET_KEY).",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -1013,6 +1071,7 @@ def main() -> None:
     }
 
     run_dir = RUNS_DIR / args.run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
     pending_pass_keys: set[tuple[str, str, int]] = set()
     for key in all_pass_keys:
         uid, mode, pass_idx = key
@@ -1208,6 +1267,16 @@ def main() -> None:
                     "num_blockers_resolved": 0,
                     "num_blockers_total": 0,
                     "patch_bytes": None,
+                    "wall_clock_ms": 0,
+                    "num_llm_calls": 0,
+                    "num_tool_calls": 0,
+                    "num_turns_or_items": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "total_tokens": 0,
+                    "llm_proxy_error_count": None,
+                    "llm_proxy_status_counts": None,
+                    "llm_proxy_stripped_params": None,
                     "pass_dir": str(pass_dir),
                 })
 

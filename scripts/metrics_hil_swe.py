@@ -44,6 +44,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+
+ASK_METRIC_MODES = {"neutral", "skill", "ask_human"}
+
 ROOT = Path(__file__).resolve().parents[1]
 RUNS_DIR = ROOT / "runs"
 DATA_DIR = ROOT / "data" / "hil_bench_swe"
@@ -329,6 +332,16 @@ def load_pass_rows(run_dir: Path) -> list[dict[str, Any]]:
                     "num_ask_human_cooldown_denied": stats.get(
                         "num_ask_human_cooldown_denied"
                     ),
+                    "wall_clock_ms": stats.get("wall_clock_ms"),
+                    "num_llm_calls": stats.get("num_llm_calls"),
+                    "num_tool_calls": stats.get("num_tool_calls"),
+                    "num_turns_or_items": stats.get("num_turns_or_items"),
+                    "input_tokens": stats.get("input_tokens"),
+                    "output_tokens": stats.get("output_tokens"),
+                    "total_tokens": stats.get("total_tokens"),
+                    "llm_proxy_error_count": stats.get("llm_proxy_error_count"),
+                    "llm_proxy_status_counts": stats.get("llm_proxy_status_counts"),
+                    "llm_proxy_stripped_params": stats.get("llm_proxy_stripped_params"),
                     "patch_bytes": result.get("patch_bytes"),
                     "pass_dir": str(pass_dir),
                 }
@@ -417,6 +430,13 @@ def summarize(
         total_questions_full_info = 0.0
         total_ask_human_capped = 0.0
         total_ask_human_cooldown_denied = 0.0
+        total_wall_clock_ms = 0.0
+        total_llm_calls = 0.0
+        total_tool_calls = 0.0
+        total_turns_or_items = 0.0
+        total_input_tokens = 0.0
+        total_output_tokens = 0.0
+        total_tokens = 0.0
         total_attempts_and_passes = 0
 
         for valid_passes in attempts:
@@ -446,8 +466,15 @@ def summarize(
                 total_ask_human_cooldown_denied += float(
                     row.get("num_ask_human_cooldown_denied") or 0
                 )
+                total_wall_clock_ms += float(row.get("wall_clock_ms") or 0)
+                total_llm_calls += float(row.get("num_llm_calls") or 0)
+                total_tool_calls += float(row.get("num_tool_calls") or 0)
+                total_turns_or_items += float(row.get("num_turns_or_items") or 0)
+                total_input_tokens += float(row.get("input_tokens") or 0)
+                total_output_tokens += float(row.get("output_tokens") or 0)
+                total_tokens += float(row.get("total_tokens") or 0)
 
-                if mode == "ask_human":
+                if mode in ASK_METRIC_MODES:
                     n_res = float(row.get("num_blockers_resolved") or 0)
                     n_q = float(row.get("num_questions") or 0)
                     n_qt = float(row.get("num_total_questions") or row.get("num_questions") or 0)
@@ -476,6 +503,13 @@ def summarize(
             "avg_questions_per_pass": total_questions / total_attempts_and_passes if total_attempts_and_passes else 0.0,
             # avg questions asked in full_info mode per pass (non-zero only in full_info mode)
             "avg_questions_full_info_per_pass": total_questions_full_info / total_attempts_and_passes if total_attempts_and_passes else 0.0,
+            "avg_wall_clock_ms_per_pass": total_wall_clock_ms / total_attempts_and_passes if total_attempts_and_passes else 0.0,
+            "avg_llm_calls_per_pass": total_llm_calls / total_attempts_and_passes if total_attempts_and_passes else 0.0,
+            "avg_tool_calls_per_pass": total_tool_calls / total_attempts_and_passes if total_attempts_and_passes else 0.0,
+            "avg_turns_or_items_per_pass": total_turns_or_items / total_attempts_and_passes if total_attempts_and_passes else 0.0,
+            "total_input_tokens": int(total_input_tokens),
+            "total_output_tokens": int(total_output_tokens),
+            "total_tokens": int(total_tokens),
         }
 
         for k in range(1, k_max + 1):
@@ -486,7 +520,7 @@ def summarize(
                 num_gated_solved_by_k[k] / denom if denom > 0 else 0.0
             )
 
-        if mode == "ask_human":
+        if mode in ASK_METRIC_MODES:
             # ── Primary ask metrics (paper macro): judge questions denominator
             if ask_pass_count > 0:
                 ask_precision = precision_sum / ask_pass_count

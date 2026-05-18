@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -53,6 +54,8 @@ from tqdm import tqdm
 
 ROOT = Path(__file__).resolve().parents[1]
 TASKS_INDEX = ROOT / "data" / "hil_bench_swe" / "tasks_index.json"
+NODE_RUNTIME_IMAGE = "node:20-bookworm-slim"
+NODE_RUNTIME_PLATFORM = "linux/amd64"
 
 # Registry of supported SDKs: sdk_name → (image_tag_prefix, dockerfile_path)
 # Add a new entry here when onboarding a new agent SDK.
@@ -88,6 +91,43 @@ def docker_image_exists(image_name: str) -> bool:
     return result.returncode == 0
 
 
+def _docker_image_arch(image_name: str) -> str | None:
+    result = subprocess.run(
+        ["docker", "image", "inspect", image_name, "--format", "{{.Architecture}}"],
+        capture_output=True, check=False, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def ensure_node_runtime_platform() -> None:
+    """Ensure the helper Node image matches the AMD64 HiL-Bench task images.
+
+    On ARM hosts, Docker's legacy builder can otherwise reuse a locally cached
+    ARM ``node:20-bookworm-slim`` image and copy an incompatible Node runtime
+    into AMD64 task images.
+    """
+    arch = _docker_image_arch(NODE_RUNTIME_IMAGE)
+    if arch == "amd64":
+        return
+
+    print(
+        f"Pulling {NODE_RUNTIME_PLATFORM} {NODE_RUNTIME_IMAGE} "
+        f"(cached arch was {arch or 'missing'})...",
+        flush=True,
+    )
+    result = subprocess.run(
+        ["docker", "pull", "--platform", NODE_RUNTIME_PLATFORM, NODE_RUNTIME_IMAGE],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(result.stderr[-2000:] or result.stdout[-2000:], file=sys.stderr)
+        sys.exit(f"ERROR: failed to pull {NODE_RUNTIME_PLATFORM} {NODE_RUNTIME_IMAGE}")
+
+
 def build_harness_image(
     uid: str, base_image: str, force: bool,
     image_prefix: str, dockerfile: Path, sdk: str,
@@ -113,7 +153,9 @@ def build_harness_image(
         "-f", str(dockerfile),
         ".",
     ]
-    result = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True)
+    build_env = os.environ.copy()
+    build_env.setdefault("DOCKER_BUILDKIT", "0")
+    result = subprocess.run(cmd, cwd=str(ROOT), env=build_env, capture_output=True, text=True)
     if result.returncode != 0:
         msg = f"docker build failed:\n{result.stderr[-2000:]}"
         print(f"  [{uid}] ERROR: {msg}", flush=True)
@@ -208,6 +250,7 @@ def main() -> None:
 
     workers = args.workers if args.workers is not None else min(len(target_tasks), 2)
     total_jobs = len(target_tasks) * len(selected_sdks)
+    ensure_node_runtime_platform()
     print(
         f"Building harness images for {len(target_tasks)} task(s) across "
         f"{len(selected_sdks)} SDK(s) = {total_jobs} build job(s) with {workers} worker(s)...\n",
