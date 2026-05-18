@@ -61,7 +61,7 @@ SWEAP_LOG_PARSER = "sweap_json"
 
 HF_DATASET = "ScaleAI/hil-bench"
 HF_TOKEN_FILE = Path.home() / ".cache" / "huggingface" / "stored_tokens"
-_RESEARCH_EVALS_ENV: Path | None = None  # set via LITELLM_CREDENTIALS_FILE env var
+_EXTRA_ENV: Path | None = None  # set via LITELLM_CREDENTIALS_FILE env var
 
 DOCKER_LOADED_IMAGE_RE = re.compile(r"Loaded image:\s*(\S+)")
 DOCKER_LOADED_IMAGE_ID_RE = re.compile(r"Loaded image ID:\s*(\S+)")
@@ -110,7 +110,7 @@ def read_hf_token() -> str | None:
     if token:
         return token
     # Try the configured .env first (primary source)
-    token = _parse_token_from_env_file(_RESEARCH_EVALS_ENV)
+    token = _parse_token_from_env_file(_EXTRA_ENV)
     if token:
         return token
     # Fall back to HF CLI stored token
@@ -151,19 +151,22 @@ def _ensure_botocore_vendored_requests_shim() -> None:
 def _load_paper_pipeline_helpers():
     _ensure_models_import_paths()
     _ensure_botocore_vendored_requests_shim()
-    try:
-        from research_evals.hil_bench.utils.paper_pipeline import (  # type: ignore
-            create_data_object,
-            setup_task_environment,
-            validate_swe_runtime_task,
+    pipeline_module = os.environ.get("HIL_BENCH_PIPELINE_MODULE", "")
+    if not pipeline_module:
+        raise RuntimeError(
+            "Set HIL_BENCH_PIPELINE_MODULE to the dotted module path for "
+            "the paper_pipeline SWE helpers (required for private ingest). "
+            "Also set HIL_BENCH_EXTRA_PYTHONPATH to include the package root."
         )
+    try:
+        import importlib
+        module = importlib.import_module(pipeline_module)
+        return module.create_data_object, module.setup_task_environment, module.validate_swe_runtime_task
     except Exception as e:  # pragma: no cover - import errors are environment-dependent
         raise RuntimeError(
-            "Failed importing paper_pipeline SWE helpers required for private ingest. "
-            "Set HIL_BENCH_EXTRA_PYTHONPATH to include the path containing "
-            f"research_evals/. Original error: {e}"
+            f"Failed importing {pipeline_module!r}. "
+            f"Set HIL_BENCH_EXTRA_PYTHONPATH to include the package root. Original error: {e}"
         ) from e
-    return create_data_object, setup_task_environment, validate_swe_runtime_task
 
 
 def _normalize_blocker_entry(entry: dict) -> dict:

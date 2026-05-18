@@ -858,9 +858,9 @@ test("full_info prompts do not advertise ask_human surfaces", () => {
 });
 
 test("redactString removes secret-looking values from raw stderr text", () => {
-  const text = "CODEX_API_KEY=sk-testkey123 OPENAI_API_KEY=plain_secret_value";
+  const text = "CODEX_API_KEY=my-test-value OPENAI_API_KEY=plain_secret_value";
   const redacted = redactString(text);
-  assert.equal(redacted.includes("sk-testkey123"), false);
+  assert.equal(redacted.includes("my-test-value"), false);
   assert.equal(redacted.includes("plain_secret_value"), false);
   assert.equal(redacted.includes("CODEX_API_KEY=[REDACTED]"), true);
   assert.equal(redacted.includes("OPENAI_API_KEY=[REDACTED]"), true);

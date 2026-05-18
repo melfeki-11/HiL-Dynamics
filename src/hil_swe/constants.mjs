@@ -47,7 +47,7 @@ export const ASK_HUMAN_BASE_URL = (() => {
 // vLLM-only slugs (e.g. casperhansen/...) fail on LiteLLM; use the bedrock default instead.
 export const ASK_HUMAN_MODEL = (() => {
   const requested = process.env.ASK_HUMAN_MODEL || process.env.PAPER_ASK_HUMAN_MODEL || "";
-  const usingLitellm = /litellm|ml-serving-internal/i.test(ASK_HUMAN_BASE_URL);
+  const usingLitellm = /litellm/i.test(ASK_HUMAN_BASE_URL);
   const looksVllmOnly = /casperhansen\/|\/.*-awq|-awq$/i.test(requested);
   if (usingLitellm && looksVllmOnly) return DEFAULT_ASK_HUMAN_MODEL;
   return requested || DEFAULT_ASK_HUMAN_MODEL;
