@@ -82,7 +82,7 @@ def _build_report(
 
     # ── Header ──
     lines += [
-        f"# HiL-Bench Report: {run_id}",
+        f"# Escalation Lens Report: {run_id}",
         f"",
         f"Generated: {generated_at}  |  SDK: {sdk_display}  |  Model: {model_display}  "
         f"|  UIDs: {num_uids}  |  Passes: {passes}",

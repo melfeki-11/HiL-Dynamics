@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# hilbench — Trust Horizon / HiL-Bench harness diagnostic tool
+# hilbench — Escalation Lens: Diagnosing Ask Behavior Across Agent Harnesses
 # Usage: ./bin/hilbench <command> [options]
 set -euo pipefail
 
