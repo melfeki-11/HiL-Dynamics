@@ -49,19 +49,19 @@ export function readBeforeAskMinFiles() {
 }
 
 /**
- * Effective per-pass cap: fixed MAX_ASKS_PER_PASS, or min(6, numBlockers+1) when
+ * Effective per-pass cap: fixed MAX_ASKS_PER_PASS, or a fixed cap of 6 when
  * BLOCKER_SCALED_CAP=1 and no fixed cap is set.
+ * (Registry-derived scaling removed to avoid leaking ground-truth blocker count.)
  */
-export function resolveMaxAsksPerPass(numBlockersTotal = 0) {
+export function resolveMaxAsksPerPass() {
   const fixed = parseMaxAsksPerPass();
   if (fixed > 0) return fixed;
   if (!isBlockerScaledCapEnabled()) return 0;
-  const n = Math.max(0, Number(numBlockersTotal) || 0);
-  return Math.min(6, n + 1);
+  return 6;
 }
 
 export function createAskLimitTracker(opts = {}) {
-  const maxAsksPerPass = opts.maxAsksPerPass ?? resolveMaxAsksPerPass(opts.numBlockersTotal ?? 0);
+  const maxAsksPerPass = opts.maxAsksPerPass ?? resolveMaxAsksPerPass();
   const irrelevantCooldownThreshold = opts.irrelevantCooldownThreshold ?? parseIrrelevantCooldown();
   const irrelevantFirstThrottle = opts.irrelevantFirstThrottle ?? isIrrelevantFirstThrottleEnabled();
   const irrelevantFirstMin = Number(opts.irrelevantFirstMin ?? 1);

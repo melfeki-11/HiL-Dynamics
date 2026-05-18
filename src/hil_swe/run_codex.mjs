@@ -1090,18 +1090,7 @@ async function main() {
   // Only written in ask_human mode; the file is appended to so we don't clobber
   // the skill's existing AGENTS.md if installAgentsSkill wrote one already.
   if (MODE === "ask_human" && CLAUDE_MD_HINT) {
-    let numBlockersForHint = 0;
-    try {
-      const reg = JSON.parse(
-        await fs.readFile(path.join(TASK_DIR, "blocker_registry.json"), "utf8"),
-      );
-      numBlockersForHint = (reg.entries || reg.blockers || []).length;
-    } catch { /* metadata-only fallback */ }
-    const hint = buildPerTaskMemoryHint({
-      uid,
-      numBlockers: numBlockersForHint,
-      sdk: "codex",
-    });
+    const hint = buildPerTaskMemoryHint({ uid, sdk: "codex" });
     try {
       const agentsMdPath = path.join(WORKSPACE, "AGENTS.md");
       let existing = "";
@@ -1112,7 +1101,6 @@ async function main() {
         type: "agents_md_hint_written",
         timestamp: new Date().toISOString(),
         path: agentsMdPath,
-        num_blockers_hinted: numBlockersForHint,
         bytes: Buffer.byteLength(combined),
       });
     } catch (err) {

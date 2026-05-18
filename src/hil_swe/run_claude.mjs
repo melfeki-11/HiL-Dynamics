@@ -637,25 +637,13 @@ async function main() {
   // via its memdir subsystem). Only written in ask_human mode and when the
   // CLAUDE_MD_HINT flag is set, so the base baseline is unchanged by default.
   if (MODE === "ask_human" && CLAUDE_MD_HINT) {
-    let numBlockersForHint = 0;
-    try {
-      const reg = JSON.parse(
-        await fs.readFile(path.join(TASK_DIR, "blocker_registry.json"), "utf8"),
-      );
-      numBlockersForHint = (reg.entries || reg.blockers || []).length;
-    } catch { /* metadata-only fallback */ }
-    const hint = buildPerTaskMemoryHint({
-      uid,
-      numBlockers: numBlockersForHint,
-      sdk: "claude",
-    });
+    const hint = buildPerTaskMemoryHint({ uid, sdk: "claude" });
     try {
       await fs.writeFile(path.join(WORKSPACE, "CLAUDE.md"), hint, "utf8");
       pushEvent({
         type: "claude_md_hint_written",
         timestamp: new Date().toISOString(),
         path: path.join(WORKSPACE, "CLAUDE.md"),
-        num_blockers_hinted: numBlockersForHint,
         bytes: Buffer.byteLength(hint),
       });
     } catch (err) {
