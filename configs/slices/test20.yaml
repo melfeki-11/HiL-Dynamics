@@ -1,0 +1,28 @@
+# Canonical 20-UID HiL-Bench test set.
+# Protocol: 20 UIDs x 3 passes (ask_human mode).
+# Source: data/hil_swe_20_attempt_test_set_uids.txt
+uids:
+  - 69a7a4d1617c0b97d4d6aacd
+  - 69a9e77602049c14d2793bb5
+  - 69b1031f73a8f5979167a774
+  - 69b20af8600119b97e678c5b
+  - 69b3ab1df8d713deb4c0087d
+  - 69bc1094b455a91fa20fb868
+  - 69bcc6360c872b9773cce01d
+  - 69be1b17ed0dad79557a9d20
+  - 69be580e4bde28908b05c56f
+  - 69c0073e28d67846c637cb7e
+  - 69c0ead7ef94e54e9dc6a130
+  - 69c196fa0b42d9b078f32b2e
+  - 69c2af94ae34531293e5f7ec
+  - 69c3277deb9e9972372b30fc
+  - 69c3c5e0b961752c24493b50
+  - 69c3f3301734592b5a14a3b9
+  - 69c6079bcb74caaa66c49c87
+  - 69c60cc7b6a31e9900faa779
+  - 69c6ac9f46a2e65fc3988794
+  - 698139c7dc5e90df07566a6c
+modes:
+  - ask_human
+passes: 3
+workers: 5
