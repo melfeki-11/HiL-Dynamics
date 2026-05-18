@@ -7,21 +7,22 @@ computes aggregate metrics following the formulas from paper_pipeline.py:
 ACCURACY (pass@k):
   pass@k = (# attempts where any of passes 1..k resolved) / (# attempts with k valid passes)
 
-ASK METRICS — MICRO / global-totals aggregation (per run_hil_bench.py summarize_rows):
+ASK METRICS — MACRO / paper (hil-bench paper_pipeline.py average-of-ratios):
 
-  "judge" questions (clarification + elicitation — both go to the LLM judge):
-    total_blockers_resolved  = sum of num_blockers_resolved
-    total_questions          = sum of num_questions            (clarification + elicitation)
-    total_blockers_present   = sum of num_blockers_total
-    ask_precision = total_blockers_resolved / total_questions
-    ask_recall    = total_blockers_resolved / total_blockers_present
-    ask_f1        = 2 * P * R / (P + R)
+  Per valid (attempt × pass), with num_blockers_resolved = unique blocker IDs answered:
+    precision_for_pass = min(1.0, num_blockers_resolved / num_questions)  (0 if num_questions == 0)
+    recall_for_pass    = min(1.0, num_blockers_resolved / num_blockers_total)  (0 if total == 0)
+    f1_for_pass        = harmonic mean of precision_for_pass and recall_for_pass
 
-  "total" questions (all four types: clarification + elicitation + approval + permission):
-    total_total_questions    = sum of num_total_questions
-    ask_precision_total = total_blockers_resolved / total_total_questions
-    ask_recall_total    = same as ask_recall (numerator / denominator unchanged)
-    ask_f1_total        = 2 * P_total * R_total / (P_total + R_total)
+  ask_precision = mean(precision_for_pass)
+  ask_recall    = mean(recall_for_pass)
+  ask_f1        = mean(f1_for_pass)
+
+  Diagnostic micro totals (event-sum style, NOT used for primary CSV fields):
+    ask_precision_event_micro, ask_recall_event_micro — sum(resolved)/sum(denominator)
+
+  "total" questions (judge + approval + permission): same macro per-pass with num_total_questions
+    as precision denominator; recall denominator unchanged.
 
 Output files written to runs/<run_id>/metrics/:
   pass_level.json       — per-(uid, mode, pass) raw numbers
@@ -67,6 +68,25 @@ SYSTEM_ERROR_STOP_REASONS = {
     "sidecar_start_failed",
     "proxy_start_failed",
 }
+
+# Post paper-recall-fix: num_blockers_resolved = unique blocker_id count per pass.
+STATS_SCHEMA_VERSION = 2
+
+
+def pass_has_valid_stats_schema(pass_dir: str) -> bool:
+    """True if stats.json exists and was written by schema v2 runners."""
+    if not pass_dir:
+        return False
+    stats_path = Path(pass_dir) / "stats.json"
+    if not stats_path.exists():
+        return False
+    try:
+        stats = json.loads(stats_path.read_text())
+    except Exception:
+        return False
+    if not isinstance(stats, dict):
+        return False
+    return stats.get("stats_schema_version") == STATS_SCHEMA_VERSION
 
 
 def _result_has_system_error(result: dict[str, Any]) -> bool:
@@ -305,6 +325,10 @@ def load_pass_rows(run_dir: Path) -> list[dict[str, Any]]:
                     "num_questions_full_info": stats.get("num_questions_full_info"),
                     "num_blockers_resolved": stats.get("num_blockers_resolved"),
                     "num_blockers_total": stats.get("num_blockers_total"),
+                    "num_ask_human_capped": stats.get("num_ask_human_capped"),
+                    "num_ask_human_cooldown_denied": stats.get(
+                        "num_ask_human_cooldown_denied"
+                    ),
                     "patch_bytes": result.get("patch_bytes"),
                     "pass_dir": str(pass_dir),
                 }
@@ -368,8 +392,20 @@ def summarize(
 
         num_solved_by_k = {k: 0 for k in range(1, k_max + 1)}
         num_attempts_with_k_valid = {k: 0 for k in range(1, k_max + 1)}
+        # gated_pass@k: PAE-style — credit only successes where the agent
+        # actually asked at least one judge question (clarification/elicitation).
+        # Strips out silent-pass lucky-passes that inflate raw pass@k.
+        num_gated_solved_by_k = {k: 0 for k in range(1, k_max + 1)}
 
-        # MICRO aggregation accumulators (run_hil_bench.py style)
+        # Macro (paper) ask-metric accumulators
+        precision_sum = 0.0
+        recall_sum = 0.0
+        f1_sum = 0.0
+        precision_total_sum = 0.0
+        f1_total_sum = 0.0
+        ask_pass_count = 0
+
+        # Micro totals (diagnostics only)
         total_blockers_resolved = 0.0
         # clarification + elicitation (LLM judge questions) — primary denominator
         total_questions = 0.0
@@ -379,6 +415,8 @@ def summarize(
         total_steps = 0.0
         # questions asked in full_info mode (agent asked despite having all info in prompt)
         total_questions_full_info = 0.0
+        total_ask_human_capped = 0.0
+        total_ask_human_cooldown_denied = 0.0
         total_attempts_and_passes = 0
 
         for valid_passes in attempts:
@@ -389,6 +427,14 @@ def summarize(
             for k in range(1, n_valid + 1):
                 if any(bool(valid_passes[i].get("resolved")) for i in range(k)):
                     num_solved_by_k[k] += 1
+                # gated success: at least one of the first k passes both
+                # resolved AND asked >= 1 judge question.
+                if any(
+                    bool(valid_passes[i].get("resolved"))
+                    and float(valid_passes[i].get("num_questions") or 0) >= 1
+                    for i in range(k)
+                ):
+                    num_gated_solved_by_k[k] += 1
 
             for row in valid_passes:
                 total_attempts_and_passes += 1
@@ -396,10 +442,28 @@ def summarize(
                 total_questions += float(row.get("num_questions") or 0)
                 total_total_questions += float(row.get("num_total_questions") or row.get("num_questions") or 0)
                 total_questions_full_info += float(row.get("num_questions_full_info") or 0)
+                total_ask_human_capped += float(row.get("num_ask_human_capped") or 0)
+                total_ask_human_cooldown_denied += float(
+                    row.get("num_ask_human_cooldown_denied") or 0
+                )
 
                 if mode == "ask_human":
-                    total_blockers_resolved += float(row.get("num_blockers_resolved") or 0)
-                    total_blockers_present += float(row.get("num_blockers_total") or 0)
+                    n_res = float(row.get("num_blockers_resolved") or 0)
+                    n_q = float(row.get("num_questions") or 0)
+                    n_qt = float(row.get("num_total_questions") or row.get("num_questions") or 0)
+                    n_tot = float(row.get("num_blockers_total") or 0)
+                    p_pass = min(1.0, n_res / n_q) if n_q > 0 else 0.0
+                    r_pass = min(1.0, n_res / n_tot) if n_tot > 0 else 0.0
+                    f1_pass = _f1(p_pass, r_pass)
+                    p_pass_total = min(1.0, n_res / n_qt) if n_qt > 0 else 0.0
+                    precision_sum += p_pass
+                    recall_sum += r_pass
+                    f1_sum += f1_pass
+                    precision_total_sum += p_pass_total
+                    f1_total_sum += _f1(p_pass_total, r_pass)
+                    ask_pass_count += 1
+                    total_blockers_resolved += n_res
+                    total_blockers_present += n_tot
 
         metrics: dict[str, Any] = {
             "mode": mode,
@@ -418,26 +482,40 @@ def summarize(
             denom = num_attempts_with_k_valid[k]
             metrics[f"pass_at_{k}"] = num_solved_by_k[k] / denom if denom > 0 else 0.0
             metrics[f"pass_at_{k}_n"] = denom
+            metrics[f"gated_pass_at_{k}"] = (
+                num_gated_solved_by_k[k] / denom if denom > 0 else 0.0
+            )
 
         if mode == "ask_human":
-            # ── Primary ask metrics: denominator = judge questions (clarification + elicitation)
-            # Aligns with run_hil_bench.py summarize_rows
-            ask_precision = total_blockers_resolved / total_questions if total_questions > 0 else 0.0
-            ask_recall    = total_blockers_resolved / total_blockers_present if total_blockers_present > 0 else 0.0
+            # ── Primary ask metrics (paper macro): judge questions denominator
+            if ask_pass_count > 0:
+                ask_precision = precision_sum / ask_pass_count
+                ask_recall = recall_sum / ask_pass_count
+                ask_f1 = f1_sum / ask_pass_count
+                ask_precision_total = precision_total_sum / ask_pass_count
+                ask_recall_total = recall_sum / ask_pass_count
+                ask_f1_total = f1_total_sum / ask_pass_count
+            else:
+                ask_precision = ask_recall = ask_f1 = 0.0
+                ask_precision_total = ask_recall_total = ask_f1_total = 0.0
             metrics["ask_precision"] = ask_precision
-            metrics["ask_recall"]    = ask_recall
-            metrics["ask_f1"]        = _f1(ask_precision, ask_recall)
-            metrics["total_questions"]         = int(total_questions)
-            metrics["total_blockers_resolved"] = int(total_blockers_resolved)
-            metrics["total_blockers_present"]  = int(total_blockers_present)
-
-            # ── Total ask metrics: denominator = all human interactions (judge + approval/permission)
-            # Measures blockers resolved per any human interaction the agent initiated.
-            ask_precision_total = total_blockers_resolved / total_total_questions if total_total_questions > 0 else 0.0
-            # recall is identical (numerator and total_blockers_present unchanged)
+            metrics["ask_recall"] = ask_recall
+            metrics["ask_f1"] = ask_f1
             metrics["ask_precision_total"] = ask_precision_total
-            metrics["ask_recall_total"]    = ask_recall
-            metrics["ask_f1_total"]        = _f1(ask_precision_total, ask_recall)
+            metrics["ask_recall_total"] = ask_recall_total
+            metrics["ask_f1_total"] = ask_f1_total
+            # Diagnostic micro (legacy event-sum) — audit only
+            metrics["ask_precision_event_micro"] = (
+                total_blockers_resolved / total_questions if total_questions > 0 else 0.0
+            )
+            metrics["ask_recall_event_micro"] = (
+                total_blockers_resolved / total_blockers_present if total_blockers_present > 0 else 0.0
+            )
+            metrics["total_questions"] = int(total_questions)
+            metrics["total_ask_human_capped"] = int(total_ask_human_capped)
+            metrics["total_ask_human_cooldown_denied"] = int(total_ask_human_cooldown_denied)
+            metrics["total_blockers_resolved"] = int(total_blockers_resolved)
+            metrics["total_blockers_present"] = int(total_blockers_present)
             metrics["total_total_questions"] = int(total_total_questions)
 
         if mode == "full_info":
@@ -500,7 +578,7 @@ def main() -> None:
             "num_passes": args.passes,
             "include_partial": args.include_partial,
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "formula": "micro/global-totals (run_hil_bench.py summarize_rows)",
+            "formula": "macro/paper (mean of per-pass min(1, resolved/total)); resolved = unique blocker IDs",
         },
         "by_mode_agent_model": summarize(
             rows, expected_passes=args.passes, include_partial=args.include_partial

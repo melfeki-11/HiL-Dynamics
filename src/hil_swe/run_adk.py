@@ -283,8 +283,62 @@ def _ask_human_guidance_template() -> str:
     return _ASK_HUMAN_GUIDANCE_TEMPLATE_PATH.read_text(encoding="utf-8")
 
 
+def _env_flag(name: str) -> bool:
+    return str(os.environ.get(name, "")).strip().lower() in ("1", "true", "yes", "on")
+
+
+# Mirrors BLOCKER_TODOS_SEED_CODEX_* in constants.mjs (ADK has no TodoWriteTool).
+_BLOCKER_TODOS_SEED_CODEX_STRICT = """
+## Turn-1 procedure (blocker discovery — MANDATORY)
+
+BEFORE other work, pin a markdown checklist with one item per blocker category and keep it pinned across turns. The five categories you MUST cover are:
+
+1. Missing parameter values / defaults
+2. Unclear return type or output shape
+3. Ambiguous spec or contradicting tests
+4. Unclear scope / surface area
+5. Edge-case behavior (empty input, None, etc.)
+
+Walk through them one at a time. For each:
+- Read the problem statement and ~3-5 directly relevant code locations.
+- If the answer is unambiguous from the code/spec, mark the item resolved in your checklist and rewrite it as a one-line note.
+- Otherwise, ask exactly one focused, identifier-anchored question via the ask tool. After the answer arrives, mark the item resolved before moving on.
+
+Do not start writing code while any of the five items is unresolved.
+Do not collapse categories into a single mega-question.
+""".strip()
+
+_BLOCKER_TODOS_SEED_CODEX_SOFT = """
+## Turn-1 procedure (blocker discovery — MANDATORY)
+
+BEFORE other work, pin a markdown checklist with up to five **candidate** blocker items — one per category (titles below). These are hypotheses, not mandates to ask.
+
+1. Missing parameter values / defaults
+2. Unclear return type or output shape
+3. Ambiguous spec or contradicting tests
+4. Unclear scope / surface area
+5. Edge-case behavior (empty input, None, etc.)
+
+**Before any ask_human call**, read the README plus 2–3 relevant repository files; localize ambiguity to concrete identifiers. Prefer resolving checklist items via code/tests over asking. Typical tasks expose **about 3–5 true blockers** — avoid fill-in questions invented only to populate the checklist.
+
+For each unresolved item after reading:
+- If clarified from code/spec, resolve with a terse note.
+- Else ONE focused identifier-anchored question; then resolve the checklist line.
+
+Do not start implementation until remaining uncertainties are consciously chosen or answered. Never collapse categories into one umbrella question.
+""".strip()
+
+
 def _build_ask_human_guidance(tool_name: str) -> str:
-    return _ask_human_guidance_template().replace("{{TOOL_NAME}}", str(tool_name or ""))
+    base = _ask_human_guidance_template().replace("{{TOOL_NAME}}", str(tool_name or ""))
+    if not _env_flag("SEED_BLOCKER_TODOS"):
+        return base
+    seed = (
+        _BLOCKER_TODOS_SEED_CODEX_SOFT
+        if _env_flag("SOFTEN_CATEGORY_MANDATE")
+        else _BLOCKER_TODOS_SEED_CODEX_STRICT
+    )
+    return f"{base}\n\n{seed}"
 
 
 def _build_instruction(mode: str) -> str:
@@ -557,7 +611,7 @@ def compute_stats(
     num_questions          = 0
     num_questions_approval = 0
     num_questions_full_info = 0
-    num_blockers_resolved  = 0
+    resolved_blocker_ids: set[str] = set()
     num_skill_calls        = 0
     request_status_by_id: dict[str, str] = {}
 
@@ -592,7 +646,7 @@ def compute_stats(
                 and bid != UNKNOWN_BLOCKER_ID
                 and ev.get("result", {}).get("status") == "answered"
             ):
-                num_blockers_resolved += 1
+                resolved_blocker_ids.add(str(bid))
 
     # Count explicit skill tool invocations from trajectory steps.
     # Only ADK trajectories include this key, and only when confidently detected.
@@ -606,9 +660,10 @@ def compute_stats(
         "num_questions_approval":   num_questions_approval,
         "num_total_questions":      num_questions + num_questions_approval,
         "num_questions_full_info":  num_questions_full_info,
-        "num_blockers_resolved":    num_blockers_resolved,
+        "num_blockers_resolved":    len(resolved_blocker_ids),
         "num_blockers_total":       num_blockers_total,
         "num_skill_calls":          num_skill_calls,
+        "stats_schema_version":     2,
     }
 
 

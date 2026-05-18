@@ -332,6 +332,15 @@ class TestComputeStats(unittest.TestCase):
         self.assertEqual(stats["num_blockers_resolved"], 2)
         self.assertEqual(stats["num_blockers_total"],    5)
 
+    def test_duplicate_answered_blocker_ids_count_once(self):
+        events = [
+            {"type": "human_input_result", "result": {"blocker_id": "b1", "status": "answered"}},
+            {"type": "human_input_result", "result": {"blocker_id": "b1", "status": "answered"}},
+            {"type": "human_input_result", "result": {"blocker_id": "b1", "status": "answered"}},
+        ]
+        stats = compute_stats(events, [], 5)
+        self.assertEqual(stats["num_blockers_resolved"], 1)
+
     def test_num_steps_from_trajectory_length(self):
         steps = [
             {"thought": "", "act": "ls", "obs": ""},

@@ -313,7 +313,7 @@ function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
   let numQuestions         = 0;
   let numQuestionsApproval = 0;
   let numQuestionsFullInfo = 0;
-  let numBlockersResolved  = 0;
+  const resolvedBlockerIds = new Set();
   const requestStatusById  = new Map();
 
   // Exclude failed ask_human invocations (status="error") from question counts.
@@ -340,7 +340,7 @@ function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
     if (ev.type === "human_input_result") {
       const bid = ev.result?.blocker_id;
       if (bid && bid !== UNKNOWN_BLOCKER_ID && ev.result?.status === "answered") {
-        numBlockersResolved++;
+        resolvedBlockerIds.add(bid);
       }
     }
   }
@@ -351,8 +351,9 @@ function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
     num_questions_approval:  numQuestionsApproval,
     num_total_questions:     numQuestions + numQuestionsApproval,
     num_questions_full_info: numQuestionsFullInfo,
-    num_blockers_resolved:   numBlockersResolved,
+    num_blockers_resolved:   resolvedBlockerIds.size,
     num_blockers_total:      numBlockersTotal,
+    stats_schema_version:    2,
   };
 }
 
