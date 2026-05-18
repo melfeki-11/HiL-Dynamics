@@ -137,7 +137,7 @@ function isCustomAskHumanTool(toolName) {
   return String(toolName || "") === "mcp__human_input__ask_human";
 }
 
-function extractReadPathsForSkill9(toolName, input) {
+function extractReadPaths(toolName, input) {
   const name = String(toolName || "");
   const paths = [];
   if (name === "Read" || name === "Glob" || name === "LS") {
@@ -872,7 +872,7 @@ async function main() {
               });
               return { behavior: "deny", toolUseID: permission.toolUseID, message: `Denied: ${decision.reason}`, decisionClassification: "user_temporary" };
             }
-            for (const fp of extractReadPathsForSkill9(_toolName, _input)) {
+            for (const fp of extractReadPaths(_toolName, _input)) {
               askLimitTracker?.noteFileRead?.(fp);
             }
             return { behavior: "allow", updatedInput: _input || {}, toolUseID: permission.toolUseID, decisionClassification: "user_temporary" };

@@ -2,7 +2,7 @@
  * ask_human MCP bridge — used by Codex (and optionally OpenCode) as a subprocess.
  *
  * Minimal stdio JSON-RPC 2.0 MCP server that exposes a single `ask_human`
- * tool. Each call is proxied to ask_human_sidecar.mjs unless Skill8 guards
+ * tool. Each call is proxied to ask_human_sidecar.mjs unless ask-limit guards
  * (MAX_ASKS_PER_PASS / IRRELEVANT_COOLDOWN) short-circuit locally.
  *
  * OpenCode starts this process as a local MCP subprocess.  Environment vars

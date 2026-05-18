@@ -80,7 +80,7 @@ export const CLAUDE_MD_HINT = /^(1|true|yes|on)$/i.test(
 export const RICH_ASK_TOOL_DESC = /^(1|true|yes|on)$/i.test(
   String(process.env.RICH_ASK_TOOL_DESC || ""),
 );
-// Skill8 — soften the “five categories mandated” wording (precision; env-gated).
+// Tweak E — soften the “five categories mandated” wording (precision; env-gated).
 export const SOFTEN_CATEGORY_MANDATE = /^(1|true|yes|on)$/i.test(
   String(process.env.SOFTEN_CATEGORY_MANDATE || ""),
 );
@@ -237,7 +237,7 @@ export const RICH_ASK_HUMAN_TOOL_DESCRIPTION_STRICT = [
 
 const RICH_ASK_SOFT_SUFFIX = [
   "",
-  "Precision rules (Skill8):",
+  "Precision rules:",
   "- An irrelevant question wastes your precision budget.",
   "- If answering your question only requires reading one more file/test, do that instead of asking.",
   "- Ask only where the codebase/spec truly leaves ambiguity after you have read neighboring context.",
@@ -258,7 +258,7 @@ export const RICH_ASK_HUMAN_TOOL_DESCRIPTION_SOFT =
     "\n" + RICH_ASK_COVERAGE_SOFT,
   ) + RICH_ASK_SOFT_SUFFIX;
 
-/** Back-compat: Skill7 wording when SOFTEN_CATEGORY_MANDATE is off */
+/** Back-compat wording when SOFTEN_CATEGORY_MANDATE is off */
 export const RICH_ASK_HUMAN_TOOL_DESCRIPTION = RICH_ASK_HUMAN_TOOL_DESCRIPTION_STRICT;
 
 /**
