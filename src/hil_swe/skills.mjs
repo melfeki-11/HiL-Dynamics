@@ -13,13 +13,35 @@ export const SKILL_TOOL_REF = {
 };
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const SHARED_SKILL_TEMPLATE_PATH = path.join(__dirname, "templates", "ask_human_skill.md");
-const SHARED_SKILL_TEMPLATE = readFileSync(SHARED_SKILL_TEMPLATE_PATH, "utf8");
+const TEMPLATES_DIR = path.join(__dirname, "templates");
+const TEMPLATE_VERSION_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const SKILL_TEMPLATE_VERSION = String(process.env.WITH_SKILL || "").trim();
 
 function renderSharedSkill(toolName) {
-  // Keep one canonical SKILL.md body across all SDKs/harnesses.
+  if (!SKILL_TEMPLATE_VERSION) {
+    throw new Error("WITH_SKILL must be set to a template version when skill installation is enabled.");
+  }
+  if (!TEMPLATE_VERSION_RE.test(SKILL_TEMPLATE_VERSION)) {
+    throw new Error(
+      `Invalid WITH_SKILL=${JSON.stringify(SKILL_TEMPLATE_VERSION)}. ` +
+      "Use only letters, digits, dot, underscore, or hyphen.",
+    );
+  }
+  const fileName = `${SKILL_TEMPLATE_VERSION}.md`;
+  const templatePath = path.join(TEMPLATES_DIR, fileName);
+  if (!path.isAbsolute(templatePath)) {
+    throw new Error(`Resolved skill template path is invalid: ${templatePath}`);
+  }
+  let template;
+  try {
+    template = readFileSync(templatePath, "utf8");
+  } catch {
+    throw new Error(
+      `WITH_SKILL=${JSON.stringify(SKILL_TEMPLATE_VERSION)} requires ${fileName} in ${TEMPLATES_DIR}.`,
+    );
+  }
   void toolName;
-  return SHARED_SKILL_TEMPLATE;
+  return template;
 }
 
 async function installSkillAt(baseDir, toolName) {

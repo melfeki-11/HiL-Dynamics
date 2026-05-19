@@ -415,11 +415,14 @@ class TestBuildInstruction(unittest.TestCase):
 
     def test_optional_guidance_references_tool_name_when_enabled(self):
         old = run_adk_module.ASK_HUMAN_GUIDANCE_ENABLED
+        old_version = run_adk_module.ASK_HUMAN_GUIDANCE_TEMPLATE_VERSION
         run_adk_module.ASK_HUMAN_GUIDANCE_ENABLED = True
+        run_adk_module.ASK_HUMAN_GUIDANCE_TEMPLATE_VERSION = "ask_human_guidance"
         try:
             instr = _build_instruction("ask_human")
         finally:
             run_adk_module.ASK_HUMAN_GUIDANCE_ENABLED = old
+            run_adk_module.ASK_HUMAN_GUIDANCE_TEMPLATE_VERSION = old_version
         self.assertIn("YOU _MUST_ ASK QUESTIONS", instr)
 
 

@@ -39,6 +39,19 @@ from typing import Any
 
 ASK_METRIC_MODES = {"ask_human"}
 
+
+def _template_state(
+    *,
+    explicit_value: Any,
+    enabled_value: Any,
+) -> str:
+    """Normalize template state for grouping keys."""
+    v = str(explicit_value or "").strip()
+    if v:
+        return v
+    enabled = bool(enabled_value)
+    return "__legacy_enabled__" if enabled else "__none__"
+
 ROOT = Path(__file__).resolve().parents[1]
 RUNS_DIR = ROOT / "runs"
 DATA_DIR = ROOT / "data" / "hil_bench_swe"
@@ -445,8 +458,14 @@ def load_pass_rows(run_dir: Path) -> list[dict[str, Any]]:
                     "agent": agent,
                     "model": model,
                     "with_custom_tool": bool(attempt.get("with_custom_tool", False)),
-                    "with_skill": bool(attempt.get("skill_enabled", False)),
-                    "with_ask_guidance": bool(attempt.get("guidance_enabled", False)),
+                    "with_skill": _template_state(
+                        explicit_value=attempt.get("with_skill"),
+                        enabled_value=attempt.get("skill_enabled", False),
+                    ),
+                    "with_ask_guidance": _template_state(
+                        explicit_value=attempt.get("with_ask_guidance"),
+                        enabled_value=attempt.get("guidance_enabled", False),
+                    ),
                     "pass_index": pass_idx,
                     "status": "infra_error" if infra_error else ("resolved" if resolved else "unresolved"),
                     "resolved": resolved,
@@ -513,8 +532,14 @@ def summarize(
             row["agent"],
             row["model"],
             bool(row.get("with_custom_tool", False)),
-            bool(row.get("with_skill", False)),
-            bool(row.get("with_ask_guidance", False)),
+            _template_state(
+                explicit_value=row.get("with_skill"),
+                enabled_value=row.get("with_skill", False),
+            ),
+            _template_state(
+                explicit_value=row.get("with_ask_guidance"),
+                enabled_value=row.get("with_ask_guidance", False),
+            ),
         )
         grouped[key].append(row)
 
@@ -524,7 +549,7 @@ def summarize(
     #   - Skip passes whose trajectory needs rerun (hiccup obs → transient judge failure)
     #   - Apply include_partial: if False (canonical default), only include attempts
     #     that completed all expected_passes valid passes.
-    attempt_data: dict[tuple[str, str, str, bool, bool, bool], list[list[dict]]] = defaultdict(list)
+    attempt_data: dict[tuple[str, str, str, bool, str, str], list[list[dict]]] = defaultdict(list)
     # key = (mode, agent, model, with_custom_tool, with_skill, with_ask_guidance)
     for (uid, mode, agent, model, with_custom_tool, with_skill, with_ask_guidance), pass_rows in grouped.items():
         valid_passes = []
@@ -683,8 +708,8 @@ def summarize(
         key = (
             f"{mode}/{agent}/{model}"
             f"/custom_tool={int(with_custom_tool)}"
-            f"/skill={int(with_skill)}"
-            f"/ask_guidance={int(with_ask_guidance)}"
+            f"/skill={with_skill}"
+            f"/ask_guidance={with_ask_guidance}"
         )
         result[key] = metrics
 
