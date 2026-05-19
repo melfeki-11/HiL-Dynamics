@@ -43,7 +43,7 @@ CODEX_REASONING_EFFORT="xhigh"
 OPENCODE_MODEL="fireworks_ai/glm-5p1"
 ASK_HUMAN_MODEL="llmengine/llama-3-3-70b-instruct"
 ATTEMPT_TIMEOUT_MS="${HARNESS_ATTEMPT_TIMEOUT_MS:-1800000}"
-MAX_TURNS="${HARNESS_MAX_TURNS:-0}"
+MAX_STEPS="${HARNESS_MAX_STEPS:-0}"
 EVAL_WORKERS="${SWEBENCH_EVAL_WORKERS:-}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 PREPARED_DIR="data/hil_bench_swe_first${NUM_SAMPLES}"
@@ -71,7 +71,7 @@ echo "  opencode model: ${OPENCODE_MODEL}"
 echo "  ask_human judge model: ${ASK_HUMAN_MODEL}"
 echo "  clarification profile: ${CLARIFICATION_PROFILE}"
 echo "  attempt timeout ms: ${ATTEMPT_TIMEOUT_MS}"
-echo "  max turns: ${MAX_TURNS}"
+echo "  max steps: ${MAX_STEPS}"
 
 mkdir -p "${RUN_DIR}/preflight"
 
@@ -127,7 +127,7 @@ PASSK_ARGS=(
   --codex-transport app-server
   --codex-approval-policy on-request
   --attempt-timeout-ms "$ATTEMPT_TIMEOUT_MS"
-  --max-turns "$MAX_TURNS"
+  --max-steps "$MAX_STEPS"
   --concurrency 2
 )
 if [[ -n "$EVAL_WORKERS" ]]; then

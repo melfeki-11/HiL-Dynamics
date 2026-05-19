@@ -6,7 +6,7 @@
  * (item/tool/requestUserInput) can be intercepted and routed through the same
  * LLM-backed human simulator used by run_claude.mjs.  This means:
  *
- *   neutral/skill modes : item/tool/requestUserInput → ask_human_sidecar → LLM judge
+ *   ask_human mode : item/tool/requestUserInput → ask_human_sidecar → LLM judge
  *                    (identical to claude-code AskUserQuestion routing)
  *   full_info mode : item/tool/requestUserInput → answers filled with UNKNOWN_RESOLUTION
  *                    ("irrelevant question") — mirrors claude-code full_info behaviour
@@ -22,7 +22,7 @@
  *   LITELLM_API_KEY | LITELLM_PROXY_API_KEY | ANTHROPIC_AUTH_TOKEN   (API key)
  *
  * Optional env vars:
- *   MODE               neutral (default) | skill | full_info | no_tool
+ *   MODE               ask_human (default) | full_info
  *   PASS_INDEX         1-based pass number (default: 1)
  *   RUN_ID             run identifier string
  *   CODEX_MODEL        model slug forwarded to the app-server (default: gpt-5.5)
@@ -60,8 +60,8 @@ import {
 import { httpGetJson, sidecarAsk, startAskHumanSidecar, stopSidecar } from "./ask_human_sidecar_client.mjs";
 
 // Codex's native question-asking tool is requestUserInput. Guidance is an
-// explicit diagnostic flag, not part of neutral/skill arms by default.
-const ASK_HUMAN_GUIDANCE = buildAskHumanGuidance("requestUserInput");
+// explicit diagnostic flag, not part of ask_human by default.
+const ASK_HUMAN_GUIDANCE = buildAskHumanGuidance("requestUserInput and/or ask_human");
 
 // ── Configuration from env ──────────────────────────────────────────────────
 
@@ -84,11 +84,11 @@ if (CODEX_REASONING_EFFORT && !VALID_REASONING_EFFORTS.has(CODEX_REASONING_EFFOR
     `Must be one of: ${[...VALID_REASONING_EFFORTS].join(", ")}.`,
   );
 }
-// MAX_TURNS: max completed items (commands + file edits + tool calls) before we interrupt
+// MAX_STEPS: max completed items (commands + file edits + tool calls) before we interrupt
 // the turn via turn/interrupt.  0 or unset = no limit (wall-clock TIMEOUT_MS still applies).
 // The codex app-server has no native turn limit param, so we implement it by counting
 // ItemCompletedNotification events and calling turn/interrupt when the threshold is reached.
-const MAX_TURNS   = Number(process.env.MAX_TURNS || "0");
+const MAX_STEPS   = Number(process.env.MAX_STEPS || "0");
 const __dirname   = path.dirname(fileURLToPath(import.meta.url));
 const BRIDGE_SCRIPT  = path.join(__dirname, "ask_human_mcp_bridge.mjs");
 
@@ -261,7 +261,7 @@ class JsonRpcProcess {
  * Handle item/tool/requestUserInput — Codex's native question-asking mechanism.
  * Mirrors handleRequestUserInput() in app_server.mjs.
  *
- * neutral/skill modes: route each question through the shared ask_human sidecar.
+ * ask_human mode: route each question through the shared ask_human sidecar.
  * full_info mode : fill answers with UNKNOWN_RESOLUTION ("irrelevant question") — all info
  *                  is already in the prompt so the agent should not need to ask.
  */
@@ -277,7 +277,7 @@ async function handleRequestUserInput({ params, sidecarUrl, pushEvent }) {
     const prompt = question.question || "Clarification request";
 
     if (sidecarUrl) {
-      // neutral/skill modes: route to the LLM-backed human simulator
+      // ask_human mode: route to the LLM-backed human simulator
       const result = await sidecarAsk({
         sidecarUrl,
         question: prompt,
@@ -334,7 +334,7 @@ function parseResolutionJson(resolution) {
 }
 
 async function handleElicitationRequest({ params, sidecarUrl, pushEvent }) {
-  // In neutral/skill modes, route elicitation prompts through the same human router.
+  // In ask_human mode, route elicitation prompts through the same human router.
   // In full_info mode, still accept with canonical unknown resolution to avoid
   // hard MCP-call rejection loops.
   if (!sidecarUrl) {
@@ -843,21 +843,21 @@ async function runCodexAppServer({ prompt, env, uid, sidecarUrl, pushEvent, abor
         }
 
         // Count completed items (commands + file edits + MCP tool calls).
-        // When MAX_TURNS is set and the threshold is reached, interrupt the turn.
+        // When MAX_STEPS is set and the threshold is reached, interrupt the turn.
         // This is the codex equivalent of Claude SDK's maxTurns — the app-server
         // protocol has no native turn/step limit parameter.
         if (msg.method === "item/completed" &&
-            MAX_TURNS > 0 &&
+            MAX_STEPS > 0 &&
             !settled &&
             currentTurnId &&
             threadId) {
           itemsDone++;
-          if (itemsDone >= MAX_TURNS) {
+          if (itemsDone >= MAX_STEPS) {
             pushEvent({
-              type: "max_turns_reached",
+              type: "max_steps_reached",
               timestamp: new Date().toISOString(),
               items_done: itemsDone,
-              max_turns: MAX_TURNS,
+              max_steps: MAX_STEPS,
             });
             // Fire-and-forget: don't await so we don't block the notification handler
             rpc.request("turn/interrupt", { threadId, turnId: currentTurnId }).catch(() => {});
@@ -1011,7 +1011,7 @@ async function main() {
     pass_index: PASS_INDEX,
     harness:    "codex",
     model:      CODEX_MODEL,
-    max_turns:  MAX_TURNS > 0 ? MAX_TURNS : null,  // null = no limit (timeout only)
+    max_steps:  MAX_STEPS > 0 ? MAX_STEPS : null,  // null = no limit (timeout only)
     timeout_ms: TIMEOUT_MS,
     workspace:  WORKSPACE,
     task_dir:   TASK_DIR,

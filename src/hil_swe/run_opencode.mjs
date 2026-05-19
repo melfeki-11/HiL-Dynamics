@@ -15,10 +15,10 @@
  * Optional env vars:
  *   OPENCODE_MODEL          model slug (default: fireworks_ai/glm-5p1)
  *   OPENCODE_REASONING_EFFORT reasoning effort hint (low|medium|high|xhigh|max)
- *   MODE                    neutral (default) | skill | full_info | no_tool
+ *   MODE                    ask_human (default) | full_info
  *   PASS_INDEX              1-based pass number (default: 1)
  *   RUN_ID                  run identifier string
- *   MAX_TURNS               max agent steps (default: 0 = unbounded)
+ *   MAX_STEPS               max agent steps (default: 0 = unbounded)
  *   ATTEMPT_TIMEOUT_MS      hard timeout in ms (default: 10800000 = 3 h)
  *   OPENCODE_STARTUP_TIMEOUT_MS
  *                           startup watchdog in ms before first stdout line
@@ -32,10 +32,9 @@
  *   ANTHROPIC_AUTH_TOKEN    fallback API key
  *
  * ask_human tool behaviour:
- *   neutral mode    — MCP ask_human tool registered; questions routed through
- *                     ask_human_sidecar → human_input.mjs.
- *   skill mode      — same as neutral plus an ask-human SKILL.md.
- *   full_info mode  — NO MCP ask_human tool, NO ask-human guidance in system prompt,
+ *   ask_human mode — MCP ask_human tool registered; questions routed through
+ *                    ask_human_sidecar → human_input.mjs.
+ *   full_info mode — NO MCP ask_human tool, NO ask-human guidance in system prompt,
  *                     and NO ask-human skill on disk.
  *
  * Tool approvals:
@@ -72,7 +71,7 @@ import {
 
 // ── Configuration from env ────────────────────────────────────────────────────
 
-const MAX_TURNS       = Number(process.env.MAX_TURNS || "0");
+const MAX_STEPS       = Number(process.env.MAX_STEPS || "0");
 const OPENCODE_MODEL  = process.env.OPENCODE_MODEL || "fireworks_ai/glm-5p1";
 const OPENCODE_REASONING_EFFORT = (
   process.env.OPENCODE_REASONING_EFFORT ||
@@ -583,7 +582,7 @@ async function main() {
       }));
     }
   } catch {
-    // Registry absent → no blockers (still valid for neutral/skill modes)
+    // Registry absent → no blockers (still valid for ask_human mode)
   }
 
   // 3. Build prompt and system instruction
@@ -603,7 +602,7 @@ async function main() {
     pass_index: PASS_INDEX,
     harness:    "opencode",
     model:      OPENCODE_MODEL,
-    max_turns:  MAX_TURNS > 0 ? MAX_TURNS : null,
+    max_steps:  MAX_STEPS > 0 ? MAX_STEPS : null,
     timeout_ms: TIMEOUT_MS,
     workspace:  WORKSPACE,
     task_dir:   TASK_DIR,
@@ -695,8 +694,8 @@ async function main() {
   //              prompt=unset + --dir /app → works.  The system instruction is instead
   //              prepended to the user message (stdin), which the model sees first and
   //              treats as authoritative instructions before the task description.
-  //    • "agent.build.steps" is set only when MAX_TURNS > 0.
-  //    • "mcp.ask_human" is present only in neutral/skill mode.
+  //    • "agent.build.steps" is set only when MAX_STEPS > 0.
+  //    • "mcp.ask_human" is present only in ask_human mode.
   //    • "autoupdate: false" prevents the agent from downloading updates mid-run.
   //    • "environment" (not "env") is the correct key in OpenCode's MCP local config schema.
   //    • Gemini routes keep the configured reasoning effort in metadata, but do
@@ -732,7 +731,7 @@ async function main() {
       build: {
         model:  `litellm/${_modelId}`,
         mode:   "primary",
-        ...(MAX_TURNS > 0 ? { steps: MAX_TURNS } : {}),
+        ...(MAX_STEPS > 0 ? { steps: MAX_STEPS } : {}),
         permission: {
           // SDK/server mode does not use --dangerously-skip-permissions, so allow
           // edit/bash directly inside the container sandbox (same trust boundary

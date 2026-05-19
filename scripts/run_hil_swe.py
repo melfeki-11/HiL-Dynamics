@@ -75,7 +75,7 @@ Environment variables (read from host env, forwarded into each container):
     OPENCODE_STARTUP_TIMEOUT_MS startup watchdog before first OpenCode stdout event (default: 300000)
     LITELLM_CALL_TIMEOUT_MS     per-LiteLLM-call timeout in ms (default: 1200000 / 20 min)
     STEP_LITELLM_TRIES          retries per agent step/call budget (default: 3)
-    MAX_TURNS                   max agent turns/items/calls where supported (default: 0 = unbounded)
+    MAX_STEPS                   max agent steps/items/calls where supported (default: 0 = unbounded)
     ATTEMPT_TIMEOUT_MS          per-attempt timeout in ms (default: 10800000)
     PERMISSION_MODE             claude permissionMode (default: acceptEdits)
 """
@@ -305,7 +305,7 @@ FORWARDED_ENV_KEYS = [
     "IRRELEVANT_FIRST_THROTTLE",
     "READ_BEFORE_ASK",
     "READ_BEFORE_ASK_MIN_FILES",
-    "MAX_TURNS",
+    "MAX_STEPS",
     "ATTEMPT_TIMEOUT_MS",
     "PERMISSION_MODE",
     # AWS credentials (for Bedrock / Secrets Manager, if used)
@@ -902,9 +902,8 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--max-turns", type=int, default=None,
-        help="Max agent turns/items/calls per attempt where supported (default: 0 = unbounded). "
-             "Equivalent to passing --env MAX_TURNS=N.",
+        "--max-steps", type=int, default=None,
+        help="Max agent steps/items/calls per attempt where supported (default: 0 = unbounded).",
     )
     parser.add_argument(
         "--max-reasoning",
@@ -1002,9 +1001,12 @@ def main() -> None:
             else:
                 effective_env[k] = v
 
-    # 4. --max-turns shorthand (equivalent to --env MAX_TURNS=N)
-    if args.max_turns is not None:
-        effective_env["MAX_TURNS"] = str(args.max_turns)
+    # 4. --max-steps shorthand (equivalent to --env MAX_STEPS=N)
+    if args.max_steps is not None and args.max_steps < 0:
+        print("ERROR: --max-steps must be >= 0.", file=sys.stderr)
+        sys.exit(1)
+    if args.max_steps is not None:
+        effective_env["MAX_STEPS"] = str(args.max_steps)
 
     # 4a. Ensure selected SDK always has an explicit model env value.
     # This guarantees container-side runners use the same default model policy

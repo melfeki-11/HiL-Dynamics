@@ -6,9 +6,9 @@ usage() {
 Usage:
   scripts/run_hil_swe_modes_first_n.sh <num_samples>
 
-Runs the deterministic HiL-Bench SWE first-N fixture in two legacy modes:
+Runs the deterministic HiL-Bench SWE first-N fixture in two modes:
   - full_info: blocker resolutions are included upfront; no ask_human KB is wired
-  - neutral: blockers stay hidden and the ask_human/request_user_input router is wired
+  - ask_human: blockers stay hidden and the ask_human/request_user_input router is wired
 
 The script uses the local autonomy_calibration data/vendor defaults unless
 AUTONOMY_CALIBRATION_ROOT or SWEBENCH_PRO_VENDOR_DIR override them.
@@ -41,13 +41,13 @@ CODEX_REASONING_EFFORT="xhigh"
 OPENCODE_MODEL="fireworks_ai/glm-5p1"
 ASK_HUMAN_MODEL="llmengine/llama-3-3-70b-instruct"
 ATTEMPT_TIMEOUT_MS="${HARNESS_ATTEMPT_TIMEOUT_MS:-1800000}"
-MAX_TURNS="${HARNESS_MAX_TURNS:-0}"
+MAX_STEPS="${HARNESS_MAX_STEPS:-0}"
 GENERATE_CONCURRENCY="${HARNESS_CONCURRENCY:-2}"
 EVAL_WORKERS="${SWEBENCH_EVAL_WORKERS:-}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 PREPARED_DIR="data/hil_bench_swe_first${NUM_SAMPLES}"
 FULL_INFO_RUN_ID="hil-swe-first${NUM_SAMPLES}-all-full-info-${STAMP}"
-ASK_HUMAN_RUN_ID="hil-swe-first${NUM_SAMPLES}-all-neutral-${STAMP}"
+ASK_HUMAN_RUN_ID="hil-swe-first${NUM_SAMPLES}-all-ask-human-${STAMP}"
 PREFLIGHT_DIR="evals/hil-swe-first${NUM_SAMPLES}-modes-preflight-${STAMP}"
 ASK_HUMAN_CHECK_DIR="${PREPARED_DIR}/ask_human_check_${STAMP}"
 
@@ -72,7 +72,7 @@ echo "  opencode model: ${OPENCODE_MODEL}"
 echo "  ask_human judge model: ${ASK_HUMAN_MODEL}"
 echo "  clarification profile: ${CLARIFICATION_PROFILE}"
 echo "  attempt timeout ms: ${ATTEMPT_TIMEOUT_MS}"
-echo "  max turns: ${MAX_TURNS}"
+echo "  max steps: ${MAX_STEPS}"
 echo "  generation concurrency: ${GENERATE_CONCURRENCY}"
 
 mkdir -p "$PREFLIGHT_DIR"
@@ -121,7 +121,7 @@ COMMON_PASSK_ARGS=(
   --opencode-model "$OPENCODE_MODEL"
   --ask-human-model "$ASK_HUMAN_MODEL"
   --attempt-timeout-ms "$ATTEMPT_TIMEOUT_MS"
-  --max-turns "$MAX_TURNS"
+  --max-steps "$MAX_STEPS"
   --concurrency "$GENERATE_CONCURRENCY"
   --codex-transport app-server
   --codex-approval-policy on-request

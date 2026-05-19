@@ -18,7 +18,7 @@ Gemini uses `high` because that is the highest supported reasoning effort for th
 
 ## Budgets
 
-Budgets are unbounded by default (`MAX_TURNS=0`). The harnesses expose different native concepts of a turn, item, model call, and tool call, so this branch avoids forcing a misleading common cap. Fairness is audited by logging observed:
+Budgets are unbounded by default (`MAX_STEPS=0`). The harnesses expose different native concepts of a turn, item, model call, and tool call, so this branch avoids forcing a misleading common cap. Fairness is audited by logging observed:
 
 - wall-clock duration
 - LLM calls

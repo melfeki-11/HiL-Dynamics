@@ -24,6 +24,15 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT / "src" / "hil_swe") not in sys.path:
     sys.path.insert(0, str(_ROOT / "src" / "hil_swe"))
 
+
+def _any_template_basename(ext: str) -> str:
+    template_dir = _ROOT / "src" / "hil_swe" / "templates"
+    matches = sorted(template_dir.glob(f"*.{ext}"))
+    if not matches:
+        raise RuntimeError(f"No .{ext} templates found in {template_dir}")
+    return matches[0].stem
+
+
 # Suppress ADK warning before import
 os.environ.setdefault("ADK_SUPPRESS_GEMINI_LITELLM_WARNINGS", "true")
 
@@ -416,14 +425,19 @@ class TestBuildInstruction(unittest.TestCase):
     def test_optional_guidance_references_tool_name_when_enabled(self):
         old = run_adk_module.ASK_HUMAN_GUIDANCE_ENABLED
         old_version = run_adk_module.ASK_HUMAN_GUIDANCE_TEMPLATE_VERSION
+        guidance_version = _any_template_basename("txt")
+        guidance_text = (
+            _ROOT / "src" / "hil_swe" / "templates" / f"{guidance_version}.txt"
+        ).read_text(encoding="utf-8")
+        expected_guidance = guidance_text.replace("{{TOOL_NAME}}", "ask_human").strip()
         run_adk_module.ASK_HUMAN_GUIDANCE_ENABLED = True
-        run_adk_module.ASK_HUMAN_GUIDANCE_TEMPLATE_VERSION = "ask_human_guidance"
+        run_adk_module.ASK_HUMAN_GUIDANCE_TEMPLATE_VERSION = guidance_version
         try:
             instr = _build_instruction("ask_human")
         finally:
             run_adk_module.ASK_HUMAN_GUIDANCE_ENABLED = old
             run_adk_module.ASK_HUMAN_GUIDANCE_TEMPLATE_VERSION = old_version
-        self.assertIn("YOU _MUST_ ASK QUESTIONS", instr)
+        self.assertIn(expected_guidance, instr)
 
 
 # ── 5. Reasoning routing ─────────────────────────────────────────────────────

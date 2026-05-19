@@ -81,7 +81,7 @@ RUN_ID     = os.environ.get("RUN_ID",     "swe-run")
 TIMEOUT_MS = int(os.environ.get("ATTEMPT_TIMEOUT_MS", str(3 * 3_600_000)))
 LITELLM_CALL_TIMEOUT_S = float(os.environ.get("LITELLM_CALL_TIMEOUT_MS", str(20 * 60 * 1000))) / 1000.0
 STEP_LITELLM_TRIES = int(os.environ.get("STEP_LITELLM_TRIES", "3"))
-MAX_TURNS  = int(os.environ.get("MAX_TURNS", "0"))
+MAX_STEPS  = int(os.environ.get("MAX_STEPS", "0"))
 ADK_MODEL  = os.environ.get("ADK_MODEL",  "gemini/gemini-3.1-pro")
 ADK_REASONING_EFFORT = (os.environ.get("ADK_REASONING_EFFORT", "") or "").strip().lower()
 
@@ -179,7 +179,7 @@ def _shared_skill_template(version: str) -> str:
 
 
 def _render_shared_skill(tool_name: str) -> str:
-    return _shared_skill_template(SKILL_TEMPLATE_VERSION).replace("{{TOOL_NAME}}", str(tool_name or ""))
+    return re.sub(r"\{\{\s*TOOL_NAME\s*\}\}", str(tool_name or ""), _shared_skill_template(SKILL_TEMPLATE_VERSION))
 
 
 def _install_workspace_skill_for_discovery(workspace: str, tool_name: str) -> Path:
@@ -335,7 +335,11 @@ def _ask_human_guidance_template(version: str) -> str:
 
 
 def _build_ask_human_guidance(tool_name: str) -> str:
-    return _ask_human_guidance_template(ASK_HUMAN_GUIDANCE_TEMPLATE_VERSION).replace("{{TOOL_NAME}}", str(tool_name or ""))
+    return re.sub(
+        r"\{\{\s*TOOL_NAME\s*\}\}",
+        str(tool_name or ""),
+        _ask_human_guidance_template(ASK_HUMAN_GUIDANCE_TEMPLATE_VERSION),
+    )
 
 
 def _build_instruction(mode: str) -> str:
@@ -758,7 +762,7 @@ async def main() -> None:
         "pass_index": PASS_INDEX,
         "harness":    "adk",
         "model":      ADK_MODEL,
-        "max_turns":  MAX_TURNS if MAX_TURNS > 0 else None,
+        "max_steps":  MAX_STEPS if MAX_STEPS > 0 else None,
         "timeout_ms": TIMEOUT_MS,
         "workspace":  WORKSPACE,
         "task_dir":   TASK_DIR,
@@ -794,7 +798,7 @@ async def main() -> None:
             })
             return
 
-    # per-run event log: human_input_* events from sidecar (neutral/skill modes)
+    # per-run event log: human_input_* events from sidecar (ask_human mode)
     all_events: list[dict] = []
     # ADK event stream (Event objects from runner.run_async)
     adk_events: list       = []
@@ -854,7 +858,7 @@ async def main() -> None:
             # the agent can retry on the next turn.
             return "can't answer (perhaps transient hiccup)"
 
-        # Append human_input_* events (neutral/skill modes) so compute_stats() can count them.
+        # Append human_input_* events (ask_human mode) so compute_stats() can count them.
         for ev in result.get("events", []):
             all_events.append(ev)
 
@@ -1047,7 +1051,7 @@ async def main() -> None:
     # stale state carried over from a failed attempt.  The sidecar (started in
     # step 5) is shared across all attempts; its event lists are cleared on retry.
     # Retries occur only on sdk_error (transient LLM / network failures); timeout
-    # and clean exits (complete / max_turns) exit the loop immediately.
+    # and clean exits (complete / max_steps) exit the loop immediately.
     MAX_RETRIES   = STEP_LITELLM_TRIES
     timed_out     = False
     sdk_error_msg: Optional[str] = None
@@ -1083,7 +1087,7 @@ async def main() -> None:
             app_name="trust_horizon_swe",
             user_id="swe_user",
         )
-        run_config = RunConfig(max_llm_calls=MAX_TURNS) if MAX_TURNS > 0 else RunConfig()
+        run_config = RunConfig(max_llm_calls=MAX_STEPS) if MAX_STEPS > 0 else RunConfig()
 
         # _run_agent closes over `runner`, `session`, `adk_events` (the module-level
         # list) by name — they are re-looked-up on each call, so reassigning those
@@ -1100,7 +1104,7 @@ async def main() -> None:
                     adk_events.append(event)
             except LlmCallsLimitExceededError:
                 # Expected: agent used all its turns.  Partial results are still valid.
-                stop_reason = "max_turns"
+                stop_reason = "max_steps"
             except asyncio.CancelledError:
                 # Raised when we cancel the task on timeout — handled below.
                 timed_out   = True

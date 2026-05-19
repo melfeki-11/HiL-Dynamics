@@ -26,7 +26,7 @@ function parseArgs(argv) {
     codexModel: process.env.CODEX_MODEL || DEFAULT_CODEX_MODEL,
     opencodeModel: process.env.OPENCODE_MODEL || DEFAULT_OPENCODE_MODEL,
     codexReasoningEffort: process.env.CODEX_MODEL_REASONING_EFFORT || DEFAULT_CODEX_REASONING_EFFORT,
-    maxTurns: Number(process.env.HARNESS_MAX_TURNS || 40),
+    maxSteps: Number(process.env.HARNESS_MAX_STEPS || 40),
     concurrency: undefined,
     evalWorkers: undefined,
     attemptTimeoutMs: Number(process.env.HARNESS_ATTEMPT_TIMEOUT_MS || 900000),
@@ -55,7 +55,7 @@ function parseArgs(argv) {
     else if (arg === "--codex-model") args.codexModel = argv[++i];
     else if (arg === "--opencode-model") args.opencodeModel = argv[++i];
     else if (arg === "--codex-reasoning-effort") args.codexReasoningEffort = argv[++i];
-    else if (arg === "--max-turns") args.maxTurns = Number(argv[++i]);
+    else if (arg === "--max-steps") args.maxSteps = Number(argv[++i]);
     else if (arg === "--concurrency") args.concurrency = Number(argv[++i]);
     else if (arg === "--eval-workers") args.evalWorkers = Number(argv[++i]);
     else if (arg === "--attempt-timeout-ms") args.attemptTimeoutMs = Number(argv[++i]);
@@ -78,8 +78,8 @@ function parseArgs(argv) {
   if (args.evalWorkers !== undefined && (!Number.isInteger(args.evalWorkers) || args.evalWorkers < 1)) {
     throw new Error("--eval-workers must be a positive integer");
   }
-  if (!Number.isInteger(args.maxTurns) || args.maxTurns < 1) {
-    throw new Error("--max-turns must be a positive integer");
+  if (!Number.isInteger(args.maxSteps) || args.maxSteps < 1) {
+    throw new Error("--max-steps must be a positive integer");
   }
   if (args.claudeThinking !== undefined && !["adaptive", "disabled"].includes(args.claudeThinking)) {
     throw new Error("--claude-thinking must be adaptive or disabled");
@@ -164,7 +164,7 @@ if (harnesses.includes("opencode")) {
   console.log(`  opencode model: ${args.opencodeModel}`);
 }
 console.log(`  attempt_timeout_ms: ${args.attemptTimeoutMs}`);
-console.log(`  max_turns: ${args.maxTurns}`);
+console.log(`  max_steps: ${args.maxSteps}`);
 if (args.humanKb) console.log(`  human_kb: ${args.humanKb}`);
 if (args.clarificationInstructionProfile) console.log(`  clarification_instruction_profile: ${args.clarificationInstructionProfile}`);
 
@@ -190,8 +190,8 @@ const generateArgs = [
   args.opencodeModel,
   "--model-reasoning-effort",
   args.codexReasoningEffort,
-  "--max-turns",
-  String(args.maxTurns),
+  "--max-steps",
+  String(args.maxSteps),
   "--attempt-timeout-ms",
   String(args.attemptTimeoutMs),
 ];
