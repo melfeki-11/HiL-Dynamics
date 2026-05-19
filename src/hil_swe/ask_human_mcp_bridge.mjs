@@ -32,6 +32,36 @@ if (!SIDECAR_URL) {
 
 const PROTOCOL_VERSION = "2024-11-05";
 
+function _readQuestion(value) {
+  if (value == null) return "";
+  if (typeof value === "string") {
+    if (value.length === 0) return "";
+    try {
+      const parsed = JSON.parse(value);
+      return _readQuestion(parsed);
+    } catch {
+      return value;
+    }
+  }
+  if (typeof value !== "object") return "";
+  if (typeof value.question === "string") {
+    return value.question;
+  }
+  if (value.arguments && typeof value.arguments === "object") {
+    const nested = _readQuestion(value.arguments);
+    if (nested) return nested;
+  }
+  if (value.input && typeof value.input === "object") {
+    const nested = _readQuestion(value.input);
+    if (nested) return nested;
+  }
+  if (value.ask_human && typeof value.ask_human === "object") {
+    const nested = _readQuestion(value.ask_human);
+    if (nested) return nested;
+  }
+  return "";
+}
+
 // ── JSON-RPC helpers ──────────────────────────────────────────────────────────
 
 function sendMsg(obj) {
@@ -114,7 +144,7 @@ rl.on("line", async (line) => {
       return;
     }
 
-    const question = String(args.question ?? "");
+    const question = _readQuestion(args);
 
     const sidecarResult = await sidecarAsk({
       sidecarUrl: SIDECAR_URL,

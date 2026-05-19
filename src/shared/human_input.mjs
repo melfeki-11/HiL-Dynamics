@@ -181,6 +181,7 @@ function promptPayloadFor(request, candidates) {
       instance_id: request.instance_id,
       request_type: request.request_type,
       native_event_type: request.native_event_type,
+      raw_question: String(request.raw_question ?? ""),
       normalized_question: normalizeQuestion(request.normalized_question),
       options: normalizeOptions(request.options),
     },
@@ -224,7 +225,7 @@ function userPrompt(payload) {
 AVAILABLE BLOCKERS:
 ${blockersSection || ""}
 
-AGENT MESSAGE: "${request.normalized_question}"
+AGENT MESSAGE: "${request.raw_question}"
 
 First, determine if the agent's message is valid. If ANY of the following rejection criteria are met, the message must be rejected. **Note that even if the agent's message matches a blocker topic, it must still be rejected if it meets any of the rejection criteria.**
 
@@ -284,13 +285,15 @@ Your response:`;
 
 export function createAskHumanRequest({ instanceId, requestType, nativeEventType, question, options = [], context = {} }) {
   if (!REQUEST_TYPES.has(requestType)) throw new Error(`Invalid human input request_type ${requestType}`);
-  const normalizedQuestion = normalizeQuestion(question);
+  const rawQuestion = String(question ?? "");
+  const normalizedQuestion = normalizeQuestion(rawQuestion);
   const normalizedOptions = normalizeOptions(options);
   const normalizedContext = sortStable(context || {});
   const requestId = sha256({
     instance_id: String(instanceId),
     request_type: requestType,
     native_event_type: String(nativeEventType || requestType),
+    raw_question: rawQuestion,
     normalized_question: normalizedQuestion,
     options: normalizedOptions,
     context: normalizedContext,
@@ -300,6 +303,7 @@ export function createAskHumanRequest({ instanceId, requestType, nativeEventType
     instance_id: String(instanceId),
     request_type: requestType,
     native_event_type: String(nativeEventType || requestType),
+    raw_question: rawQuestion,
     normalized_question: normalizedQuestion,
     options: normalizedOptions,
     context: normalizedContext,
@@ -334,6 +338,7 @@ export async function askHuman({
   const cacheKey = sha256({
     instance_id: request.instance_id,
     request_type: request.request_type,
+    raw_question: String(request.raw_question ?? ""),
     normalized_question: normalizeQuestion(request.normalized_question),
     options: normalizeOptions(request.options),
     kb_hash: kb.kbHash,
@@ -884,7 +889,7 @@ async function recordHumanInputRawEvent({ trajectoryFile, request, rawEvent, que
     request_id: request.request_id,
     request_type: request.request_type,
     native_event_type: request.native_event_type,
-    question: normalizeQuestion(question || request.normalized_question),
+    question: String(question ?? request.raw_question ?? ""),
     options: normalizeOptions(options),
     context,
     raw_event: rawEvent,

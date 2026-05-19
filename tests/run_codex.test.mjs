@@ -45,6 +45,33 @@ function mcpToolName(item) {
   return `${item?.server || ""}.${item?.tool || ""}`.replace(/^\./, "");
 }
 
+function readAskQuestionFromValue(value) {
+  if (value == null) return "";
+  if (typeof value === "string") {
+    if (!value.length) return "";
+    try {
+      return readAskQuestionFromValue(JSON.parse(value));
+    } catch {
+      return value;
+    }
+  }
+  if (typeof value !== "object") return "";
+  if (typeof value.question === "string") return value.question;
+  if (value.arguments && typeof value.arguments === "object") {
+    const nested = readAskQuestionFromValue(value.arguments);
+    if (nested !== "") return nested;
+  }
+  if (value.input && typeof value.input === "object") {
+    const nested = readAskQuestionFromValue(value.input);
+    if (nested !== "") return nested;
+  }
+  if (value.ask_human && typeof value.ask_human === "object") {
+    const nested = readAskQuestionFromValue(value.ask_human);
+    if (nested !== "") return nested;
+  }
+  return "";
+}
+
 function extractMcpResultText(result) {
   if (result == null) return "";
   if (typeof result === "string") return result;
@@ -68,7 +95,7 @@ function extractCodexTrajectorySteps(events) {
     if (ev.type === "codex_ask_question") {
       steps.push({
         thought: currentThought,
-        act:     cap(`ask_human ${ev.question}`, ACT_CAP),
+        act:     cap(`ask_human [native] ${ev.question}`, ACT_CAP),
         obs:     cap(String(ev.answer ?? ""), OBS_CAP),
       });
       currentThought = "";
@@ -78,7 +105,7 @@ function extractCodexTrajectorySteps(events) {
     if (ev.type === "ask_question_full_info_mode") {
       steps.push({
         thought: currentThought,
-        act:     cap(`ask_human ${ev.question || ""}`, ACT_CAP),
+        act:     cap(`ask_human [native] ${ev.question || ""}`, ACT_CAP),
         obs:     UNKNOWN_RESOLUTION,
       });
       currentThought = "";
@@ -164,9 +191,14 @@ function extractCodexTrajectorySteps(events) {
       if (itemId) emittedItemIds.add(itemId);
 
       const toolName = mcpToolName(item);
+      let act = `${toolName}: ${safeJson(item.arguments || {})}`;
+      if (toolName === "human_input.ask_human") {
+        const q = readAskQuestionFromValue(item?.arguments);
+        act = `ask_human [custom_tool] ${q}`;
+      }
       steps.push({
         thought: currentThought,
-        act:     cap(`${toolName}: ${safeJson(item.arguments || {})}`, ACT_CAP),
+        act:     cap(act, ACT_CAP),
         obs:     cap(extractMcpResultText(item.result ?? item.error), OBS_CAP),
       });
       currentThought = "";
@@ -391,6 +423,7 @@ test("extractCodexTrajectorySteps: mcp_tool_call structured result is serialized
   ];
   const steps = extractCodexTrajectorySteps(events);
   assert.equal(steps.length, 1);
+  assert.equal(steps[0].act, "ask_human [custom_tool] default timeout?");
   assert.equal(steps[0].obs, "11s");
   assert.ok(!steps[0].obs.includes("[object Object]"));
 });
@@ -739,7 +772,7 @@ test("extractCodexTrajectorySteps: ask_question_full_info_mode with empty questi
   ];
   const steps = extractCodexTrajectorySteps(events);
   assert.equal(steps.length, 1);
-  assert.equal(steps[0].act,  "ask_human ");   // empty question → just the prefix
+  assert.equal(steps[0].act,  "ask_human [native] ");   // empty question → just the prefix
   assert.equal(steps[0].obs,  UNKNOWN_RESOLUTION);
 });
 

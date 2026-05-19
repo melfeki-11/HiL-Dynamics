@@ -181,7 +181,7 @@ class TestExtractTrajectorySteps(unittest.TestCase):
         ]
         steps = extract_trajectory_steps(events)
         self.assertEqual(len(steps), 1)
-        self.assertTrue(steps[0]["act"].startswith("ask_human "))
+        self.assertTrue(steps[0]["act"].startswith("ask_human [custom_tool] "))
         self.assertIn("What is the expected output format?", steps[0]["act"])
         self.assertEqual(steps[0]["obs"], "JSON with a 'data' key")
 

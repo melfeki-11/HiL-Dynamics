@@ -20,7 +20,7 @@ export function fallbackSidecarResult({
   source = "sidecar_error_fallback",
 } = {}) {
   const requestId = `${String(nativeEventType || "ask_human").replace(/[^a-zA-Z0-9_]+/g, "_")}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-  const normalizedQuestion = String(question || "");
+  const normalizedQuestion = String(question ?? "");
   return {
     resolution: CANT_ANSWER,
     selected_labels: [CANT_ANSWER],

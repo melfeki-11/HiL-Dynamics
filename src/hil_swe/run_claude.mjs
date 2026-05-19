@@ -176,7 +176,7 @@ function createCustomAskHumanMcpServer({ sidecarUrl, pushEvent }) {
               fallbackSource: "claude_mcp_tool_error_fallback",
             });
             appendSidecarEvents(result, pushEvent);
-            const resolution = result.resolution || UNKNOWN_RESOLUTION;
+            const resolution = String(result.resolution ?? UNKNOWN_RESOLUTION);
             return { content: [{ type: "text", text: resolution }] };
           } catch (err) {
             // Best-effort tool failure handling: keep the agent loop alive and
@@ -237,7 +237,7 @@ async function answerClaudeAskUserQuestion({ sidecarUrl, input, permission, push
   const answersMap = {};
   let hitJudgeAny = false;
   for (const question of questions) {
-    const prompt = question?.question || "Clarification request";
+    const prompt = typeof question?.question === "string" ? question.question : "";
     let answerStr;
 
     const result = await sidecarAsk({
@@ -251,7 +251,7 @@ async function answerClaudeAskUserQuestion({ sidecarUrl, input, permission, push
       fallbackSource: "claude_native_ask_user_question_error_fallback",
     });
     appendSidecarEvents(result, pushEvent);
-    answerStr = result.resolution || UNKNOWN_RESOLUTION;
+    answerStr = String(result.resolution ?? UNKNOWN_RESOLUTION);
     hitJudgeAny = true;
 
     answerParts.push(`${prompt}\n${answerStr}`);
@@ -270,8 +270,14 @@ async function answerClaudeAskUserQuestion({ sidecarUrl, input, permission, push
 function formatAct(toolName, toolInput) {
   const name = String(toolName || "");
   if (!name) return "";
-  const q = toolInput?.question || toolInput?.questions?.[0]?.question || JSON.stringify(toolInput || {});
-  if (isCustomAskHumanTool(name)) return `ask_human [custom_mcp] ${q}`;
+  let q = "";
+  if (typeof toolInput?.question === "string") q = toolInput.question;
+  else if (typeof toolInput?.questions?.[0]?.question === "string") q = toolInput.questions[0].question;
+  else if (typeof toolInput === "string") q = toolInput;
+  else {
+    try { q = JSON.stringify(toolInput || {}); } catch { q = ""; }
+  }
+  if (isCustomAskHumanTool(name)) return `ask_human [custom_tool] ${q}`;
   if (isAskUserQuestionTool(name)) return `ask_human [native] ${q}`;
   if (/ask_human/i.test(name)) return `ask_human [other] ${q}`;
   try {
@@ -360,7 +366,6 @@ function extractTrajectorySteps(events) {
     // not create a duplicate trajectory step.
     if (event.type === "ask_question_full_info_mode") {
       const p = pending.get(event.tool_use_id);
-      const source = event.source || "unknown";
       const pairs = Array.isArray(event.qa_pairs) && event.qa_pairs.length
         ? event.qa_pairs
         : [{ question: event.question, answer: UNKNOWN_RESOLUTION }];
@@ -368,7 +373,7 @@ function extractTrajectorySteps(events) {
       for (const pair of pairs) {
         steps.push({
           thought: first ? (p?.thought ?? "") : "",
-          act:     cap(`ask_human [${source}] ${pair?.question || ""}`, ACT_CAP),
+          act:     cap(`ask_human [native] ${pair?.question || ""}`, ACT_CAP),
           obs:     cap(String(pair?.answer ?? UNKNOWN_RESOLUTION), OBS_CAP),
         });
         first = false;
@@ -437,7 +442,16 @@ function extractTrajectorySteps(events) {
   }
   pending.clear();
 
-  return steps;
+  return steps.map((step) => {
+    if (!step || typeof step !== "object") return step;
+    const act = String(step.act || "");
+    if (!act.trim().startsWith("ask_human")) return step;
+    const obs = String(step.obs ?? "").trim();
+    if (!obs || obs.startsWith("[no observation") || obs.startsWith("[error]")) {
+      return { ...step, obs: CANT_ANSWER };
+    }
+    return step;
+  });
 }
 
 /**
@@ -699,10 +713,15 @@ async function main() {
                 });
                 // Emit a structured event so extractTrajectorySteps records the
                 // ask/answer pair in trajectory.json with a clean obs.
-                const q = _input?.question || _input?.questions?.[0]?.question || JSON.stringify(_input || {});
+                let q = "";
+                if (typeof _input?.question === "string") q = _input.question;
+                else if (typeof _input?.questions?.[0]?.question === "string") q = _input.questions[0].question;
+                else {
+                  try { q = JSON.stringify(_input || {}); } catch { q = ""; }
+                }
                 const qaPairs = (Array.isArray(qs) ? qs : []).map((qq) => {
-                  const prompt = qq?.question || "Clarification request";
-                  return { question: prompt, answer: answers[prompt] || UNKNOWN_RESOLUTION };
+                  const prompt = typeof qq?.question === "string" ? qq.question : "";
+                  return { question: prompt, answer: String(answers[prompt] ?? UNKNOWN_RESOLUTION) };
                 });
                 pushEvent({
                   type:        "claude_ask_question",
@@ -737,11 +756,16 @@ async function main() {
               const answers = {};
               const qaPairs = [];
               for (const qq of questions) {
-                const promptText = qq?.question || "Clarification request";
+                const promptText = typeof qq?.question === "string" ? qq.question : "";
                 answers[promptText] = UNKNOWN_RESOLUTION;
                 qaPairs.push({ question: promptText, answer: UNKNOWN_RESOLUTION });
               }
-              const q = _input?.question || questions[0]?.question || JSON.stringify(_input || {});
+              let q = "";
+              if (typeof _input?.question === "string") q = _input.question;
+              else if (typeof questions[0]?.question === "string") q = questions[0].question;
+              else {
+                try { q = JSON.stringify(_input || {}); } catch { q = ""; }
+              }
               pushEvent({
                 type:        "ask_question_full_info_mode",
                 timestamp:   new Date().toISOString(),

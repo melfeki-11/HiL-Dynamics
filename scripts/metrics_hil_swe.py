@@ -182,6 +182,29 @@ def _trajectory_has_hiccup_obs(steps: list[dict]) -> bool:
     return count >= TRAJECTORY_RERUN_OCCURRENCE_THRESHOLD_STRICT
 
 
+def _trajectory_has_empty_ask_obs(steps: list[dict]) -> bool:
+    """True if >= STRICT (1) ask_human actions have an empty observation.
+
+    Empty ask observations indicate malformed/incomplete ask logging and should be
+    treated as invalid for both rerun selection and metrics inclusion.
+    """
+    count = 0
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        act = step.get("act", "")
+        if not isinstance(act, str):
+            continue
+        if not act.strip().startswith("ask_human"):
+            continue
+        obs = step.get("obs", "")
+        if not isinstance(obs, str) or not obs.strip():
+            count += 1
+            if count >= TRAJECTORY_RERUN_OCCURRENCE_THRESHOLD_STRICT:
+                return True
+    return False
+
+
 def _trajectory_has_env_died_obs(steps: list[dict]) -> bool:
     """True if the LAST step's observation contains 'Environment died unexpectedly'.
 
@@ -314,6 +337,7 @@ def _trajectory_needs_rerun(pass_dir: str) -> bool:
 
       trajectory_has_timeout_obs(trajectory)      — LENIENT threshold (3)
       trajectory_has_hiccup_obs(trajectory)       — STRICT threshold (1)
+      trajectory_has_empty_ask_obs(trajectory)    — STRICT threshold (1)
       trajectory_has_env_died_obs(trajectory)     — last step obs substring
       trajectory_has_unknown_error(trajectory)    — last step response substring
       trajectory_has_kb_query_error(trajectory)   — STRICT threshold (1), SQL-specific
@@ -326,6 +350,7 @@ def _trajectory_needs_rerun(pass_dir: str) -> bool:
     return (
         _trajectory_has_timeout_obs(steps)
         or _trajectory_has_hiccup_obs(steps)
+        or _trajectory_has_empty_ask_obs(steps)
         or _trajectory_has_env_died_obs(steps)
         or _trajectory_has_unknown_error(steps)
         or _trajectory_has_kb_query_error(steps)

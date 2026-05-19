@@ -67,6 +67,24 @@ test("ask_human defaults to the local LiteLLM selector model", () => {
   assert.equal(DEFAULT_ASK_HUMAN_MODEL, "llmengine/llama-3-3-70b-instruct");
 });
 
+test("createAskHumanRequest preserves raw question and hashes exact text", () => {
+  const withSpace = createAskHumanRequest({
+    instanceId: "smoke_prefix_format",
+    requestType: "clarification",
+    nativeEventType: "codex.item.tool.requestUserInput",
+    question: "  exact question  ",
+  });
+  const trimmed = createAskHumanRequest({
+    instanceId: "smoke_prefix_format",
+    requestType: "clarification",
+    nativeEventType: "codex.item.tool.requestUserInput",
+    question: "exact question",
+  });
+  assert.equal(withSpace.raw_question, "  exact question  ");
+  assert.equal(trimmed.raw_question, "exact question");
+  assert.notEqual(withSpace.request_id, trimmed.request_id);
+});
+
 test("unknown clarification returns exactly irrelevant question", async () => {
   const result = await askHuman({
     request: request({ question: "What color should the button be?" }),

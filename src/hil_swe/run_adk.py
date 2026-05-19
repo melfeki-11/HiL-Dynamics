@@ -132,6 +132,7 @@ OBS_CAP     = 8_000
 
 UNKNOWN_RESOLUTION = "irrelevant question"
 UNKNOWN_BLOCKER_ID = "UNKNOWN"
+CANT_ANSWER = "can't answer (perhaps transient hiccup)"
 ASK_HUMAN_REQUEST_TYPES = frozenset({"clarification", "elicitation"})
 
 AGENT_NAME = "swe_agent"  # must be a valid Python identifier
@@ -549,7 +550,7 @@ def extract_trajectory_steps(adk_events: list) -> list[dict]:
                 fc_args = fc.args or {}
                 if fc_name == "ask_human":
                     q   = str(fc_args.get("question", ""))
-                    act = _cap(f"ask_human {q}", ACT_CAP)
+                    act = _cap(f"ask_human [custom_tool] {q}", ACT_CAP)
                 elif fc_name == "bash":
                     cmd = str(fc_args.get("command", ""))
                     act = _cap(cmd, ACT_CAP)
@@ -592,7 +593,24 @@ def extract_trajectory_steps(adk_events: list) -> list[dict]:
                 "skill_used": bool(p.get("skill_used", False)),
             })
 
-    return steps
+    normalized: list[dict] = []
+    for step in steps:
+        if not isinstance(step, dict):
+            normalized.append(step)
+            continue
+        act = str(step.get("act", "") or "")
+        if not act.strip().startswith("ask_human"):
+            normalized.append(step)
+            continue
+        obs = str(step.get("obs", "") or "").strip()
+        if not obs or obs.startswith("[no observation") or obs.startswith("[error]"):
+            updated = dict(step)
+            updated["obs"] = CANT_ANSWER
+            normalized.append(updated)
+            continue
+        normalized.append(step)
+
+    return normalized
 
 
 # ── Stats computation ─────────────────────────────────────────────────────────

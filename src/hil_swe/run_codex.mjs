@@ -40,6 +40,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
   UNKNOWN_RESOLUTION,
+  CANT_ANSWER,
   UNKNOWN_BLOCKER_ID,
   ASK_HUMAN_REQUEST_TYPES,
   APPROVAL_REQUEST_TYPES,
@@ -274,7 +275,7 @@ function appendSidecarEvents(result, pushEvent) {
 async function handleRequestUserInput({ params, sidecarUrl, pushEvent }) {
   const answers = {};
   for (const question of params.questions || []) {
-    const prompt = question.question || "Clarification request";
+    const prompt = typeof question?.question === "string" ? question.question : "";
 
     if (sidecarUrl) {
       // ask_human mode: route to the LLM-backed human simulator
@@ -293,10 +294,8 @@ async function handleRequestUserInput({ params, sidecarUrl, pushEvent }) {
         fallbackSource: "codex_native_request_user_input_error_fallback",
       });
       appendSidecarEvents(result, pushEvent);
-      const selected = result.selected_labels?.length
-        ? result.selected_labels
-        : [result.resolution || UNKNOWN_RESOLUTION];
-      answers[question.id] = { answers: selected };
+      const answerText = String(result.resolution ?? UNKNOWN_RESOLUTION);
+      answers[question.id] = { answers: [answerText] };
       // Emit a structured event so extractCodexTrajectorySteps can include the
       // ask/answer pair in trajectory.json.  requestUserInput arrives as a JSON-RPC
       // *request* (not a notification), so it never appears as an sdk_event and would
@@ -305,7 +304,7 @@ async function handleRequestUserInput({ params, sidecarUrl, pushEvent }) {
         type:        "codex_ask_question",
         timestamp:   new Date().toISOString(),
         question:    prompt,
-        answer:      selected.join("; "),
+        answer:      answerText,
         question_id: question.id,
         source:      "native_requestUserInput",
       });
@@ -381,6 +380,33 @@ function safeJson(value) {
 
 function mcpToolName(item) {
   return `${item?.server || ""}.${item?.tool || ""}`.replace(/^\./, "");
+}
+
+function readAskQuestionFromValue(value) {
+  if (value == null) return "";
+  if (typeof value === "string") {
+    if (!value.length) return "";
+    try {
+      return readAskQuestionFromValue(JSON.parse(value));
+    } catch {
+      return value;
+    }
+  }
+  if (typeof value !== "object") return "";
+  if (typeof value.question === "string") return value.question;
+  if (value.arguments && typeof value.arguments === "object") {
+    const nested = readAskQuestionFromValue(value.arguments);
+    if (nested !== "") return nested;
+  }
+  if (value.input && typeof value.input === "object") {
+    const nested = readAskQuestionFromValue(value.input);
+    if (nested !== "") return nested;
+  }
+  if (value.ask_human && typeof value.ask_human === "object") {
+    const nested = readAskQuestionFromValue(value.ask_human);
+    if (nested !== "") return nested;
+  }
+  return "";
 }
 
 function extractMcpResultText(result) {
@@ -468,7 +494,7 @@ function extractCodexTrajectorySteps(events) {
     if (ev.type === "ask_question_full_info_mode") {
       steps.push({
         thought: currentThought,
-        act:     cap(`ask_human ${ev.question || ""}`, ACT_CAP),
+        act:     cap(`ask_human [native] ${ev.question || ""}`, ACT_CAP),
         obs:     UNKNOWN_RESOLUTION,
       });
       currentThought = "";
@@ -574,8 +600,8 @@ function extractCodexTrajectorySteps(events) {
       const toolName = mcpToolName(item);
       let act = `${toolName}: ${safeJson(item.arguments || {})}`;
       if (toolName === "human_input.ask_human") {
-        const q = String(item?.arguments?.question || "");
-        act = `ask_human [custom_mcp] ${q}`;
+        const q = readAskQuestionFromValue(item?.arguments);
+        act = `ask_human [custom_tool] ${q}`;
       }
       steps.push({
         thought: currentThought,
@@ -587,7 +613,16 @@ function extractCodexTrajectorySteps(events) {
     }
   }
 
-  return steps;
+  return steps.map((step) => {
+    if (!step || typeof step !== "object") return step;
+    const act = String(step.act || "");
+    if (!act.trim().startsWith("ask_human")) return step;
+    const obs = String(step.obs ?? "").trim();
+    if (!obs || obs.startsWith("[no observation") || obs.startsWith("[error]")) {
+      return { ...step, obs: CANT_ANSWER };
+    }
+    return step;
+  });
 }
 
 /**
