@@ -91,6 +91,7 @@ export function richAskHumanToolDescriptionForHarness() {
 }
 
 export function buildAskHumanGuidance(toolName) {
+  if (!ASK_HUMAN_GUIDANCE_ENABLED) return null;
   return ASK_HUMAN_GUIDANCE_TEMPLATE.replaceAll(
     "{{TOOL_NAME}}",
     String(toolName || ""),
