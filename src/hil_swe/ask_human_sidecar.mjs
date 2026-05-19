@@ -20,8 +20,8 @@
  *   POST /events/reset — clear accumulated global events; returns { cleared }
  *
  * Mode handling:
- *   ask_human mode:  route through createHumanInputRouter (LLM judge)
- *   full_info mode:  return "irrelevant question" immediately + emit
+ *   ask_human: route through createHumanInputRouter (LLM judge)
+ *   full_info: return "irrelevant question" immediately + emit
  *                    ask_question_full_info_mode event (for num_questions_full_info tracking)
  */
 
@@ -37,10 +37,9 @@ import {
   UNKNOWN_RESOLUTION,
   UNKNOWN_BLOCKER_ID,
 } from "../shared/human_input.mjs";
-import { ASK_HUMAN_BASE_URL, ASK_HUMAN_MODEL } from "./constants.mjs";
+import { ASK_HUMAN_BASE_URL, ASK_HUMAN_MODEL, ASK_HUMAN_ENABLED, MODE } from "./constants.mjs";
 
 // ── Environment ───────────────────────────────────────────────────────────────
-const MODE     = process.env.MODE     || "ask_human";
 const TASK_DIR = process.env.TASK_DIR || "/task";
 const TASK_UID = process.env.TASK_UID || "unknown";  // set by run_adk.py before Popen
 
@@ -69,7 +68,7 @@ const _globalEvents = [];
 // receives a graceful string and can retry on the next turn.
 const CANT_ANSWER = "can't answer (perhaps transient hiccup)";
 
-if (MODE === "ask_human") {
+if (ASK_HUMAN_ENABLED) {
   const kbPath = path.join(TASK_DIR, "blocker_registry.json");
   _router = createHumanInputRouter({
     instanceId:    TASK_UID,
@@ -155,10 +154,10 @@ const server = http.createServer(async (req, res) => {
       raw_event         = {},
     } = body;
 
-    // ── full_info mode: return "irrelevant question" without calling LLM ────
+    // ── no-router modes: return "irrelevant question" without calling LLM ───
     // Emit ask_question_full_info_mode event so any harness can count it in
     // num_questions_full_info (mirrors run_codex.mjs / run_claude.mjs behaviour).
-    if (MODE !== "ask_human") {
+    if (!ASK_HUMAN_ENABLED) {
       const ev = {
         type:      "ask_question_full_info_mode",
         timestamp: new Date().toISOString(),

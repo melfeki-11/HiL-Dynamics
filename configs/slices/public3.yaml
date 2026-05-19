@@ -1,0 +1,8 @@
+# 3 public HiL-Bench SWE tasks drawn from public12 for base matrix validation.
+uids_file: data/hil_swe_public3_uids.txt
+modes:
+  - full_info
+  - neutral
+  - skill
+passes: 1
+workers: 3

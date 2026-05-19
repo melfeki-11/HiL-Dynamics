@@ -6,8 +6,7 @@ usage() {
 Usage:
   scripts/run_hil_swe_modes_first_n.sh <num_samples>
 
-Runs the deterministic HiL-Bench SWE first-N fixture in the two modes needed
-for the Claude Code, Codex, and OpenCode extension:
+Runs the deterministic HiL-Bench SWE first-N fixture in two modes:
   - full_info: blocker resolutions are included upfront; no ask_human KB is wired
   - ask_human: blockers stay hidden and the ask_human/request_user_input router is wired
 
@@ -34,15 +33,15 @@ cd "$ROOT_DIR"
 K=3
 CREDENTIALS_ENV="${LITELLM_CREDENTIALS_ENV:-}"
 CLARIFICATION_PROFILE="generic-v1"
-CLAUDE_MODEL_CANDIDATES="claude-sonnet-4-6"
-CLAUDE_THINKING="${CLAUDE_CODE_THINKING:-disabled}"
-CLAUDE_EFFORT="${CLAUDE_CODE_EFFORT:-low}"
+CLAUDE_MODEL_CANDIDATES="claude-opus-4-7"
+CLAUDE_THINKING="${CLAUDE_CODE_THINKING:-enabled}"
+CLAUDE_EFFORT="${CLAUDE_CODE_EFFORT:-xhigh}"
 CODEX_MODEL="gpt-5.5"
-CODEX_REASONING_EFFORT="low"
-OPENCODE_MODEL="bedrock/qwen.qwen3-32b-v1:0"
-ASK_HUMAN_MODEL="bedrock/qwen.qwen3-32b-v1:0"
+CODEX_REASONING_EFFORT="xhigh"
+OPENCODE_MODEL="fireworks_ai/glm-5p1"
+ASK_HUMAN_MODEL="llmengine/llama-3-3-70b-instruct"
 ATTEMPT_TIMEOUT_MS="${HARNESS_ATTEMPT_TIMEOUT_MS:-1800000}"
-MAX_TURNS="${HARNESS_MAX_TURNS:-200}"
+MAX_STEPS="${HARNESS_MAX_STEPS:-0}"
 GENERATE_CONCURRENCY="${HARNESS_CONCURRENCY:-2}"
 EVAL_WORKERS="${SWEBENCH_EVAL_WORKERS:-}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -73,7 +72,7 @@ echo "  opencode model: ${OPENCODE_MODEL}"
 echo "  ask_human judge model: ${ASK_HUMAN_MODEL}"
 echo "  clarification profile: ${CLARIFICATION_PROFILE}"
 echo "  attempt timeout ms: ${ATTEMPT_TIMEOUT_MS}"
-echo "  max turns: ${MAX_TURNS}"
+echo "  max steps: ${MAX_STEPS}"
 echo "  generation concurrency: ${GENERATE_CONCURRENCY}"
 
 mkdir -p "$PREFLIGHT_DIR"
@@ -122,7 +121,7 @@ COMMON_PASSK_ARGS=(
   --opencode-model "$OPENCODE_MODEL"
   --ask-human-model "$ASK_HUMAN_MODEL"
   --attempt-timeout-ms "$ATTEMPT_TIMEOUT_MS"
-  --max-turns "$MAX_TURNS"
+  --max-steps "$MAX_STEPS"
   --concurrency "$GENERATE_CONCURRENCY"
   --codex-transport app-server
   --codex-approval-policy on-request

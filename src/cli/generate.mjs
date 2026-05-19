@@ -32,7 +32,7 @@ function parseArgs(argv) {
     codexModel: undefined,
     opencodeModel: process.env.OPENCODE_MODEL || DEFAULT_OPENCODE_MODEL,
     modelReasoningEffort: process.env.CODEX_MODEL_REASONING_EFFORT || DEFAULT_CODEX_REASONING_EFFORT,
-    maxTurns: 40,
+    maxSteps: 40,
     permissionMode: "acceptEdits",
     concurrency: undefined,
     attemptTimeoutMs: Number(process.env.HARNESS_ATTEMPT_TIMEOUT_MS || 0),
@@ -63,7 +63,7 @@ function parseArgs(argv) {
     else if (arg === "--codex-model") args.codexModel = argv[++i];
     else if (arg === "--opencode-model") args.opencodeModel = argv[++i];
     else if (arg === "--model-reasoning-effort") args.modelReasoningEffort = argv[++i];
-    else if (arg === "--max-turns") args.maxTurns = Number(argv[++i]);
+    else if (arg === "--max-steps") args.maxSteps = Number(argv[++i]);
     else if (arg === "--permission-mode") args.permissionMode = argv[++i];
     else if (arg === "--concurrency") args.concurrency = Number(argv[++i]);
     else if (arg === "--attempt-timeout-ms") args.attemptTimeoutMs = Number(argv[++i]);

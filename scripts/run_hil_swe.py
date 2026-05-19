@@ -4,7 +4,7 @@ Host-side orchestrator for trust_horizon HiL-SWE runs.
 Runs the full pipeline in one shot:
   Phase 1 — Solve:    spin up harness containers in parallel; each produces patch.diff + trajectory
   Phase 2 — Evaluate: for each completed solve, run the eval container (apply patches, run tests)
-  Phase 3 — Metrics:  compute pass@k and ask precision/recall/f1 (micro, like run_hil_bench.py)
+  Phase 3 — Metrics:  compute pass@k and micro ask precision/recall/f1
 
 All three phases can be individually skipped with --skip-eval / --skip-metrics.
 
@@ -31,7 +31,7 @@ Usage examples:
     --modes ask_human \\
     --passes 1
 
-  # All 3 test tasks, both modes, 3 passes each, 12 concurrent containers
+  # All 3 smoke tasks, all primary arms, 3 passes each, 12 concurrent containers
   python3 scripts/run_hil_swe.py \\
     --run-id test3-k3 \\
     --uids 69bc1094b455a91fa20fb868 69a9e77602049c14d2793bb5 69c60cc7b6a31e9900faa779 \\
@@ -66,7 +66,7 @@ Environment variables (read from host env, forwarded into each container):
     ASK_HUMAN_MODEL             override ask_human judge model slug
     CLAUDE_MODEL                model slug for the agent when --sdk claude (default: claude-opus-4-7)
     CODEX_MODEL                 model slug for the agent when --sdk codex  (default: gpt-5.5)
-    ADK_MODEL                   model slug for the agent when --sdk adk    (default: gemini/gemini-3.1-pro-preview-customtools)
+    ADK_MODEL                   model slug for the agent when --sdk adk    (default: gemini/gemini-3.1-pro)
     OPENCODE_MODEL              model slug for the agent when --sdk opencode (default: fireworks_ai/glm-5p1)
     CLAUDE_REASONING_EFFORT     reasoning effort for Claude SDK query options (low|medium|high|xhigh)
     CODEX_REASONING_EFFORT      reasoning effort for Codex app-server (none|minimal|low|medium|high|xhigh)
@@ -75,7 +75,7 @@ Environment variables (read from host env, forwarded into each container):
     OPENCODE_STARTUP_TIMEOUT_MS startup watchdog before first OpenCode stdout event (default: 300000)
     LITELLM_CALL_TIMEOUT_MS     per-LiteLLM-call timeout in ms (default: 1200000 / 20 min)
     STEP_LITELLM_TRIES          retries per agent step/call budget (default: 3)
-    MAX_TURNS                   max agent turns (default: 200)
+    MAX_STEPS                   max agent steps/items/calls where supported (default: 0 = unbounded)
     ATTEMPT_TIMEOUT_MS          per-attempt timeout in ms (default: 10800000)
     PERMISSION_MODE             claude permissionMode (default: acceptEdits)
 """
@@ -106,7 +106,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 from eval_hil_swe import eval_attempt as _eval_attempt, cleanup_orphaned_eval_containers  # noqa: E402
-from metrics_hil_swe import load_pass_rows, summarize  # noqa: E402
+from metrics_hil_swe import load_pass_rows, summarize, pass_is_valid_for_scoring, pass_has_rerun_signal  # noqa: E402
 
 # Per-uid owner directory (mirrors paper_pipeline.py ATTEMPT_OWNER_DIR pattern).
 # Each run_attempt() call writes a "{uid}__{pid}__{token}.owner" marker; cleanup
@@ -158,7 +158,9 @@ def find_env_file(explicit: str | None = None) -> Path | None:
     """Return the first .env file that exists, checking in priority order."""
     candidates = [
         Path(explicit) if explicit else None,
+        Path(os.environ["LITELLM_CREDENTIALS_FILE"]) if os.environ.get("LITELLM_CREDENTIALS_FILE") else None,
         ROOT / ".env",
+        ROOT.parent / "litellm" / "LOCAL_LITELLM_CREDENTIALS.env",
         ROOT.parent / "research_evals" / "hil_bench" / ".env",
     ]
     for p in candidates:
@@ -166,11 +168,54 @@ def find_env_file(explicit: str | None = None) -> Path | None:
             return p
     return None
 
+
+def resolve_aws_secret_api_key(env: dict[str, str]) -> str | None:
+    """Resolve a LiteLLM API key from AWS Secrets Manager when configured.
+
+    The local credential file can store the key by reference instead of writing
+    the secret value into `.env`. Resolve it on the host and pass only the
+    resulting LiteLLM key into harness containers.
+    """
+    secret_id = env.get("LITELLM_AWS_SECRET_ID") or env.get("AWS_SECRET_ID") or ""
+    secret_key_name = env.get("LITELLM_AWS_SECRET_KEY") or env.get("AWS_SECRET_KEY_NAME") or ""
+    if not (secret_id and secret_key_name):
+        return None
+
+    cmd = ["aws"]
+    if env.get("AWS_PROFILE"):
+        cmd += ["--profile", env["AWS_PROFILE"]]
+    if env.get("AWS_REGION"):
+        cmd += ["--region", env["AWS_REGION"]]
+    cmd += [
+        "secretsmanager",
+        "get-secret-value",
+        "--secret-id",
+        secret_id,
+        "--query",
+        "SecretString",
+        "--output",
+        "text",
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        secret_text = result.stdout.strip()
+        try:
+            parsed = json.loads(secret_text)
+        except json.JSONDecodeError:
+            parsed = secret_text
+        value = parsed.get(secret_key_name) if isinstance(parsed, dict) else parsed
+        return str(value).strip() if value else None
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed resolving LiteLLM API key from AWS Secrets Manager secret {secret_id!r}: {exc}"
+        ) from exc
+
 ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data" / "hil_bench_swe"
 TASKS_INDEX = DATA_DIR / "tasks_index.json"
 RUNS_DIR = ROOT / "runs"
 SRC_DIR = ROOT / "src"
+TEMPLATES_DIR = SRC_DIR / "hil_swe" / "templates"
 
 # SDK-specific configuration.  Values are overridden in main() based on --sdk.
 SDK_CONFIGS = {
@@ -193,7 +238,7 @@ SDK_CONFIGS = {
         "harness_image_prefix": "hilbench-swe-harness-adk",
         "entrypoint":           "/opt/trust_horizon/src/hil_swe/run_adk.py",
         "model_env_key":        "ADK_MODEL",
-        "default_model":        "gemini/gemini-3.1-pro-preview-customtools",
+        "default_model":        "gemini/gemini-3.1-pro",
         "executable_env":       "ADK_SUPPRESS_GEMINI_LITELLM_WARNINGS=true",
         # python3.adk is a versioned symlink created by Dockerfile.harness that
         # points to an isolated ADK virtualenv (Python >=3.10) with
@@ -227,12 +272,15 @@ FORWARDED_ENV_KEYS = [
     "LITELLM_BASE_URL",
     "LITELLM_API_KEY",
     "LITELLM_PROXY_API_KEY",
+    "LITELLM_AWS_SECRET_ID",
+    "LITELLM_AWS_SECRET_KEY",
+    "AWS_SECRET_ID",
+    "AWS_SECRET_KEY_NAME",
     # Direct Anthropic API key — used as fallback if LITELLM_* not set
     "ANTHROPIC_AUTH_TOKEN",
     # Ask-human judge overrides (optional — defaults to LITELLM_BASE_URL)
     "ASK_HUMAN_BASE_URL",
     "ASK_HUMAN_MODEL",
-    "PAPER_ASK_HUMAN_MODEL",
     # Agent / run parameters (all optional; harness uses built-in defaults)
     "CLAUDE_MODEL",
     "CLAUDE_REASONING_EFFORT",
@@ -248,19 +296,16 @@ FORWARDED_ENV_KEYS = [
     "LITELLM_CALL_TIMEOUT_MS",
     "STEP_LITELLM_TRIES",
     "WITH_CUSTOM_TOOL",
-    # Recall-tweak feature flags
-    "SEED_BLOCKER_TODOS",
-    "CLAUDE_MD_HINT",
+    "WITH_SKILL",
+    "WITH_ASK_GUIDANCE",
+    # Optional ask-human diagnostics/interventions. All default off.
     "RICH_ASK_TOOL_DESC",
-    "SOFTEN_CATEGORY_MANDATE",
     "MAX_ASKS_PER_PASS",
     "IRRELEVANT_COOLDOWN",
-    "BLOCKER_SCALED_CAP",
     "IRRELEVANT_FIRST_THROTTLE",
-    "STOP_WHEN_BLOCKERS_RESOLVED",
     "READ_BEFORE_ASK",
     "READ_BEFORE_ASK_MIN_FILES",
-    "MAX_TURNS",
+    "MAX_STEPS",
     "ATTEMPT_TIMEOUT_MS",
     "PERMISSION_MODE",
     # AWS credentials (for Bedrock / Secrets Manager, if used)
@@ -277,7 +322,7 @@ MODEL_REASONING_DEFAULTS = [
     # Codex models
     ("gpt-5.5", {"CODEX_REASONING_EFFORT": "xhigh"}),
     # ADK model (routed through LiteLLM)
-    ("gemini/gemini-3.1-pro-preview-customtools", {"ADK_REASONING_EFFORT": "high"}),
+    ("gemini/gemini-3.1-pro", {"ADK_REASONING_EFFORT": "high"}),
     # OpenCode model
     ("fireworks_ai/glm-5p1", {"OPENCODE_REASONING_EFFORT": "xhigh"}),
 ]
@@ -311,6 +356,30 @@ def reasoning_env_for_sdk(sdk: str, effort: str) -> dict[str, str]:
     if sdk == "opencode":
         return {"OPENCODE_REASONING_EFFORT": eff}
     return {}
+
+
+_TEMPLATE_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _validate_template_version_name(flag_name: str, value: str) -> str:
+    version = (value or "").strip()
+    if not version:
+        raise ValueError(f"{flag_name} requires a non-empty template version name.")
+    if not _TEMPLATE_VERSION_RE.fullmatch(version):
+        raise ValueError(
+            f"{flag_name} invalid value {value!r}. "
+            "Use only letters, digits, dot, underscore, or hyphen."
+        )
+    return version
+
+
+def _require_template_file(flag_name: str, version: str, extension: str) -> None:
+    filename = f"{version}.{extension}"
+    path = TEMPLATES_DIR / filename
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{flag_name}={version!r} requires template {filename!r} at {path}"
+        )
 
 _print_lock = threading.Lock()
 
@@ -627,7 +696,7 @@ def _run_attempt_inner(
         "docker", "run",
         "--rm",                         # auto-remove on clean exit
         "--name", container_name,       # named for targeted kill on timeout
-        # Allow container to reach host services (LiteLLM proxy, vLLM judge server).
+        # Allow container to reach host services (LiteLLM proxy / judge route).
         # --add-host maps host.docker.internal → host gateway (same pattern as hil-bench
         # configs/swe/ask_config_claude_opus_4-6.yaml).  Clients should use
         # http://host.docker.internal:PORT rather than http://localhost:PORT.
@@ -738,14 +807,19 @@ def build_job_list(
     passes: int,
     run_id: str,
     skip_if_complete: bool,
+    require_scoring_validity: bool = False,
 ) -> list[dict]:
     jobs = []
     for task in tasks:
         for mode in modes:
             for pass_idx in range(1, passes + 1):
                 out_dir = output_dir_for(run_id, task["uid"], mode, pass_idx)
-                if skip_if_complete and result_is_complete(out_dir):
-                    continue
+                if skip_if_complete:
+                    if require_scoring_validity:
+                        if result_is_complete(out_dir) and not pass_has_rerun_signal(out_dir):
+                            continue
+                    elif result_is_complete(out_dir):
+                        continue
                 jobs.append({
                     "uid": task["uid"],
                     "image_name": task["image_name"],
@@ -828,9 +902,8 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--max-turns", type=int, default=None,
-        help="Max agent turns per attempt (default: 200). "
-             "Equivalent to passing --env MAX_TURNS=N.",
+        "--max-steps", type=int, default=None,
+        help="Max agent steps/items/calls per attempt where supported (default: 0 = unbounded).",
     )
     parser.add_argument(
         "--max-reasoning",
@@ -847,8 +920,7 @@ def main() -> None:
         default=None,
         help=(
             "Override reasoning effort tier for the selected SDK. "
-            "Takes precedence over --max-reasoning unless the SDK-specific env var "
-            "is explicitly set via --env."
+            "Takes precedence over --max-reasoning and env values."
         ),
     )
     parser.add_argument(
@@ -866,8 +938,29 @@ def main() -> None:
         action="store_true",
         default=False,
         help=(
-            "Enable an additional top-level custom ask_human tool for claude/codex SDK "
-            "runs only. Does not replace native question-asking tools."
+            "Enable the additional (non-replacing) custom ask_human MCP tool for "
+            "claude/codex SDK runs. Without this flag, claude/codex expose only their "
+            "native question-asking surface."
+        ),
+    )
+    parser.add_argument(
+        "--with-skill",
+        type=str,
+        default=None,
+        metavar="TEMPLATE_BASENAME",
+        help=(
+            "Enable SKILL.md exposure using templates/<TEMPLATE_BASENAME>.md "
+            "(ask_human mode only)."
+        ),
+    )
+    parser.add_argument(
+        "--with-ask-guidance",
+        type=str,
+        default=None,
+        metavar="TEMPLATE_BASENAME",
+        help=(
+            "Enable ask guidance using templates/<TEMPLATE_BASENAME>.txt "
+            "(ask_human mode only)."
         ),
     )
     args = parser.parse_args()
@@ -898,7 +991,6 @@ def main() -> None:
             effective_env[k] = val
 
     # 3. Explicit --env KEY=VALUE overrides win over everything
-    explicit_env_override_keys: set[str] = set()
     cleared_env_keys: set[str] = set()
     for item in args.env or []:
         if "=" in item:
@@ -908,11 +1000,13 @@ def main() -> None:
                 cleared_env_keys.add(k)
             else:
                 effective_env[k] = v
-            explicit_env_override_keys.add(k)
 
-    # 4. --max-turns shorthand (equivalent to --env MAX_TURNS=N)
-    if args.max_turns is not None:
-        effective_env["MAX_TURNS"] = str(args.max_turns)
+    # 4. --max-steps shorthand (equivalent to --env MAX_STEPS=N)
+    if args.max_steps is not None and args.max_steps < 0:
+        print("ERROR: --max-steps must be >= 0.", file=sys.stderr)
+        sys.exit(1)
+    if args.max_steps is not None:
+        effective_env["MAX_STEPS"] = str(args.max_steps)
 
     # 4a. Ensure selected SDK always has an explicit model env value.
     # This guarantees container-side runners use the same default model policy
@@ -922,17 +1016,46 @@ def main() -> None:
     if not effective_env.get(model_env_key):
         effective_env[model_env_key] = sdk_cfg_for_model["default_model"]
 
-    # 4b. Optional custom ask_human tool exposure (claude/codex only)
-    if args.with_custom_tool:
-        if args.sdk not in {"claude", "codex"}:
-            print(
-                "ERROR: --with-custom-tool is only supported with --sdk claude or --sdk codex.",
-                file=sys.stderr,
-            )
+    # 4b. Custom ask_human MCP tool exposure (claude/codex only).
+    # Default is OFF unless --with-custom-tool is explicitly passed.
+    if args.with_custom_tool and args.sdk not in {"claude", "codex"}:
+        print(
+            "ERROR: --with-custom-tool is only supported with --sdk claude or --sdk codex.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    skill_version: str | None = None
+    guidance_version: str | None = None
+    if args.with_skill is not None:
+        try:
+            skill_version = _validate_template_version_name("--with-skill", args.with_skill)
+            _require_template_file("--with-skill", skill_version, "md")
+            args.with_skill = skill_version
+        except Exception as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
             sys.exit(1)
-        effective_env["WITH_CUSTOM_TOOL"] = "1"
+    if args.with_ask_guidance is not None:
+        try:
+            guidance_version = _validate_template_version_name("--with-ask-guidance", args.with_ask_guidance)
+            _require_template_file("--with-ask-guidance", guidance_version, "txt")
+            args.with_ask_guidance = guidance_version
+        except Exception as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
+    has_full_info = "full_info" in args.modes
+    if has_full_info and (args.with_custom_tool or skill_version is not None or guidance_version is not None):
+        print(
+            "ERROR: --with-custom-tool, --with-skill, and --with-ask-guidance are only allowed for ask_human mode.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if args.sdk in {"claude", "codex"}:
+        effective_env["WITH_CUSTOM_TOOL"] = "1" if args.with_custom_tool else "0"
+    effective_env["WITH_SKILL"] = skill_version or ""
+    effective_env["WITH_ASK_GUIDANCE"] = guidance_version or ""
 
-    # 5. Reasoning defaults/overrides (unless SDK-specific key explicitly set via --env)
+    # 5. Reasoning defaults/overrides.
+    # CLI flags must take precedence over env/.env/--env values.
     sdk_cfg_for_reasoning = SDK_CONFIGS[args.sdk]
     model_for_reasoning = effective_env.get(
         sdk_cfg_for_reasoning["model_env_key"],
@@ -941,12 +1064,10 @@ def main() -> None:
     if args.reasoning_effort is not None:
         requested = reasoning_env_for_sdk(args.sdk, args.reasoning_effort)
         for k, v in requested.items():
-            if k not in explicit_env_override_keys:
-                effective_env[k] = v
+            effective_env[k] = v
     elif args.max_reasoning:
         for k, v in default_reasoning_env_for_model(model_for_reasoning).items():
-            if k not in explicit_env_override_keys and not effective_env.get(k):
-                effective_env[k] = v
+            effective_env[k] = v
 
     # Backward-compat aliases for previously used names.
     if "CLAUDE_REASONING_EFFORT" not in effective_env and effective_env.get("CLAUDE_EFFORT"):
@@ -961,12 +1082,22 @@ def main() -> None:
         effective_env.get("LITELLM_PROXY_API_KEY") or
         effective_env.get("ANTHROPIC_AUTH_TOKEN")
     )
+    if not api_key:
+        try:
+            api_key = resolve_aws_secret_api_key(effective_env)
+        except RuntimeError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if api_key:
+            effective_env.setdefault("LITELLM_API_KEY", api_key)
+            effective_env.setdefault("LITELLM_PROXY_API_KEY", api_key)
+            effective_env.setdefault("ANTHROPIC_AUTH_TOKEN", api_key)
     base_url = effective_env.get("LITELLM_BASE_URL") or effective_env.get("ANTHROPIC_BASE_URL")
 
     if not api_key:
         print(
             "ERROR: No API key found.  Set LITELLM_API_KEY in trust_horizon/.env "
-            "(or ANTHROPIC_AUTH_TOKEN for direct Anthropic access).",
+            "(or ANTHROPIC_AUTH_TOKEN / LITELLM_AWS_SECRET_ID+LITELLM_AWS_SECRET_KEY).",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -1013,25 +1144,28 @@ def main() -> None:
     }
 
     run_dir = RUNS_DIR / args.run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
     pending_pass_keys: set[tuple[str, str, int]] = set()
     for key in all_pass_keys:
         uid, mode, pass_idx = key
         pass_dir = run_dir / uid / mode / f"pass_{pass_idx}"
-        solve_complete = result_is_complete(pass_dir)
-        has_eval = (pass_dir / "eval_result.json").exists()
         if args.force:
             pending_pass_keys.add(key)
         elif args.skip_eval:
-            if not solve_complete:
+            if not result_is_complete(pass_dir):
                 pending_pass_keys.add(key)
         else:
-            # For normal solve+eval runs, a pass is considered complete only when
-            # both solve and eval artifacts exist.
-            if not (solve_complete and has_eval):
+            # Keep pass rerun selection aligned with metrics inclusion logic.
+            if not pass_is_valid_for_scoring(pass_dir):
                 pending_pass_keys.add(key)
 
     solve_jobs = build_job_list(
-        target_tasks, args.modes, args.passes, args.run_id, skip_if_complete=not args.force
+        target_tasks,
+        args.modes,
+        args.passes,
+        args.run_id,
+        skip_if_complete=not args.force,
+        require_scoring_validity=not args.skip_eval,
     )
     total = len(pending_pass_keys)
     skipped_solve = len(all_pass_keys) - len(solve_jobs)
@@ -1195,6 +1329,9 @@ def main() -> None:
                     "mode": mode,
                     "agent": args.sdk,
                     "model": model,
+                    "with_custom_tool": bool(args.with_custom_tool if args.sdk in {"claude", "codex"} else False),
+                    "with_skill": (args.with_skill or "__none__"),
+                    "with_ask_guidance": (args.with_ask_guidance or "__none__"),
                     "pass_index": pass_idx,
                     # Treat missing rows as unresolved so summary coverage is
                     # over the full run scope rather than only completed rows.
@@ -1208,6 +1345,16 @@ def main() -> None:
                     "num_blockers_resolved": 0,
                     "num_blockers_total": 0,
                     "patch_bytes": None,
+                    "wall_clock_ms": 0,
+                    "num_llm_calls": 0,
+                    "num_tool_calls": 0,
+                    "num_turns_or_items": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "total_tokens": 0,
+                    "llm_proxy_error_count": None,
+                    "llm_proxy_status_counts": None,
+                    "llm_proxy_stripped_params": None,
                     "pass_dir": str(pass_dir),
                 })
 
