@@ -2,8 +2,7 @@
  * ask_human MCP bridge — used by Codex (and optionally OpenCode) as a subprocess.
  *
  * Minimal stdio JSON-RPC 2.0 MCP server that exposes a single `ask_human`
- * tool. Each call is proxied to ask_human_sidecar.mjs unless ask-limit guards
- * (MAX_ASKS_PER_PASS / IRRELEVANT_COOLDOWN) short-circuit locally.
+ * tool. Each call is proxied to ask_human_sidecar.mjs.
  *
  * OpenCode starts this process as a local MCP subprocess.  Environment vars
  * expected at launch (set by run_opencode.mjs via the MCP config `env` map):
@@ -21,7 +20,6 @@
 import process from "node:process";
 import readline from "node:readline";
 
-import { createAskLimitTracker } from "./ask_limits.mjs";
 import { CANT_ANSWER } from "../shared/human_input.mjs";
 import { sidecarAsk } from "./ask_human_sidecar_client.mjs";
 import { richAskHumanToolDescriptionForHarness } from "./constants.mjs";
@@ -33,8 +31,6 @@ if (!SIDECAR_URL) {
 }
 
 const PROTOCOL_VERSION = "2024-11-05";
-
-const askLimitTracker = createAskLimitTracker();
 
 // ── JSON-RPC helpers ──────────────────────────────────────────────────────────
 
@@ -120,44 +116,12 @@ rl.on("line", async (line) => {
 
     const question = String(args.question ?? "");
 
-    const gate = askLimitTracker.checkBeforeJudge();
-    if (gate.shortCircuit) {
-      const ts = new Date().toISOString();
-      const synth = {
-        resolution: gate.responseText,
-        selected_labels: [gate.responseText],
-        blocker_id: "unknown",
-        status: "ask_limit_suppressed",
-        events: [
-          {
-            type: "ask_human_suppressed",
-            timestamp: ts,
-            reason: gate.reason,
-            question,
-            sdk: "codex_mcp",
-          },
-        ],
-      };
-      success(id, {
-        content: [{ type: "text", text: gate.responseText }],
-        structuredContent: synth,
-        isError: false,
-      });
-      return;
-    }
-
-    askLimitTracker.notifyRoutedToJudge();
-
     const sidecarResult = await sidecarAsk({
       sidecarUrl: SIDECAR_URL,
       question,
       nativeEventType: "codex.mcp.ask_human",
       rawEvent: { question },
       fallbackSource: "codex_mcp_bridge_error_fallback",
-    });
-    askLimitTracker.recordJudgeResolution(sidecarResult.resolution, {
-      blockerId: sidecarResult.blocker_id,
-      status: sidecarResult.status,
     });
 
     success(id, {
