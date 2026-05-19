@@ -27,7 +27,7 @@ Usage:
   # Evaluate specific UIDs / modes / passes:
   python3 scripts/eval_hil_swe.py --run-id my-run \\
     --uids 69bc1094b455a91fa20fb868 \\
-    --modes ask_human --passes 1
+    --modes neutral --passes 1
 
   # Re-evaluate even if eval_result.json already exists:
   python3 scripts/eval_hil_swe.py --run-id my-run --force
@@ -1044,7 +1044,7 @@ def main() -> None:
     parser.add_argument("--run-id", required=True, help="Run identifier (subdirectory under runs/).")
     parser.add_argument("--uids", nargs="+", metavar="UID", help="Restrict evaluation to these UIDs.")
     parser.add_argument(
-        "--modes", nargs="+", choices=["neutral", "skill", "full_info", "no_tool", "ask_human"],
+        "--modes", nargs="+", choices=["neutral", "skill", "full_info", "no_tool"],
         help="Restrict to these modes (default: all).",
     )
     parser.add_argument(
