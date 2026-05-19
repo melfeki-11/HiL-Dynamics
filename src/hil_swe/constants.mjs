@@ -20,17 +20,19 @@ export const OUTPUT_DIR = process.env.OUTPUT_DIR || "/output";
 
 export function normalizeMode(mode) {
   const raw = String(mode || "").trim();
-  if (!raw || raw === "ask_human") return "neutral";
-  if (["neutral", "skill", "full_info", "no_tool"].includes(raw)) return raw;
-  throw new Error(`Unknown MODE=${JSON.stringify(raw)}. Expected neutral, skill, full_info, or no_tool.`);
+  if (!raw) return "ask_human";
+  if (["ask_human", "full_info"].includes(raw)) return raw;
+  throw new Error(`Unknown MODE=${JSON.stringify(raw)}. Expected ask_human or full_info.`);
 }
 
-export const MODE       = normalizeMode(process.env.MODE || "neutral");
-export const ASK_HUMAN_ENABLED = MODE === "neutral" || MODE === "skill";
-export const SKILL_ENABLED = MODE === "skill";
+export const MODE       = normalizeMode(process.env.MODE || "ask_human");
+export const ASK_HUMAN_ENABLED = MODE === "ask_human";
+export const SKILL_ENABLED = ASK_HUMAN_ENABLED && /^(1|true|yes|on)$/i.test(
+  String(process.env.WITH_SKILL || ""),
+);
 export const FULL_INFO_ENABLED = MODE === "full_info";
-export const ASK_HUMAN_GUIDANCE_ENABLED = /^(1|true|yes|on)$/i.test(
-  String(process.env.ASK_HUMAN_GUIDANCE || ""),
+export const ASK_HUMAN_GUIDANCE_ENABLED = ASK_HUMAN_ENABLED && /^(1|true|yes|on)$/i.test(
+  String(process.env.WITH_ASK_GUIDANCE || ""),
 );
 export const PASS_INDEX = Number(process.env.PASS_INDEX  || "1");
 export const RUN_ID     = process.env.RUN_ID     || "swe-run";
@@ -88,6 +90,7 @@ export function richAskHumanToolDescriptionForHarness() {
 }
 
 export function buildAskHumanGuidance(toolName) {
+  if (!ASK_HUMAN_GUIDANCE_ENABLED) return null;
   // Keep one canonical guidance body across all SDKs/harnesses.
   void toolName;
   return ASK_HUMAN_GUIDANCE_TEMPLATE;

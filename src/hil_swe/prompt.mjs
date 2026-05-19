@@ -41,15 +41,15 @@ function instanceTemplate(problemStatement) {
  *
  * @param {object} opts
  * @param {string} opts.problemStatement  - raw problem statement from problem_statement.txt
- * @param {"neutral"|"skill"|"no_tool"|"full_info"|"ask_human"} opts.mode
+ * @param {"ask_human"|"full_info"} opts.mode
  * @param {Array<{description: string, resolution: string}>} [opts.blockers]
  *   - only needed for full_info mode; ignored otherwise
  * @returns {string}
  */
 export function buildSwePrompt({ problemStatement, mode, blockers = [] }) {
   if (mode === "full_info") return buildFullInfoPrompt(problemStatement, blockers);
-  if (["neutral", "skill", "no_tool", "ask_human"].includes(mode)) return buildBasePrompt(problemStatement);
-  throw new Error(`Unknown SWE prompt mode: ${mode}. Expected neutral, skill, no_tool, or full_info.`);
+  if (mode === "ask_human") return buildBasePrompt(problemStatement);
+  throw new Error(`Unknown SWE prompt mode: ${mode}. Expected ask_human or full_info.`);
 }
 
 /**

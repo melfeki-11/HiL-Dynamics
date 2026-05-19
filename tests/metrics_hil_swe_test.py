@@ -21,6 +21,9 @@ def _row(uid: str, pass_index: int, resolved: int, total: int, questions: int = 
         "mode": "ask_human",
         "agent": "codex",
         "model": "gpt-5.5",
+        "with_custom_tool": False,
+        "with_skill": False,
+        "with_ask_guidance": False,
         "pass_index": pass_index,
         "status": "resolved",
         "resolved": True,
@@ -34,6 +37,8 @@ def _row(uid: str, pass_index: int, resolved: int, total: int, questions: int = 
 
 
 class MetricsMicroTest(unittest.TestCase):
+    KEY = "ask_human/codex/gpt-5.5/custom_tool=0/skill=0/ask_guidance=0"
+
     def test_micro_recall_bounded_for_inflated_event_style_counts(self):
         """Capped micro keeps R in [0,1] even if stored counts exceed registry size."""
         rows = [
@@ -42,7 +47,7 @@ class MetricsMicroTest(unittest.TestCase):
             _row("u1", 3, 2, 3, 2),
         ]
         out = metrics.summarize(rows, expected_passes=3, include_partial=False)
-        m = out["ask_human/codex/gpt-5.5"]
+        m = out[self.KEY]
         self.assertGreaterEqual(m["ask_recall"], 0.0)
         self.assertLessEqual(m["ask_recall"], 1.0)
         self.assertGreaterEqual(m["ask_precision"], 0.0)
@@ -55,14 +60,14 @@ class MetricsMicroTest(unittest.TestCase):
     def test_unique_blockers_per_pass_recall(self):
         rows = [_row("u1", 1, 3, 5, 3)]
         out = metrics.summarize(rows, expected_passes=1, include_partial=True)
-        m = out["ask_human/codex/gpt-5.5"]
+        m = out[self.KEY]
         self.assertAlmostEqual(m["ask_recall"], 0.6)
         self.assertAlmostEqual(m["ask_precision"], 1.0)
 
     def test_event_micro_alias_matches_primary_micro(self):
         rows = [_row("u1", 1, 7, 4, 8)]
         out = metrics.summarize(rows, expected_passes=1, include_partial=True)
-        m = out["ask_human/codex/gpt-5.5"]
+        m = out[self.KEY]
         self.assertAlmostEqual(m["ask_precision_event_micro"], m["ask_precision"])
         self.assertAlmostEqual(m["ask_recall_event_micro"], m["ask_recall"])
 

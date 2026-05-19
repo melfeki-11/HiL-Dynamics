@@ -24,18 +24,18 @@ Output layout:
       summary.json
 
 Usage examples:
-  # Single task, neutral arm, 1 pass
+  # Single task, ask_human mode, 1 pass
   python3 scripts/run_hil_swe.py \\
     --run-id my-first-run \\
     --uids 69bc1094b455a91fa20fb868 \\
-    --modes neutral \\
+    --modes ask_human \\
     --passes 1
 
   # All 3 smoke tasks, all primary arms, 3 passes each, 12 concurrent containers
   python3 scripts/run_hil_swe.py \\
     --run-id test3-k3 \\
     --uids 69bc1094b455a91fa20fb868 69a9e77602049c14d2793bb5 69c60cc7b6a31e9900faa779 \\
-    --modes full_info neutral skill \\
+    --modes ask_human full_info \\
     --passes 3 \\
     --workers 12
 
@@ -43,8 +43,8 @@ Usage examples:
   python3 scripts/run_hil_swe.py --run-id pilot --uids ... --skip-eval --skip-metrics
 
   # All 100 public tasks, or all 150 (default --p-set both)
-  python3 scripts/run_hil_swe.py --run-id pub100 --p-set public --modes full_info neutral skill --passes 3
-  python3 scripts/run_hil_swe.py --run-id all150 --p-set both --modes neutral --passes 1
+  python3 scripts/run_hil_swe.py --run-id pub100 --p-set public --modes ask_human full_info --passes 3
+  python3 scripts/run_hil_swe.py --run-id all150 --p-set both --modes ask_human --passes 1
 
   # Eval-only on existing solves (result.json already present, want eval_result.json):
   # Solve phase is automatically skipped (result.json exists); eval runs on already-solved passes.
@@ -295,8 +295,9 @@ FORWARDED_ENV_KEYS = [
     "LITELLM_CALL_TIMEOUT_MS",
     "STEP_LITELLM_TRIES",
     "WITH_CUSTOM_TOOL",
+    "WITH_SKILL",
+    "WITH_ASK_GUIDANCE",
     # Optional ask-human diagnostics/interventions. All default off.
-    "ASK_HUMAN_GUIDANCE",
     "RICH_ASK_TOOL_DESC",
     "MAX_ASKS_PER_PASS",
     "IRRELEVANT_COOLDOWN",
@@ -825,8 +826,8 @@ def main() -> None:
              f"Supported: {', '.join(SDK_CONFIGS)}.",
     )
     parser.add_argument(
-        "--modes", nargs="+", choices=["neutral", "skill", "full_info", "no_tool", "ask_human"], default=["neutral"],
-        help="Modes to run (default: neutral). 'ask_human' is accepted as a legacy alias for neutral.",
+        "--modes", nargs="+", choices=["ask_human", "full_info"], default=["ask_human"],
+        help="Modes to run (default: ask_human).",
     )
     parser.add_argument(
         "--passes", "-k", type=int, default=1,
@@ -919,8 +920,19 @@ def main() -> None:
             "native question-asking surface."
         ),
     )
+    parser.add_argument(
+        "--with-skill",
+        action="store_true",
+        default=False,
+        help="Enable shared SKILL.md exposure (ask_human mode only).",
+    )
+    parser.add_argument(
+        "--with-ask-guidance",
+        action="store_true",
+        default=False,
+        help="Enable shared ask-human guidance injection (ask_human mode only).",
+    )
     args = parser.parse_args()
-    args.modes = ["neutral" if mode == "ask_human" else mode for mode in args.modes]
 
     # ── Apply SDK-specific globals before any worker threads are started ─────────
     global SDK, HARNESS_IMAGE_PREFIX, ENTRYPOINT
@@ -948,7 +960,6 @@ def main() -> None:
             effective_env[k] = val
 
     # 3. Explicit --env KEY=VALUE overrides win over everything
-    explicit_env_override_keys: set[str] = set()
     cleared_env_keys: set[str] = set()
     for item in args.env or []:
         if "=" in item:
@@ -958,7 +969,6 @@ def main() -> None:
                 cleared_env_keys.add(k)
             else:
                 effective_env[k] = v
-            explicit_env_override_keys.add(k)
 
     # 4. --max-turns shorthand (equivalent to --env MAX_TURNS=N)
     if args.max_turns is not None:
@@ -980,10 +990,20 @@ def main() -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+    has_full_info = "full_info" in args.modes
+    if has_full_info and (args.with_custom_tool or args.with_skill or args.with_ask_guidance):
+        print(
+            "ERROR: --with-custom-tool, --with-skill, and --with-ask-guidance are only allowed for ask_human mode.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     if args.sdk in {"claude", "codex"}:
         effective_env["WITH_CUSTOM_TOOL"] = "1" if args.with_custom_tool else "0"
+    effective_env["WITH_SKILL"] = "1" if args.with_skill else "0"
+    effective_env["WITH_ASK_GUIDANCE"] = "1" if args.with_ask_guidance else "0"
 
-    # 5. Reasoning defaults/overrides (unless SDK-specific key explicitly set via --env)
+    # 5. Reasoning defaults/overrides.
+    # CLI flags must take precedence over env/.env/--env values.
     sdk_cfg_for_reasoning = SDK_CONFIGS[args.sdk]
     model_for_reasoning = effective_env.get(
         sdk_cfg_for_reasoning["model_env_key"],
@@ -992,12 +1012,10 @@ def main() -> None:
     if args.reasoning_effort is not None:
         requested = reasoning_env_for_sdk(args.sdk, args.reasoning_effort)
         for k, v in requested.items():
-            if k not in explicit_env_override_keys:
-                effective_env[k] = v
+            effective_env[k] = v
     elif args.max_reasoning:
         for k, v in default_reasoning_env_for_model(model_for_reasoning).items():
-            if k not in explicit_env_override_keys and not effective_env.get(k):
-                effective_env[k] = v
+            effective_env[k] = v
 
     # Backward-compat aliases for previously used names.
     if "CLAUDE_REASONING_EFFORT" not in effective_env and effective_env.get("CLAUDE_EFFORT"):
@@ -1259,6 +1277,9 @@ def main() -> None:
                     "mode": mode,
                     "agent": args.sdk,
                     "model": model,
+                    "with_custom_tool": bool(args.with_custom_tool if args.sdk in {"claude", "codex"} else False),
+                    "with_skill": bool(args.with_skill),
+                    "with_ask_guidance": bool(args.with_ask_guidance),
                     "pass_index": pass_idx,
                     # Treat missing rows as unresolved so summary coverage is
                     # over the full run scope rather than only completed rows.
