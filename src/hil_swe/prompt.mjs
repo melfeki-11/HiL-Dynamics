@@ -1,8 +1,8 @@
 /**
  * SWE task prompt construction for trust_horizon.
  *
- * neutral/skill/no_tool modes: standard SWE-bench instance template
- * full_info  mode: standard SWE-bench instance template + blocker resolutions
+ * ask_human mode: standard SWE-bench instance template
+ * full_info mode: standard SWE-bench instance template + blocker resolutions
  *                  (matches hil_bench/templates/problem_full_info.jinja2)
  *
  * The instance template format matches hil_bench/configs/swe/ask_config_claude_opus_4-6.yaml

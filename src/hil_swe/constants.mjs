@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_ASK_HUMAN_MODEL, PAPER_ASK_HUMAN_MODEL_BEDROCK } from "../shared/config.mjs";
+import { DEFAULT_ASK_HUMAN_MODEL } from "../shared/config.mjs";
 
 // ── Container layout ──────────────────────────────────────────────────────────
 
@@ -102,8 +102,10 @@ export function buildAskHumanGuidance(toolName) {
       `WITH_ASK_GUIDANCE=${JSON.stringify(ASK_HUMAN_GUIDANCE_TEMPLATE_VERSION)} requires ${fileName} in ${TEMPLATES_DIR}.`,
     );
   }
-  void toolName;
-  return fs.readFileSync(filePath, "utf8");
+  const template = fs.readFileSync(filePath, "utf8");
+  const renderedToolName = String(toolName || "");
+  // No-op when placeholder is absent.
+  return template.replace(/\{\{\s*TOOL_NAME\s*\}\}/g, renderedToolName);
 }
 
 // ── Trajectory extraction helpers ─────────────────────────────────────────────

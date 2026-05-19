@@ -14,12 +14,12 @@
  *   LITELLM_BASE_URL      LiteLLM proxy base URL (e.g. http://localhost:4000)
  *
  * Optional env vars:
- *   MODE                  neutral (default) | skill | full_info | no_tool
+ *   MODE                  ask_human (default) | full_info
  *   PASS_INDEX            1-based pass number (default: 1)
  *   RUN_ID                run identifier string
  *   CLAUDE_MODEL          model slug (default: claude-sonnet-4-6)
  *   CLAUDE_REASONING_EFFORT reasoning effort (low|medium|high|xhigh|max), optional
- *   MAX_TURNS             max agent turns (default: 0 = unbounded)
+ *   MAX_STEPS             max agent steps (default: 0 = unbounded)
  *   ATTEMPT_TIMEOUT_MS    hard timeout in ms (default: 10800000 = 3 h)
  *   PERMISSION_MODE       claude permissionMode (default: acceptEdits)
  *   TASK_DIR              path to mounted task dir (default: /task)
@@ -57,8 +57,8 @@ import {
 import { sidecarAsk, startAskHumanSidecar, stopSidecar } from "./ask_human_sidecar_client.mjs";
 
 // Claude's native question-asking tool is AskUserQuestion. Guidance is an
-// explicit diagnostic flag, not part of neutral/skill arms by default.
-const ASK_HUMAN_GUIDANCE = buildAskHumanGuidance("AskUserQuestion");
+// explicit diagnostic flag, not part of ask_human by default.
+const ASK_HUMAN_GUIDANCE = buildAskHumanGuidance("AskUserQuestion and/or ask_human");
 
 // ── Configuration from env ──────────────────────────────────────────────────
 
@@ -68,7 +68,7 @@ const CLAUDE_REASONING_EFFORT = (
   process.env.CLAUDE_EFFORT || // backward-compat alias
   ""
 ).trim().toLowerCase();
-const MAX_TURNS       = Number(process.env.MAX_TURNS || "0");
+const MAX_STEPS       = Number(process.env.MAX_STEPS || "0");
 // "acceptEdits" auto-approves file edits while still letting canUseTool fire for
 // shell/MCP/AskUserQuestion calls so we can intercept them.  bypassPermissions would
 // skip the canUseTool callback for some tool types entirely.
@@ -326,7 +326,7 @@ function extractTrajectorySteps(events) {
   const handledAskIds = new Set();
 
   for (const event of events) {
-    // ── Ask/answer pairs from AskUserQuestion handling (neutral/skill modes) ─
+    // ── Ask/answer pairs from AskUserQuestion handling (ask_human mode) ──────
     // AskUserQuestion is handled via behavior:"allow" + pre-filled updatedInput.answers
     // so the model receives a proper tool-success result, not a deny error.
     // The claude_ask_question event is pushed by canUseTool after the LLM judge
@@ -582,7 +582,7 @@ async function main() {
     pass_index: PASS_INDEX,
     harness: "claude-code",
     model: CLAUDE_MODEL,
-    max_turns: MAX_TURNS > 0 ? MAX_TURNS : null,
+    max_steps: MAX_STEPS > 0 ? MAX_STEPS : null,
     timeout_ms: TIMEOUT_MS,
     workspace: WORKSPACE,
     task_dir: TASK_DIR,
@@ -666,7 +666,7 @@ async function main() {
           cwd: WORKSPACE,
           model: CLAUDE_MODEL,
           ...(CLAUDE_REASONING_EFFORT ? { effort: CLAUDE_REASONING_EFFORT } : {}),
-          ...(MAX_TURNS > 0 ? { maxTurns: MAX_TURNS } : {}),
+          ...(MAX_STEPS > 0 ? { maxTurns: MAX_STEPS } : {}),
           permissionMode: PERMISSION_MODE,
           env,
           mcpServers: customAskHumanMcp ? { human_input: customAskHumanMcp } : [],
@@ -685,10 +685,10 @@ async function main() {
             }
 
             // Native AskUserQuestion: intercept and route through the ask_human simulator
-            // (neutral/skill modes) or short-circuit with irrelevant answers (full_info mode).
+            // (ask_human mode) or short-circuit with irrelevant answers (full_info mode).
             if (isAskUserQuestionTool(_toolName)) {
               if (ASK_HUMAN_ENABLED) {
-                // neutral/skill modes: route to the LLM-backed human simulator.
+                // ask_human mode: route to the LLM-backed human simulator.
                 const {
                   answerText, answers, questions: qs, hitJudgeAny,
                 } = await answerClaudeAskUserQuestion({
@@ -799,10 +799,10 @@ async function main() {
       const maxTurnsReached = /Reached maximum number of turns/i.test(text);
       if (maxTurnsReached) {
         // Claude SDK surfaces maxTurns as an error result string. In this harness,
-        // reaching MAX_TURNS is an expected stop condition, not an infra failure.
+        // reaching MAX_STEPS is an expected stop condition, not an infra failure.
         sdkError = null;
-        stopReason = "max_turns";
-        pushEvent({ type: "max_turns_reached", timestamp: new Date().toISOString(), detail: text });
+        stopReason = "max_steps";
+        pushEvent({ type: "max_steps_reached", timestamp: new Date().toISOString(), detail: text });
       } else {
         sdkError = abortController.signal.aborted
           ? `Timed out after ${attemptTimeout}ms.\n\n${text}`

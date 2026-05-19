@@ -6,8 +6,8 @@ import { fileURLToPath } from "node:url";
 export const SHARED_SKILL_NAME = "clarify-information";
 
 export const SKILL_TOOL_REF = {
-  claude: "AskUserQuestion",
-  codex: "requestUserInput",
+  claude: "AskUserQuestion and/or ask_human",
+  codex: "requestUserInput and/or ask_human",
   adk: "ask_human",
   opencode: "ask_human",
 };
@@ -40,8 +40,9 @@ function renderSharedSkill(toolName) {
       `WITH_SKILL=${JSON.stringify(SKILL_TEMPLATE_VERSION)} requires ${fileName} in ${TEMPLATES_DIR}.`,
     );
   }
-  void toolName;
-  return template;
+  const renderedToolName = String(toolName || "");
+  // No-op when placeholder is absent.
+  return template.replace(/\{\{\s*TOOL_NAME\s*\}\}/g, renderedToolName);
 }
 
 async function installSkillAt(baseDir, toolName) {

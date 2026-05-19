@@ -12,12 +12,12 @@ TEST_OUTPUT="${ROOT_DIR}/runs/adk_traj_fix_test"
 mkdir -p "$TEST_OUTPUT"
 rm -f "$TEST_OUTPUT"/*.json "$TEST_OUTPUT"/*.diff
 
-echo "Running ADK harness (10 turns, neutral mode)..."
+echo "Running ADK harness (10 steps, ask_human mode)..."
 docker run --rm \
-  -e MODE=neutral \
+  -e MODE=ask_human \
   -e PASS_INDEX=1 \
   -e RUN_ID=adk_traj_fix_test \
-  -e MAX_TURNS=10 \
+  -e MAX_STEPS=10 \
   -e ATTEMPT_TIMEOUT_MS=300000 \
   -e ADK_MODEL="gemini/gemini-3.1-pro" \
   -e LITELLM_BASE_URL="${LITELLM_BASE_URL}" \

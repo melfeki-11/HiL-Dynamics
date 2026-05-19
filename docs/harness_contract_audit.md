@@ -108,7 +108,7 @@ Default judge model: `llmengine/llama-3-3-70b-instruct` through LiteLLM. The bra
 
 ## Budget and Resource Contract
 
-Budgets are unbounded by default (`MAX_TURNS=0`) across harnesses. The fairness comparison relies on observed resource logging instead of trying to collapse different harness-native turn units into one artificial cap. Every pass should write best-effort:
+Budgets are unbounded by default (`MAX_STEPS=0`) across harnesses. The fairness comparison relies on observed resource logging instead of trying to collapse different harness-native turn units into one artificial cap. Every pass should write best-effort:
 
 - wall-clock duration
 - LLM calls

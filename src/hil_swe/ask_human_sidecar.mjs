@@ -20,8 +20,8 @@
  *   POST /events/reset — clear accumulated global events; returns { cleared }
  *
  * Mode handling:
- *   neutral/skill:   route through createHumanInputRouter (LLM judge)
- *   full_info/no_tool: return "irrelevant question" immediately + emit
+ *   ask_human: route through createHumanInputRouter (LLM judge)
+ *   full_info: return "irrelevant question" immediately + emit
  *                    ask_question_full_info_mode event (for num_questions_full_info tracking)
  */
 
@@ -175,7 +175,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // ── neutral/skill mode: route through LLM judge ─────────────────────────
+    // ── ask_human mode: route through LLM judge ─────────────────────────────
     const requestEvents = [];
     _eventSink = requestEvents;
     let result;

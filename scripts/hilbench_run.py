@@ -131,7 +131,7 @@ def build_argv(
         raise ValueError("Slice config must specify either 'uids' or 'p_set'")
 
     # Modes
-    modes = [arm_override] if arm_override else slice_cfg.get("modes", ["neutral"])
+    modes = [arm_override] if arm_override else slice_cfg.get("modes", ["ask_human"])
     argv += ["--modes"] + [str(m) for m in modes]
 
     # Passes
@@ -144,10 +144,10 @@ def build_argv(
     if workers is not None:
         argv += ["--workers", str(workers)]
 
-    # Max turns
-    max_turns = slice_cfg.get("max_turns")
-    if max_turns is not None:
-        argv += ["--max-turns", str(max_turns)]
+    # Max steps
+    max_steps = slice_cfg.get("max_steps")
+    if max_steps is not None:
+        argv += ["--max-steps", str(max_steps)]
 
     if slice_cfg.get("held_out") and not allow_test_set:
         raise ValueError("Slice is marked held_out; pass --allow-test-set to run it.")
@@ -191,7 +191,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--arm",
-        choices=["full_info", "neutral", "skill", "no_tool"],
+        choices=["ask_human", "full_info"],
         default=None,
         help="Run a single experimental arm, overriding slice modes.",
     )

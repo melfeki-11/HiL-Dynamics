@@ -31,7 +31,7 @@ Gemini uses `high` because that is the highest supported reasoning-effort settin
 
 The default benchmark arm is `neutral`: the agent gets the task and a clarification channel, but no extra help-seeking guidance. The `skill` arm adds only the installed domain-general clarification skill. The `full_info` arm is the paper-style ceiling where blocker information is given upfront and no clarification channel is exposed.
 
-Budgets are intentionally unbounded by default (`MAX_TURNS=0`). Fairness is audited by reporting observed LLM calls, tool calls, native turns/items, tokens, and wall-clock time instead of forcing different harness-native turn concepts into one artificial cap.
+Budgets are intentionally unbounded by default (`MAX_STEPS=0`). Fairness is audited by reporting observed LLM calls, tool calls, native turns/items, tokens, and wall-clock time instead of forcing different harness-native turn concepts into one artificial cap.
 
 ## What This Measures
 

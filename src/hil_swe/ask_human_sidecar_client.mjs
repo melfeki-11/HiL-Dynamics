@@ -196,7 +196,7 @@ export async function startAskHumanSidecar({
   const proc = spawn(process.execPath, [script], {
     env: {
       ...env,
-      MODE: mode || env.MODE || "neutral",
+      MODE: mode || env.MODE || "ask_human",
       TASK_DIR: taskDir || env.TASK_DIR || "/task",
       TASK_UID: uid || env.TASK_UID || "unknown",
       ASK_HUMAN_BASE_URL: askHumanBaseUrl || env.ASK_HUMAN_BASE_URL || "",
