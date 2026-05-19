@@ -14,7 +14,7 @@ description: |-
 
 First identify what is the missing piece of information, ambiguous information, or contradictory information present in the task that you need to clarify. Then, use a question-asking tool you have at your disposal to ask a human user a clarification question.
 
-Rules for asking:
+Rules for asking for help:
 - Submit only ONE, clear, specific question at a time, targeting one specific detail.
 - Never ask multiple questions in one tool call. If there are multiple details you want to clarify, you MUST use this skill multiple times, asking questions one by one. Otherwise, the user won't answer.
 - Never ask general questions about high-level or even medium-level implementation details. E.g. "How should I implement function X?" is a bad question that will NOT be answered by the human user. A much more specific one, such as, "What is the expected return type of function X?" CAN be answered by the human.
