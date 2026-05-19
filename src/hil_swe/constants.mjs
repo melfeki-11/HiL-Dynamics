@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_ASK_HUMAN_MODEL } from "../shared/config.mjs";
+import { DEFAULT_ASK_HUMAN_MODEL, PAPER_ASK_HUMAN_MODEL_BEDROCK } from "../shared/config.mjs";
 
 // ── Container layout ──────────────────────────────────────────────────────────
 
