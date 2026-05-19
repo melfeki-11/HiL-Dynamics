@@ -121,6 +121,16 @@ def _default_run_owner_dir() -> Path:
 
 RUN_OWNER_DIR = Path(os.getenv("HIL_BENCH_RUN_OWNER_DIR") or str(_default_run_owner_dir()))
 
+
+# Identify containers owned by THIS process via a docker label so cleanup never
+# removes containers launched by any other process (same user or different user).
+# Include pid + random token unconditionally to guarantee per-process uniqueness
+# even if a caller sets HIL_BENCH_PROCESS_OWNER_LABEL to the same value.
+_owner_prefix = os.getenv("HIL_BENCH_PROCESS_OWNER_LABEL") or "thproc"
+_owner_prefix = re.sub(r"[^A-Za-z0-9_.-]+", "_", _owner_prefix) or "thproc"
+TH_OWNER_LABEL = f"{_owner_prefix}-{os.getpid()}-{uuid.uuid4().hex}"
+TH_OWNER_TOKEN = hashlib.sha1(TH_OWNER_LABEL.encode("utf-8")).hexdigest()[:10]
+
 # ── Attempt-start stagger (mirrors paper_pipeline.py: 20 s between launches) ─
 # Ensures the LiteLLM proxy / model API is not hammered with simultaneous cold
 # starts.  The lock + timestamp pattern mirrors paper_pipeline._wait_for_launch_slot.
@@ -442,6 +452,9 @@ def cleanup_orphaned_containers(harness_image: str, uid: str) -> int:
     - Two docker queries: by ancestor image AND by container name prefix.
       The name filter catches containers whose ancestor tracking is stale
       (e.g. image rebuilt with the same tag after the container started).
+    - Both queries are additionally scoped by the th_owner label so we only
+      see containers launched by this process. This prevents cross-process
+      cleanup entirely (same user and cross-user).
     - Exited containers: always remove (they're done).
     - Running containers: only remove if _uid_has_live_owner(uid) is False.
       This is uid-scoped, so a concurrent script owning a *different* uid
@@ -452,15 +465,18 @@ def cleanup_orphaned_containers(harness_image: str, uid: str) -> int:
     _FMT = "{{.ID}}\t{{.Image}}\t{{.Names}}\t{{.Status}}\t{{.RunningFor}}"
     # Container name prefix for this uid (all passes/modes/runs share this prefix).
     container_name_prefix = f"th-swe-{uid[:12]}-"
+    owner_filter = f"label=th_owner={TH_OWNER_LABEL}"
     try:
         by_ancestor = subprocess.run(
             ["docker", "ps", "-a", "--format", _FMT,
-             "--filter", f"ancestor={harness_image}"],
+             "--filter", f"ancestor={harness_image}",
+             "--filter", owner_filter],
             capture_output=True, text=True, check=False,
         )
         by_name = subprocess.run(
             ["docker", "ps", "-a", "--format", _FMT,
-             "--filter", f"name={container_name_prefix}"],
+             "--filter", f"name={container_name_prefix}",
+             "--filter", owner_filter],
             capture_output=True, text=True, check=False,
         )
         to_remove: set[str] = set()
@@ -689,13 +705,19 @@ def _run_attempt_inner(
     ]
 
     # Unique container name for targeted cleanup on timeout.
-    # Format: th-swe-<uid12>-<mode>-p<pass>-r<run_id_hash12>
-    container_name = f"th-swe-{uid[:12]}-{mode}-p{pass_index}-r{_run_id_token(run_id)}"
+    # Includes a process-owner token so concurrent processes with identical
+    # run_id/sdk/uid/mode/pass never collide on Docker's global name namespace.
+    # Format: th-swe-<uid12>-<mode>-p<pass>-r<run_id_hash12>-o<owner_hash10>
+    container_name = (
+        f"th-swe-{uid[:12]}-{mode}-p{pass_index}-r{_run_id_token(run_id)}-o{TH_OWNER_TOKEN}"
+    )
 
     cmd = [
         "docker", "run",
         "--rm",                         # auto-remove on clean exit
         "--name", container_name,       # named for targeted kill on timeout
+        # Tag owner so cleanup_orphaned_containers is process-scoped only.
+        "--label", f"th_owner={TH_OWNER_LABEL}",
         # Allow container to reach host services (LiteLLM proxy / judge route).
         # --add-host maps host.docker.internal → host gateway (same pattern as hil-bench
         # configs/swe/ask_config_claude_opus_4-6.yaml).  Clients should use
