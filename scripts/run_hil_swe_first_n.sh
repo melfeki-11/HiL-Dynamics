@@ -7,9 +7,9 @@ Usage:
   scripts/run_hil_swe_first_n.sh <num_samples>
 
 Runs the first N deterministic HiL-Bench SWE samples on:
-  - Claude Code: claude-sonnet-4-6
-  - Codex: gpt-5.5 with low reasoning effort
-  - OpenCode: bedrock/qwen.qwen3-32b-v1:0
+  - Claude Code: claude-opus-4-7
+  - Codex: gpt-5.5 with xhigh reasoning effort
+  - OpenCode: fireworks_ai/glm-5p1
 
 The script prepares the HiL-SWE fixture, validates the ask_human KB selector,
 runs k=3 for all harnesses, computes pass@1/pass@3 and process metrics, and
@@ -35,15 +35,15 @@ cd "$ROOT_DIR"
 K=3
 CREDENTIALS_ENV="${LITELLM_CREDENTIALS_ENV:-}"
 CLARIFICATION_PROFILE="generic-v1"
-CLAUDE_MODEL_CANDIDATES="claude-sonnet-4-6"
-CLAUDE_THINKING="${CLAUDE_CODE_THINKING:-disabled}"
-CLAUDE_EFFORT="${CLAUDE_CODE_EFFORT:-low}"
+CLAUDE_MODEL_CANDIDATES="claude-opus-4-7"
+CLAUDE_THINKING="${CLAUDE_CODE_THINKING:-enabled}"
+CLAUDE_EFFORT="${CLAUDE_CODE_EFFORT:-xhigh}"
 CODEX_MODEL="gpt-5.5"
-CODEX_REASONING_EFFORT="low"
-OPENCODE_MODEL="bedrock/qwen.qwen3-32b-v1:0"
-ASK_HUMAN_MODEL="bedrock/qwen.qwen3-32b-v1:0"
+CODEX_REASONING_EFFORT="xhigh"
+OPENCODE_MODEL="fireworks_ai/glm-5p1"
+ASK_HUMAN_MODEL="llmengine/llama-3-3-70b-instruct"
 ATTEMPT_TIMEOUT_MS="${HARNESS_ATTEMPT_TIMEOUT_MS:-1800000}"
-MAX_TURNS="${HARNESS_MAX_TURNS:-200}"
+MAX_STEPS="${HARNESS_MAX_STEPS:-0}"
 EVAL_WORKERS="${SWEBENCH_EVAL_WORKERS:-}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 PREPARED_DIR="data/hil_bench_swe_first${NUM_SAMPLES}"
@@ -71,7 +71,7 @@ echo "  opencode model: ${OPENCODE_MODEL}"
 echo "  ask_human judge model: ${ASK_HUMAN_MODEL}"
 echo "  clarification profile: ${CLARIFICATION_PROFILE}"
 echo "  attempt timeout ms: ${ATTEMPT_TIMEOUT_MS}"
-echo "  max turns: ${MAX_TURNS}"
+echo "  max steps: ${MAX_STEPS}"
 
 mkdir -p "${RUN_DIR}/preflight"
 
@@ -127,7 +127,7 @@ PASSK_ARGS=(
   --codex-transport app-server
   --codex-approval-policy on-request
   --attempt-timeout-ms "$ATTEMPT_TIMEOUT_MS"
-  --max-turns "$MAX_TURNS"
+  --max-steps "$MAX_STEPS"
   --concurrency 2
 )
 if [[ -n "$EVAL_WORKERS" ]]; then

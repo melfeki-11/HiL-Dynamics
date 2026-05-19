@@ -1,0 +1,9 @@
+# 12 public HiL-Bench SWE tasks materialized from ScaleAI/hil-bench.
+# Intended for local smoke/regression runs; not a held-out final evaluation split.
+uids_file: data/hil_swe_public12_uids.txt
+modes:
+  - full_info
+  - neutral
+  - skill
+passes: 1
+workers: 3

@@ -1,4 +1,4 @@
-# Trust Horizon — Run Output Schema
+# Escalation Lens — Run Output Schema
 
 All run outputs are written under `trust_horizon/runs/`. Nothing in `runs/` is committed to git.
 
@@ -6,21 +6,25 @@ All run outputs are written under `trust_horizon/runs/`. Nothing in `runs/` is c
 
 ```
 runs/
-  <run_id>/                           e.g. "claude-code_ask_human_20260507_153000"
+  <run_id>/                           e.g. "claude_smoke_20260518_153000"
     <attempt_uid>/                    e.g. "69bc1094b455a91fa20fb868"
-      <mode>/                         "ask_human" | "full_info"
-        <agent>/                      "claude-code" | "codex" | "opencode" | "google-adk"
-          <model>/                    e.g. "claude-sonnet-4-6" | "gpt-5.5"
-            pass_1/
-              trajectory.json
-              patch.diff
-              metrics.json
-            pass_2/
-              ...
-            pass_3/
-              ...
-    summary_metrics.json              Aggregated after all passes complete
-    pass_level_metrics.csv            One row per (attempt, mode, agent, model, pass)
+      <mode>/                         "neutral" | "skill" | "full_info" | "no_tool"
+        pass_1/
+          attempt.json
+          trajectory.json
+          patch.diff
+          stats.json
+          result.json
+          eval_result.json
+        pass_2/
+          ...
+        pass_3/
+          ...
+    metrics/
+      pass_level.json                 One row per (attempt, mode, agent, model, pass)
+      summary.json                    Aggregated after all passes complete
+    report.md
+    metadata.json
 ```
 
 ## File Formats
@@ -39,13 +43,19 @@ A JSON array of steps. Each step:
   }
 ]
 ```
-For native `AskUserQuestion` events (claude-code), the step should also include:
+Clarification calls are normalized into ordinary steps. The `act` prefix distinguishes the surface:
+
+- `ask_human [native] ...` for Claude `AskUserQuestion` and Codex `requestUserInput`
+- `ask_human [custom_mcp] ...` for explicit MCP `human_input.ask_human`
+- `ask_human ...` for ADK/OpenCode native tool surfaces that already expose that name
+
+The matching `human_input_*` raw events retain the exact native event type:
 ```json
 {
-  "act": "AskUserQuestion: <question text>",
-  "obs": "<answer from human router>",
-  "nativeEventType": "claude.AskUserQuestion.canUseTool",
-  "blockerResolved": "<blocker_id or null>"
+  "type": "human_input_raw_event",
+  "request_type": "clarification",
+  "native_event_type": "claude.AskUserQuestion.canUseTool | codex.item/tool/requestUserInput | claude.mcp.ask_human | codex.mcp.ask_human | adk.ask_human",
+  "question": "<question text>"
 }
 ```
 
@@ -53,7 +63,7 @@ For native `AskUserQuestion` events (claude-code), the step should also include:
 Plain text output of `git diff HEAD` from inside the Docker container at the end of the agent run.
 Empty string if no changes were made.
 
-### `metrics.json`
+### `stats.json`
 ```json
 {
   "resolved": false,
@@ -68,42 +78,81 @@ Empty string if no changes were made.
   "num_steps": 28,
   "tokens_sent": 18400,
   "tokens_received": 3200,
+  "wall_clock_ms": 312400,
+  "num_llm_calls": 19,
+  "num_tool_calls": 11,
+  "num_turns_or_items": 42,
+  "input_tokens": 18400,
+  "output_tokens": 3200,
+  "total_tokens": 21600,
   "agent": "claude-code",
-  "model": "claude-sonnet-4-6",
-  "mode": "ask_human",
+  "model": "claude-opus-4-7",
+  "mode": "neutral",
   "attempt_uid": "69bc1094b455a91fa20fb868",
   "pass_num": 1,
-  "run_id": "claude-code_ask_human_20260507_153000",
+  "run_id": "claude_smoke_20260518_153000",
   "duration_seconds": 312.4
 }
 ```
 
-### `summary_metrics.json`
-Written after all passes for a run_id complete. Structure mirrors `run_hil_bench.py`'s `build_summary()`:
+### `metrics/pass_level.json`
+Each row is a normalized pass-level record with solve/eval status, ask metrics, resource usage, and a `pass_dir` pointer:
+
+```json
+{
+  "uid": "69bc1094b455a91fa20fb868",
+  "mode": "neutral",
+  "agent": "claude",
+  "model": "claude-opus-4-7",
+  "pass_index": 1,
+  "status": "unresolved",
+  "resolved": false,
+  "num_steps": 28,
+  "num_questions": 2,
+  "num_blockers_resolved": 1,
+  "num_blockers_total": 4,
+  "wall_clock_ms": 312400,
+  "num_llm_calls": 19,
+  "num_tool_calls": 11,
+  "num_turns_or_items": 42,
+  "input_tokens": 18400,
+  "output_tokens": 3200,
+  "total_tokens": 21600,
+  "llm_proxy_error_count": 0,
+  "llm_proxy_status_counts": {"200": 19},
+  "llm_proxy_stripped_params": {"tool_choice": 19},
+  "pass_dir": "runs/<run-id>/<uid>/neutral/pass_1"
+}
+```
+
+### `metrics/summary.json`
+Written after all passes for a run_id complete:
 ```json
 {
   "metadata": {
     "run_id": "...",
     "num_passes": 3,
-    "modes": ["ask_human"],
-    "agents": ["claude-code"],
-    "generated_at": "2026-05-07T22:30:00Z"
+    "include_partial": false,
+    "generated_at": "2026-05-18T22:30:00Z",
+    "formula": "macro/paper ..."
   },
-  "SWE": {
-    "ask_human": {
-      "claude-code": {
-        "claude-sonnet-4-6": {
-          "num_included_attempts": 3,
-          "pass_at_1": 0.33,
-          "pass_at_3": 0.67,
-          "ask_precision": 0.6,
-          "ask_recall": 0.4,
-          "ask_f1": 0.48,
-          "avg_cost_per_pass": 0.38,
-          "avg_steps_per_pass": 24.1,
-          "avg_num_questions_per_pass": 1.8
-        }
-      }
+  "by_mode_agent_model": {
+    "neutral/claude/claude-opus-4-7": {
+      "num_attempts": 3,
+      "pass_at_1": 0.33,
+      "pass_at_3": 0.67,
+      "ask_precision": 0.6,
+      "ask_recall": 0.4,
+      "ask_f1": 0.48,
+      "avg_steps_per_pass": 24.1,
+      "avg_questions_per_pass": 1.8,
+      "avg_wall_clock_ms_per_pass": 312400,
+      "avg_llm_calls_per_pass": 19,
+      "avg_tool_calls_per_pass": 11,
+      "avg_turns_or_items_per_pass": 42,
+      "total_input_tokens": 55200,
+      "total_output_tokens": 9600,
+      "total_tokens": 64800
     }
   }
 }
@@ -125,11 +174,13 @@ ask_f1        = mean(f1_for_pass)         where f1 = harmonic mean of per-pass p
 pass@k: fraction of attempts where ANY of the first k passes resolved the task
 ```
 
-A pass is **invalid** (excluded from metrics) if its trajectory contains:
+A pass is marked `infra_error` or excluded from aggregate metrics if the solve/eval path failed, or if its trajectory contains:
 - 3+ timeout observations
 - 1+ "can't answer (perhaps transient hiccup)" observations
 - "Environment died unexpectedly" as the last observation
 - "Exit due to unknown error" in the last step's response
+
+Budgets are intentionally unbounded by default. Fairness is audited by reporting observed LLM calls, tool calls, turns/items, token usage, and wall-clock duration rather than forcing every harness into an artificial shared turn unit.
 
 ## Key Field Definitions
 
@@ -140,3 +191,8 @@ A pass is **invalid** (excluded from metrics) if its trajectory contains:
 | `num_questions` | Number of times agent invoked `AskUserQuestion` / `ask_human` tool / `requestUserInput` |
 | `num_blockers_resolved` | Number of distinct blocker IDs the LLM judge matched to agent questions |
 | `total_num_blockers` | Number of blockers in `blocker_registry.json` for this task |
+| `num_llm_calls` | Best-effort observed LLM call count from harness events/token usage records |
+| `num_tool_calls` | Observed tool-call count from normalized trajectory and native events |
+| `num_turns_or_items` | Harness-native turn/item count; comparable as an observed diagnostic, not a hard budget |
+| `input_tokens`, `output_tokens`, `total_tokens` | Best-effort token usage; `null` when the provider/harness does not expose usage |
+| `llm_proxy_error_count`, `llm_proxy_status_counts`, `llm_proxy_stripped_params` | OpenCode/LiteLLM shim diagnostics when present; absent or empty for non-OpenCode harnesses |

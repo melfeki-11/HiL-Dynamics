@@ -159,7 +159,7 @@ async function runAttempt({ row, attemptIndex, args, runDir }) {
     model: args.model,
     claude_thinking: args.claudeThinking,
     claude_effort: args.claudeEffort,
-    max_turns: args.maxTurns,
+    max_steps: args.maxSteps,
     attempt_timeout_ms: args.attemptTimeoutMs,
     permission_mode: args.permissionMode,
     human_input_enabled: Boolean(args.humanKb),
@@ -211,7 +211,7 @@ async function runAttempt({ row, attemptIndex, args, runDir }) {
         cwd: workspaceDir,
         model: args.model,
         ...claudeThinkingOptions(args),
-        maxTurns: args.maxTurns,
+        maxTurns: args.maxSteps,
         permissionMode: args.permissionMode,
         env,
         ...(askHumanServer

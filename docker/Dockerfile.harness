@@ -21,7 +21,7 @@
 #     node /opt/trust_horizon/src/hil_swe/run_claude.mjs
 
 ARG BASE_IMAGE
-FROM node:20-bookworm-slim AS node_runtime
+FROM --platform=linux/amd64 node:20-bookworm-slim AS node_runtime
 
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
