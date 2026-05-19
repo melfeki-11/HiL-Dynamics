@@ -17,7 +17,9 @@ const SHARED_SKILL_TEMPLATE_PATH = path.join(__dirname, "templates", "ask_human_
 const SHARED_SKILL_TEMPLATE = readFileSync(SHARED_SKILL_TEMPLATE_PATH, "utf8");
 
 function renderSharedSkill(toolName) {
-  return SHARED_SKILL_TEMPLATE.replaceAll("{{TOOL_NAME}}", String(toolName || ""));
+  // Keep one canonical SKILL.md body across all SDKs/harnesses.
+  void toolName;
+  return SHARED_SKILL_TEMPLATE;
 }
 
 async function installSkillAt(baseDir, toolName) {

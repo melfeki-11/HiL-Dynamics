@@ -53,7 +53,6 @@ import {
   richAskHumanToolDescriptionForHarness,
   THOUGHT_CAP, ACT_CAP, OBS_CAP, cap, computeResourceStats, gitDiff,
 } from "./constants.mjs";
-import { createAskLimitTracker } from "./ask_limits.mjs";
 import { sidecarAsk, startAskHumanSidecar, stopSidecar } from "./ask_human_sidecar_client.mjs";
 
 // Claude's native question-asking tool is AskUserQuestion. Guidance is an
@@ -74,7 +73,7 @@ const MAX_TURNS       = Number(process.env.MAX_TURNS || "0");
 // skip the canUseTool callback for some tool types entirely.
 const PERMISSION_MODE = process.env.PERMISSION_MODE || "acceptEdits";
 const CLAUDE_BIN      = process.env.CLAUDE_CODE_EXECUTABLE || "claude";
-const WITH_CUSTOM_TOOL = ASK_HUMAN_ENABLED && !/^(0|false|no|off)$/i.test(String(process.env.WITH_CUSTOM_TOOL ?? "1"));
+const WITH_CUSTOM_TOOL = ASK_HUMAN_ENABLED && /^(1|true|yes|on)$/i.test(String(process.env.WITH_CUSTOM_TOOL ?? "0"));
 const VALID_CLAUDE_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
 if (CLAUDE_REASONING_EFFORT && !VALID_CLAUDE_EFFORTS.has(CLAUDE_REASONING_EFFORT)) {
   throw new Error(
@@ -138,27 +137,13 @@ function isCustomAskHumanTool(toolName) {
   return String(toolName || "") === "mcp__human_input__ask_human";
 }
 
-function extractReadPaths(toolName, input) {
-  const name = String(toolName || "");
-  const paths = [];
-  if (name === "Read" || name === "Glob" || name === "LS") {
-    for (const key of ["file_path", "path", "target_file", "file"]) {
-      if (input?.[key]) paths.push(input[key]);
-    }
-  }
-  if (/Grep|Search|search/i.test(name) && input?.path) {
-    paths.push(input.path);
-  }
-  return paths.map((p) => String(p)).filter(Boolean);
-}
-
 function appendSidecarEvents(result, pushEvent) {
   for (const ev of Array.isArray(result?.events) ? result.events : []) {
     pushEvent?.(ev);
   }
 }
 
-function createCustomAskHumanMcpServer({ sidecarUrl, pushEvent, askLimitTracker }) {
+function createCustomAskHumanMcpServer({ sidecarUrl, pushEvent }) {
   const toolDesc =
     richAskHumanToolDescriptionForHarness() ??
     "Ask a focused clarification question about task requirements.";
@@ -179,20 +164,6 @@ function createCustomAskHumanMcpServer({ sidecarUrl, pushEvent, askLimitTracker 
           const question = String(input?.question || "");
           const requestType = input?.request_type || "clarification";
           try {
-            if (askLimitTracker) {
-              const gate = askLimitTracker.checkBeforeJudge();
-              if (gate.shortCircuit) {
-                pushEvent({
-                  type: "ask_human_suppressed",
-                  timestamp: new Date().toISOString(),
-                  reason: gate.reason,
-                  question,
-                  sdk: "claude_custom_mcp",
-                });
-                return { content: [{ type: "text", text: gate.responseText }] };
-              }
-              askLimitTracker.notifyRoutedToJudge();
-            }
             const result = await sidecarAsk({
               sidecarUrl,
               question,
@@ -205,10 +176,6 @@ function createCustomAskHumanMcpServer({ sidecarUrl, pushEvent, askLimitTracker 
             });
             appendSidecarEvents(result, pushEvent);
             const resolution = result.resolution || UNKNOWN_RESOLUTION;
-            askLimitTracker?.recordJudgeResolution(resolution, {
-              blockerId: result.blocker_id,
-              status: result.status,
-            });
             return { content: [{ type: "text", text: resolution }] };
           } catch (err) {
             // Best-effort tool failure handling: keep the agent loop alive and
@@ -260,7 +227,7 @@ function createCustomAskHumanMcpServer({ sidecarUrl, pushEvent, askLimitTracker 
   });
 }
 
-async function answerClaudeAskUserQuestion({ sidecarUrl, input, permission, askLimitTracker, pushEvent }) {
+async function answerClaudeAskUserQuestion({ sidecarUrl, input, permission, pushEvent }) {
   const questions = Array.isArray(input?.questions) ? input.questions : [input];
   const answerParts = [];
   // AskUserQuestionOutput.answers is keyed by question text (not header).
@@ -272,52 +239,19 @@ async function answerClaudeAskUserQuestion({ sidecarUrl, input, permission, askL
     const prompt = question?.question || "Clarification request";
     let answerStr;
 
-    if (askLimitTracker) {
-      const gate = askLimitTracker.checkBeforeJudge();
-      if (gate.shortCircuit) {
-        pushEvent?.({
-          type: "ask_human_suppressed",
-          timestamp: new Date().toISOString(),
-          reason: gate.reason,
-          question: prompt,
-          sdk: "claude_native",
-        });
-        answerStr = gate.responseText;
-      } else {
-        askLimitTracker.notifyRoutedToJudge();
-        const result = await sidecarAsk({
-          sidecarUrl,
-          question: prompt,
-          requestType: "clarification",
-          nativeEventType: "claude.AskUserQuestion.canUseTool",
-          rawEvent: { input, permission: serializablePermission(permission) },
-          options: question?.options || [],
-          context: { source: "claude_builtin_AskUserQuestion" },
-          fallbackSource: "claude_native_ask_user_question_error_fallback",
-        });
-        appendSidecarEvents(result, pushEvent);
-        answerStr = result.resolution || UNKNOWN_RESOLUTION;
-        askLimitTracker.recordJudgeResolution(answerStr, {
-          blockerId: result.blocker_id,
-          status: result.status,
-        });
-        hitJudgeAny = true;
-      }
-    } else {
-      const result = await sidecarAsk({
-        sidecarUrl,
-        question: prompt,
-        requestType: "clarification",
-        nativeEventType: "claude.AskUserQuestion.canUseTool",
-        rawEvent: { input, permission: serializablePermission(permission) },
-        options: question?.options || [],
-        context: { source: "claude_builtin_AskUserQuestion" },
-        fallbackSource: "claude_native_ask_user_question_error_fallback",
-      });
-      appendSidecarEvents(result, pushEvent);
-      answerStr = result.resolution || UNKNOWN_RESOLUTION;
-      hitJudgeAny = true;
-    }
+    const result = await sidecarAsk({
+      sidecarUrl,
+      question: prompt,
+      requestType: "clarification",
+      nativeEventType: "claude.AskUserQuestion.canUseTool",
+      rawEvent: { input, permission: serializablePermission(permission) },
+      options: question?.options || [],
+      context: { source: "claude_builtin_AskUserQuestion" },
+      fallbackSource: "claude_native_ask_user_question_error_fallback",
+    });
+    appendSidecarEvents(result, pushEvent);
+    answerStr = result.resolution || UNKNOWN_RESOLUTION;
+    hitJudgeAny = true;
 
     answerParts.push(`${prompt}\n${answerStr}`);
     answersMap[prompt] = answerStr;
@@ -717,11 +651,8 @@ async function main() {
         }));
       }
 
-      const askLimitTracker = ASK_HUMAN_ENABLED
-        ? createAskLimitTracker()
-        : null;
       const customAskHumanMcp = WITH_CUSTOM_TOOL
-        ? createCustomAskHumanMcpServer({ sidecarUrl, pushEvent, askLimitTracker })
+        ? createCustomAskHumanMcpServer({ sidecarUrl, pushEvent })
         : null;
 
       for await (const message of query({
@@ -761,7 +692,6 @@ async function main() {
                   sidecarUrl,
                   input: _input,
                   permission,
-                  askLimitTracker,
                   pushEvent,
                 });
                 // Emit a structured event so extractTrajectorySteps records the
@@ -847,9 +777,6 @@ async function main() {
                 blockedPath: permission.blockedPath || null,
               });
               return { behavior: "deny", toolUseID: permission.toolUseID, message: `Denied: ${decision.reason}`, decisionClassification: "user_temporary" };
-            }
-            for (const fp of extractReadPaths(_toolName, _input)) {
-              askLimitTracker?.noteFileRead?.(fp);
             }
             return { behavior: "allow", updatedInput: _input || {}, toolUseID: permission.toolUseID, decisionClassification: "user_temporary" };
           },

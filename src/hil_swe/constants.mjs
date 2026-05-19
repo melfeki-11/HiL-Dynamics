@@ -57,13 +57,10 @@ export const ASK_HUMAN_MODEL = process.env.ASK_HUMAN_MODEL || DEFAULT_ASK_HUMAN_
 
 // ── System-prompt guidance (ask_human mode only) ──────────────────────────────
 
-// Claude:  systemPrompt.append in the query() call.        toolName = "AskUserQuestion"
-// Codex:   developerInstructions in the thread/start RPC.  toolName = "requestUserInput"
+// Claude:  systemPrompt.append in the query() call.
+// Codex:   developerInstructions in the thread/start RPC.
 // Not injected in full_info mode — all context is already in the task prompt
 // and native questions are short-circuited to "irrelevant question" without ask-human guidance.
-//
-// The toolName parameter MUST match the agent's actual native tool name so the
-// model can connect the guidance to a concrete action in its tool list.
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ASK_HUMAN_GUIDANCE_TEMPLATE_PATH = path.join(__dirname, "templates", "ask_human_guidance.txt");
 const ASK_HUMAN_GUIDANCE_TEMPLATE = fs.readFileSync(ASK_HUMAN_GUIDANCE_TEMPLATE_PATH, "utf8");
@@ -91,10 +88,9 @@ export function richAskHumanToolDescriptionForHarness() {
 }
 
 export function buildAskHumanGuidance(toolName) {
-  return ASK_HUMAN_GUIDANCE_TEMPLATE.replaceAll(
-    "{{TOOL_NAME}}",
-    String(toolName || ""),
-  );
+  // Keep one canonical guidance body across all SDKs/harnesses.
+  void toolName;
+  return ASK_HUMAN_GUIDANCE_TEMPLATE;
 }
 
 // ── Trajectory extraction helpers ─────────────────────────────────────────────

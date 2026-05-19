@@ -66,7 +66,7 @@ const ASK_HUMAN_GUIDANCE = buildAskHumanGuidance("requestUserInput");
 
 const CODEX_MODEL = process.env.CODEX_MODEL || "gpt-5.5";
 const CODEX_BIN   = process.env.CODEX_CODE_EXECUTABLE || "codex";
-const WITH_CUSTOM_TOOL = ASK_HUMAN_ENABLED && !/^(0|false|no|off)$/i.test(String(process.env.WITH_CUSTOM_TOOL ?? "1"));
+const WITH_CUSTOM_TOOL = ASK_HUMAN_ENABLED && /^(1|true|yes|on)$/i.test(String(process.env.WITH_CUSTOM_TOOL ?? "0"));
 const CODEX_APPROVAL_POLICY = "on-request";
 // Optional reasoning effort override (none | minimal | low | medium | high | xhigh).
 // When set, plumbed three ways for belt-and-suspenders propagation:
@@ -161,11 +161,6 @@ function codexApiEnv({ sidecarUrl = "" } = {}) {
         env: {
           SIDECAR_URL: sidecarUrl,
           RICH_ASK_TOOL_DESC: process.env.RICH_ASK_TOOL_DESC || "",
-          MAX_ASKS_PER_PASS: process.env.MAX_ASKS_PER_PASS || "",
-          IRRELEVANT_COOLDOWN: process.env.IRRELEVANT_COOLDOWN || "",
-          IRRELEVANT_FIRST_THROTTLE: process.env.IRRELEVANT_FIRST_THROTTLE || "",
-          READ_BEFORE_ASK: process.env.READ_BEFORE_ASK || "",
-          READ_BEFORE_ASK_MIN_FILES: process.env.READ_BEFORE_ASK_MIN_FILES || "",
         },
       },
     };

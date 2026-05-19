@@ -1,4 +1,4 @@
-"""Regression tests for paper macro ask metrics in metrics_hil_swe.summarize."""
+"""Regression tests for micro ask metrics in metrics_hil_swe.summarize."""
 from __future__ import annotations
 
 import importlib.util
@@ -33,9 +33,9 @@ def _row(uid: str, pass_index: int, resolved: int, total: int, questions: int = 
     }
 
 
-class MetricsMacroTest(unittest.TestCase):
-    def test_recall_bounded_for_inflated_event_style_counts(self):
-        """Capped macro keeps R in [0,1] even if stored counts exceed registry size."""
+class MetricsMicroTest(unittest.TestCase):
+    def test_micro_recall_bounded_for_inflated_event_style_counts(self):
+        """Capped micro keeps R in [0,1] even if stored counts exceed registry size."""
         rows = [
             _row("u1", 1, 7, 4, 8),
             _row("u1", 2, 3, 5, 4),
@@ -47,8 +47,10 @@ class MetricsMacroTest(unittest.TestCase):
         self.assertLessEqual(m["ask_recall"], 1.0)
         self.assertGreaterEqual(m["ask_precision"], 0.0)
         self.assertLessEqual(m["ask_precision"], 1.0)
-        # pass 1: min(1, 7/4)=1.0; pass 2: 3/5; pass 3: 2/3 → mean ≈ 0.822
-        self.assertAlmostEqual(m["ask_recall"], (1.0 + 0.6 + 2 / 3) / 3, places=3)
+        # micro recall = min(1, (7+3+2) / (4+5+3)) = 1.0
+        self.assertAlmostEqual(m["ask_recall"], 1.0, places=3)
+        # micro precision = min(1, (7+3+2) / (8+4+2)) = 12/14
+        self.assertAlmostEqual(m["ask_precision"], 12 / 14, places=3)
 
     def test_unique_blockers_per_pass_recall(self):
         rows = [_row("u1", 1, 3, 5, 3)]
@@ -57,12 +59,12 @@ class MetricsMacroTest(unittest.TestCase):
         self.assertAlmostEqual(m["ask_recall"], 0.6)
         self.assertAlmostEqual(m["ask_precision"], 1.0)
 
-    def test_event_micro_diagnostic_can_exceed_one(self):
+    def test_event_micro_alias_matches_primary_micro(self):
         rows = [_row("u1", 1, 7, 4, 8)]
         out = metrics.summarize(rows, expected_passes=1, include_partial=True)
         m = out["ask_human/codex/gpt-5.5"]
-        self.assertGreater(m["ask_recall_event_micro"], 1.0)
-        self.assertLessEqual(m["ask_recall"], 1.0)
+        self.assertAlmostEqual(m["ask_precision_event_micro"], m["ask_precision"])
+        self.assertAlmostEqual(m["ask_recall_event_micro"], m["ask_recall"])
 
 
 if __name__ == "__main__":

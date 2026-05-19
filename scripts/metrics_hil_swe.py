@@ -7,22 +7,14 @@ computes aggregate metrics following the formulas from paper_pipeline.py:
 ACCURACY (pass@k):
   pass@k = (# attempts where any of passes 1..k resolved) / (# attempts with k valid passes)
 
-ASK METRICS — MACRO / paper (hil-bench paper_pipeline.py average-of-ratios):
+ASK METRICS — MICRO (global totals across all valid attempt × pass rows):
 
-  Per valid (attempt × pass), with num_blockers_resolved = unique blocker IDs answered:
-    precision_for_pass = min(1.0, num_blockers_resolved / num_questions)  (0 if num_questions == 0)
-    recall_for_pass    = min(1.0, num_blockers_resolved / num_blockers_total)  (0 if total == 0)
-    f1_for_pass        = harmonic mean of precision_for_pass and recall_for_pass
+  ask_precision = min(1.0, sum(num_blockers_resolved) / sum(num_questions))
+  ask_recall    = min(1.0, sum(num_blockers_resolved) / sum(num_blockers_total))
+  ask_f1        = harmonic mean of ask_precision and ask_recall
 
-  ask_precision = mean(precision_for_pass)
-  ask_recall    = mean(recall_for_pass)
-  ask_f1        = mean(f1_for_pass)
-
-  Diagnostic micro totals (event-sum style, NOT used for primary CSV fields):
-    ask_precision_event_micro, ask_recall_event_micro — sum(resolved)/sum(denominator)
-
-  "total" questions (judge + approval + permission): same macro per-pass with num_total_questions
-    as precision denominator; recall denominator unchanged.
+  "total" questions (judge + approval + permission): micro precision variant
+    using num_total_questions as the precision denominator.
 
 Output files written to runs/<run_id>/metrics/:
   pass_level.json       — per-(uid, mode, pass) raw numbers
@@ -59,8 +51,34 @@ TRAJECTORY_TIMEOUT_OBS_RE = re.compile(r"Command '\[.*\]' timed out after \d+ se
 TRAJECTORY_HICCUP_OBS = "can't answer (perhaps transient hiccup)"
 TRAJECTORY_ENV_DIED_OBS = "Environment died unexpectedly"
 TRAJECTORY_UNKNOWN_ERROR = "Exit due to unknown error"
-# SQL-specific constants — included for completeness; won't fire for SWE tasks.
+# SQL-specific constants.
 KB_QUERY_ERROR = "Error querying knowledge base"
+SQL_QUOTING_BUG_MARKERS = (
+    ("get_database_info", "Error: database $"),
+    ("get_table_info", "Error: table $"),
+    ("get_column_info", "Error: column $"),
+    ("get_business_info", "No business information found matching '$"),
+)
+HEX_HASH_PAT = r"[0-9a-f]{7,40}"
+GIT_SHOW_HASH_ACT_RE = re.compile(rf"\bgit show\b[^\n]*(?<!/)\b{HEX_HASH_PAT}\b", re.IGNORECASE)
+GIT_SHOW_COLON_ACT_RE = re.compile(r"\bgit show\b[^\n]*\S:", re.IGNORECASE)
+GIT_SHOW_COLON_SAFE_REF_RE = re.compile(r"^(?:HEAD(?:[~^]\d*)?|master|main)$", re.IGNORECASE)
+GIT_DIFF_TWO_HASHES_ACT_RE = re.compile(
+    rf"\bgit diff\b[^\n]*(?<!/)\b({HEX_HASH_PAT})\b[^\n]*(?<!/)\b({HEX_HASH_PAT})\b",
+    re.IGNORECASE,
+)
+GIT_LOG_ALL_ACT_RE = re.compile(r"\bgit log\b[^\n]*--all(?![-\w])", re.IGNORECASE)
+GIT_FATAL_OBS_RE = re.compile(
+    r"fatal:|ambiguous argument|unknown revision or path|bad object"
+    r"|not in the working tree|invalid object name",
+    re.IGNORECASE,
+)
+GIT_DIFF_CONTENT_OBS_RE = re.compile(r"^diff --git |^\+\+\+ b/", re.IGNORECASE | re.MULTILINE)
+GIT_COMMIT_CONTENT_OBS_RE = re.compile(r"^Author:\s|^commit [0-9a-f]{40}", re.MULTILINE)
+GIT_LOG_ONELINE_SHA_RE = re.compile(r"^[*|/\\ ]*[0-9a-f]{7,40}\b", re.IGNORECASE | re.MULTILINE)
+GIT_LOG_FULL_COMMIT_RE = re.compile(r"^commit\s+[0-9a-f]{40}\b", re.MULTILINE)
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[mKHFJA-Za-z]")
+SWE_INITIAL_COMMIT_MSG = "Initial commit for SWE-agent"
 
 TRAJECTORY_RERUN_OCCURRENCE_THRESHOLD_STRICT = 1   # hiccup, kb_query_error, unknown_error
 TRAJECTORY_RERUN_OCCURRENCE_THRESHOLD_LENIENT = 3  # timeout
@@ -196,6 +214,85 @@ def _trajectory_has_kb_query_error(steps: list[dict]) -> bool:
     return False
 
 
+def _trajectory_has_sql_quoting_bug_obs(steps: list[dict]) -> bool:
+    if not steps:
+        return False
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        act = step.get("act", "")
+        obs = step.get("obs", "")
+        if not isinstance(act, str) or not isinstance(obs, str):
+            continue
+        tool = act.split(None, 1)[0] if act.strip() else ""
+        for marker_tool, marker_obs in SQL_QUOTING_BUG_MARKERS:
+            if tool == marker_tool and obs.startswith(marker_obs):
+                return True
+    return False
+
+
+def _obs_has_git_fatal(obs: str) -> bool:
+    return bool(GIT_FATAL_OBS_RE.search(obs))
+
+
+def _obs_confirms_diff_leak(obs: str) -> bool:
+    return not _obs_has_git_fatal(obs) and bool(GIT_DIFF_CONTENT_OBS_RE.search(obs))
+
+
+def _obs_confirms_commit_show_leak(obs: str) -> bool:
+    if _obs_has_git_fatal(obs):
+        return False
+    if not GIT_COMMIT_CONTENT_OBS_RE.search(obs):
+        return False
+    if SWE_INITIAL_COMMIT_MSG in obs:
+        return False
+    return True
+
+
+def _obs_confirms_file_show_leak(obs: str) -> bool:
+    return not _obs_has_git_fatal(obs) and len(obs.strip()) > 20
+
+
+def _obs_confirms_git_log_history_leak(obs: str) -> bool:
+    obs = ANSI_ESCAPE_RE.sub("", obs)
+    for m in GIT_LOG_ONELINE_SHA_RE.finditer(obs):
+        nl = obs.find("\n", m.start())
+        full_line = obs[m.start() : nl if nl >= 0 else len(obs)]
+        if SWE_INITIAL_COMMIT_MSG not in full_line:
+            return True
+    if len(GIT_LOG_FULL_COMMIT_RE.findall(obs)) > 1:
+        return True
+    return False
+
+
+def _trajectory_has_swe_git_history_leak(steps: list[dict]) -> bool:
+    if not steps:
+        return False
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        act = step.get("act", "")
+        obs = step.get("obs", "") or ""
+        if not isinstance(act, str):
+            continue
+        if not isinstance(obs, str):
+            obs = str(obs) if obs else ""
+        obs = ANSI_ESCAPE_RE.sub("", obs)
+        if GIT_SHOW_HASH_ACT_RE.search(act) and _obs_confirms_commit_show_leak(obs):
+            return True
+        if GIT_SHOW_COLON_ACT_RE.search(act):
+            ref_m = re.search(r"(\w[\w/.-]{3,}):", act)
+            if ref_m and not GIT_SHOW_COLON_SAFE_REF_RE.match(ref_m.group(1)):
+                if _obs_confirms_file_show_leak(obs):
+                    return True
+        if GIT_LOG_ALL_ACT_RE.search(act) and _obs_confirms_git_log_history_leak(obs):
+            return True
+        m = GIT_DIFF_TWO_HASHES_ACT_RE.search(act)
+        if m and m.group(1).lower() != m.group(2).lower() and _obs_confirms_diff_leak(obs):
+            return True
+    return False
+
+
 def _trajectory_needs_rerun(pass_dir: str) -> bool:
     """Return True if this pass's trajectory indicates a transient failure requiring rerun.
 
@@ -219,7 +316,51 @@ def _trajectory_needs_rerun(pass_dir: str) -> bool:
         or _trajectory_has_env_died_obs(steps)
         or _trajectory_has_unknown_error(steps)
         or _trajectory_has_kb_query_error(steps)
+        or _trajectory_has_sql_quoting_bug_obs(steps)
+        or _trajectory_has_swe_git_history_leak(steps)
     )
+
+
+def _load_json_dict(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _eval_result_is_infra_error(eval_data: dict[str, Any], result_data: dict[str, Any], result_exists: bool) -> bool:
+    if eval_data:
+        eval_status = eval_data.get("eval_status")
+        if eval_status is not None:
+            infra_error = eval_status == "infra_error"
+        else:
+            infra_error = (not result_exists) or bool(result_data.get("sdk_error")) or (not eval_data.get("test_ran", True))
+    else:
+        infra_error = True
+    return infra_error or _result_has_system_error(result_data)
+
+
+def pass_is_valid_for_scoring(pass_dir: str | Path) -> bool:
+    """Single source-of-truth validity check used by both reruns and metrics inclusion."""
+    p = Path(pass_dir)
+    result_data = _load_json_dict(p / "result.json")
+    result_exists = (p / "result.json").exists()
+    if not result_exists:
+        return False
+    eval_data = _load_json_dict(p / "eval_result.json")
+    if _eval_result_is_infra_error(eval_data, result_data, result_exists):
+        return False
+    if _trajectory_needs_rerun(str(p)):
+        return False
+    return True
+
+
+def pass_has_rerun_signal(pass_dir: str | Path) -> bool:
+    """True when trajectory content indicates this pass should be rerun."""
+    return _trajectory_needs_rerun(str(Path(pass_dir)))
 
 
 # ── Row loading ─────────────────────────────────────────────────────────────
@@ -284,8 +425,6 @@ def load_pass_rows(run_dir: Path) -> list[dict[str, Any]]:
                         result = json.loads(result_json.read_text())
                     except Exception:
                         pass
-                system_error_in_solve = _result_has_system_error(result)
-
                 has_eval = bool(eval_data)
                 resolved = eval_data.get("resolved") if has_eval else None
 
@@ -294,20 +433,11 @@ def load_pass_rows(run_dir: Path) -> list[dict[str, Any]]:
                 # pass@k).  Source of truth is the eval_status field written by
                 # eval_hil_swe.py.  For legacy eval_result.json files that predate the
                 # field, test_ran=False is treated as infra_error.
-                eval_status_field = eval_data.get("eval_status") if has_eval else None
-
-                if eval_status_field is not None:
-                    infra_error = eval_status_field == "infra_error"
-                else:
-                    # Legacy format: no eval_status field.
-                    infra_error = (
-                        not result_json.exists()          # never ran
-                        or bool(result.get("sdk_error"))  # SDK crashed
-                        or (has_eval and not eval_data.get("test_ran", True))  # test patch failed
-                    )
-                # Any solve-time system/harness error is rerun-worthy and excluded
-                # from metrics, even if an eval_result.json exists.
-                infra_error = infra_error or system_error_in_solve
+                infra_error = _eval_result_is_infra_error(
+                    eval_data=eval_data,
+                    result_data=result,
+                    result_exists=result_json.exists(),
+                )
 
                 row = {
                     "uid": uid,
@@ -388,10 +518,15 @@ def summarize(
     for (uid, mode, agent, model), pass_rows in grouped.items():
         valid_passes = []
         for r in sorted(pass_rows, key=lambda r: r["pass_index"]):
-            if r["status"] == "infra_error":
-                continue
-            if _trajectory_needs_rerun(r.get("pass_dir", "")):
-                continue
+            pass_dir = str(r.get("pass_dir", "") or "")
+            if pass_dir and Path(pass_dir).exists():
+                if not pass_is_valid_for_scoring(pass_dir):
+                    continue
+            else:
+                if r["status"] == "infra_error":
+                    continue
+                if _trajectory_needs_rerun(pass_dir):
+                    continue
             valid_passes.append(r)
         num_valid = len(valid_passes)
         should_include = num_valid >= 1 if include_partial else num_valid >= expected_passes
@@ -410,15 +545,7 @@ def summarize(
         # Strips out silent-pass lucky-passes that inflate raw pass@k.
         num_gated_solved_by_k = {k: 0 for k in range(1, k_max + 1)}
 
-        # Macro (paper) ask-metric accumulators
-        precision_sum = 0.0
-        recall_sum = 0.0
-        f1_sum = 0.0
-        precision_total_sum = 0.0
-        f1_total_sum = 0.0
-        ask_pass_count = 0
-
-        # Micro totals (diagnostics only)
+        # Micro ask-metric totals.
         total_blockers_resolved = 0.0
         # clarification + elicitation (LLM judge questions) — primary denominator
         total_questions = 0.0
@@ -476,19 +603,7 @@ def summarize(
 
                 if mode in ASK_METRIC_MODES:
                     n_res = float(row.get("num_blockers_resolved") or 0)
-                    n_q = float(row.get("num_questions") or 0)
-                    n_qt = float(row.get("num_total_questions") or row.get("num_questions") or 0)
                     n_tot = float(row.get("num_blockers_total") or 0)
-                    p_pass = min(1.0, n_res / n_q) if n_q > 0 else 0.0
-                    r_pass = min(1.0, n_res / n_tot) if n_tot > 0 else 0.0
-                    f1_pass = _f1(p_pass, r_pass)
-                    p_pass_total = min(1.0, n_res / n_qt) if n_qt > 0 else 0.0
-                    precision_sum += p_pass
-                    recall_sum += r_pass
-                    f1_sum += f1_pass
-                    precision_total_sum += p_pass_total
-                    f1_total_sum += _f1(p_pass_total, r_pass)
-                    ask_pass_count += 1
                     total_blockers_resolved += n_res
                     total_blockers_present += n_tot
 
@@ -521,30 +636,24 @@ def summarize(
             )
 
         if mode in ASK_METRIC_MODES:
-            # ── Primary ask metrics (paper macro): judge questions denominator
-            if ask_pass_count > 0:
-                ask_precision = precision_sum / ask_pass_count
-                ask_recall = recall_sum / ask_pass_count
-                ask_f1 = f1_sum / ask_pass_count
-                ask_precision_total = precision_total_sum / ask_pass_count
-                ask_recall_total = recall_sum / ask_pass_count
-                ask_f1_total = f1_total_sum / ask_pass_count
-            else:
-                ask_precision = ask_recall = ask_f1 = 0.0
-                ask_precision_total = ask_recall_total = ask_f1_total = 0.0
+            # ── Primary ask metrics: MICRO over all valid (attempt × pass) rows
+            ask_precision = min(1.0, total_blockers_resolved / total_questions) if total_questions > 0 else 0.0
+            ask_recall = min(1.0, total_blockers_resolved / total_blockers_present) if total_blockers_present > 0 else 0.0
+            ask_f1 = _f1(ask_precision, ask_recall)
+            ask_precision_total = (
+                min(1.0, total_blockers_resolved / total_total_questions) if total_total_questions > 0 else 0.0
+            )
+            ask_recall_total = ask_recall
+            ask_f1_total = _f1(ask_precision_total, ask_recall_total)
             metrics["ask_precision"] = ask_precision
             metrics["ask_recall"] = ask_recall
             metrics["ask_f1"] = ask_f1
             metrics["ask_precision_total"] = ask_precision_total
             metrics["ask_recall_total"] = ask_recall_total
             metrics["ask_f1_total"] = ask_f1_total
-            # Diagnostic micro (legacy event-sum) — audit only
-            metrics["ask_precision_event_micro"] = (
-                total_blockers_resolved / total_questions if total_questions > 0 else 0.0
-            )
-            metrics["ask_recall_event_micro"] = (
-                total_blockers_resolved / total_blockers_present if total_blockers_present > 0 else 0.0
-            )
+            # Backward-compatible aliases kept for downstream dashboards.
+            metrics["ask_precision_event_micro"] = ask_precision
+            metrics["ask_recall_event_micro"] = ask_recall
             metrics["total_questions"] = int(total_questions)
             metrics["total_ask_human_capped"] = int(total_ask_human_capped)
             metrics["total_ask_human_cooldown_denied"] = int(total_ask_human_cooldown_denied)
@@ -612,7 +721,7 @@ def main() -> None:
             "num_passes": args.passes,
             "include_partial": args.include_partial,
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "formula": "macro/paper (mean of per-pass min(1, resolved/total)); resolved = unique blocker IDs",
+            "formula": "micro/global totals (resolved = unique blocker IDs per pass)",
         },
         "by_mode_agent_model": summarize(
             rows, expected_passes=args.passes, include_partial=args.include_partial

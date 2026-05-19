@@ -4,7 +4,7 @@ Host-side orchestrator for trust_horizon HiL-SWE runs.
 Runs the full pipeline in one shot:
   Phase 1 — Solve:    spin up harness containers in parallel; each produces patch.diff + trajectory
   Phase 2 — Evaluate: for each completed solve, run the eval container (apply patches, run tests)
-  Phase 3 — Metrics:  compute pass@k and paper-style macro ask precision/recall/f1
+  Phase 3 — Metrics:  compute pass@k and micro ask precision/recall/f1
 
 All three phases can be individually skipped with --skip-eval / --skip-metrics.
 
@@ -106,7 +106,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 from eval_hil_swe import eval_attempt as _eval_attempt, cleanup_orphaned_eval_containers  # noqa: E402
-from metrics_hil_swe import load_pass_rows, summarize  # noqa: E402
+from metrics_hil_swe import load_pass_rows, summarize, pass_is_valid_for_scoring, pass_has_rerun_signal  # noqa: E402
 
 # Per-uid owner directory (mirrors paper_pipeline.py ATTEMPT_OWNER_DIR pattern).
 # Each run_attempt() call writes a "{uid}__{pid}__{token}.owner" marker; cleanup
@@ -781,14 +781,19 @@ def build_job_list(
     passes: int,
     run_id: str,
     skip_if_complete: bool,
+    require_scoring_validity: bool = False,
 ) -> list[dict]:
     jobs = []
     for task in tasks:
         for mode in modes:
             for pass_idx in range(1, passes + 1):
                 out_dir = output_dir_for(run_id, task["uid"], mode, pass_idx)
-                if skip_if_complete and result_is_complete(out_dir):
-                    continue
+                if skip_if_complete:
+                    if require_scoring_validity:
+                        if result_is_complete(out_dir) and not pass_has_rerun_signal(out_dir):
+                            continue
+                    elif result_is_complete(out_dir):
+                        continue
                 jobs.append({
                     "uid": task["uid"],
                     "image_name": task["image_name"],
@@ -909,10 +914,9 @@ def main() -> None:
         action="store_true",
         default=False,
         help=(
-            "Force-enable the additional top-level custom ask_human MCP tool for "
-            "claude/codex SDK runs. Neutral/skill runs enable this by default; "
-            "use --env WITH_CUSTOM_TOOL=0 to hide the MCP tool while keeping native "
-            "question interception."
+            "Enable the additional (non-replacing) custom ask_human MCP tool for "
+            "claude/codex SDK runs. Without this flag, claude/codex expose only their "
+            "native question-asking surface."
         ),
     )
     args = parser.parse_args()
@@ -968,17 +972,16 @@ def main() -> None:
     if not effective_env.get(model_env_key):
         effective_env[model_env_key] = sdk_cfg_for_model["default_model"]
 
-    # 4b. Optional override for custom ask_human MCP tool exposure (claude/codex only).
-    # The container-side runners default this on for neutral/skill modes so the
-    # explicit MCP surface and native question surface share one sidecar backend.
-    if args.with_custom_tool:
-        if args.sdk not in {"claude", "codex"}:
-            print(
-                "ERROR: --with-custom-tool is only supported with --sdk claude or --sdk codex.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        effective_env["WITH_CUSTOM_TOOL"] = "1"
+    # 4b. Custom ask_human MCP tool exposure (claude/codex only).
+    # Default is OFF unless --with-custom-tool is explicitly passed.
+    if args.with_custom_tool and args.sdk not in {"claude", "codex"}:
+        print(
+            "ERROR: --with-custom-tool is only supported with --sdk claude or --sdk codex.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if args.sdk in {"claude", "codex"}:
+        effective_env["WITH_CUSTOM_TOOL"] = "1" if args.with_custom_tool else "0"
 
     # 5. Reasoning defaults/overrides (unless SDK-specific key explicitly set via --env)
     sdk_cfg_for_reasoning = SDK_CONFIGS[args.sdk]
@@ -1076,21 +1079,23 @@ def main() -> None:
     for key in all_pass_keys:
         uid, mode, pass_idx = key
         pass_dir = run_dir / uid / mode / f"pass_{pass_idx}"
-        solve_complete = result_is_complete(pass_dir)
-        has_eval = (pass_dir / "eval_result.json").exists()
         if args.force:
             pending_pass_keys.add(key)
         elif args.skip_eval:
-            if not solve_complete:
+            if not result_is_complete(pass_dir):
                 pending_pass_keys.add(key)
         else:
-            # For normal solve+eval runs, a pass is considered complete only when
-            # both solve and eval artifacts exist.
-            if not (solve_complete and has_eval):
+            # Keep pass rerun selection aligned with metrics inclusion logic.
+            if not pass_is_valid_for_scoring(pass_dir):
                 pending_pass_keys.add(key)
 
     solve_jobs = build_job_list(
-        target_tasks, args.modes, args.passes, args.run_id, skip_if_complete=not args.force
+        target_tasks,
+        args.modes,
+        args.passes,
+        args.run_id,
+        skip_if_complete=not args.force,
+        require_scoring_validity=not args.skip_eval,
     )
     total = len(pending_pass_keys)
     skipped_solve = len(all_pass_keys) - len(solve_jobs)
