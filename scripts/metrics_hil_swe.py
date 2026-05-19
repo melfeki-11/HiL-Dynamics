@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any
 
 
-ASK_METRIC_MODES = {"neutral", "skill", "ask_human"}
+ASK_METRIC_MODES = {"ask_human"}
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNS_DIR = ROOT / "runs"
@@ -444,6 +444,9 @@ def load_pass_rows(run_dir: Path) -> list[dict[str, Any]]:
                     "mode": mode,
                     "agent": agent,
                     "model": model,
+                    "with_custom_tool": bool(attempt.get("with_custom_tool", False)),
+                    "with_skill": bool(attempt.get("skill_enabled", False)),
+                    "with_ask_guidance": bool(attempt.get("guidance_enabled", False)),
                     "pass_index": pass_idx,
                     "status": "infra_error" if infra_error else ("resolved" if resolved else "unresolved"),
                     "resolved": resolved,
@@ -491,7 +494,7 @@ def summarize(
     expected_passes: int,
     include_partial: bool = False,
 ) -> dict[str, Any]:
-    """Aggregate rows by (mode, agent, model) and compute pass@k + ask metrics.
+    """Aggregate rows by (mode, agent, model, customization flags) and compute pass@k + ask metrics.
 
     include_partial (default False, mirrors run_hil_bench.py default):
       False — only include attempts that have ALL expected_passes valid passes.
@@ -501,10 +504,18 @@ def summarize(
               pass@k denominators it qualifies for).  Useful for partial runs.
     """
 
-    # Group rows by (uid, mode, agent, model) → sorted list of pass rows
+    # Group rows by (uid, mode, agent, model, flags) → sorted list of pass rows
     grouped: dict[tuple, list[dict]] = defaultdict(list)
     for row in rows:
-        key = (row["uid"], row["mode"], row["agent"], row["model"])
+        key = (
+            row["uid"],
+            row["mode"],
+            row["agent"],
+            row["model"],
+            bool(row.get("with_custom_tool", False)),
+            bool(row.get("with_skill", False)),
+            bool(row.get("with_ask_guidance", False)),
+        )
         grouped[key].append(row)
 
     # For each group, sort passes, filter infra errors, and filter bad trajectories.
@@ -513,9 +524,9 @@ def summarize(
     #   - Skip passes whose trajectory needs rerun (hiccup obs → transient judge failure)
     #   - Apply include_partial: if False (canonical default), only include attempts
     #     that completed all expected_passes valid passes.
-    attempt_data: dict[tuple[str, str, str], list[list[dict]]] = defaultdict(list)
-    # key = (mode, agent, model)
-    for (uid, mode, agent, model), pass_rows in grouped.items():
+    attempt_data: dict[tuple[str, str, str, bool, bool, bool], list[list[dict]]] = defaultdict(list)
+    # key = (mode, agent, model, with_custom_tool, with_skill, with_ask_guidance)
+    for (uid, mode, agent, model, with_custom_tool, with_skill, with_ask_guidance), pass_rows in grouped.items():
         valid_passes = []
         for r in sorted(pass_rows, key=lambda r: r["pass_index"]):
             pass_dir = str(r.get("pass_dir", "") or "")
@@ -531,10 +542,10 @@ def summarize(
         num_valid = len(valid_passes)
         should_include = num_valid >= 1 if include_partial else num_valid >= expected_passes
         if should_include:
-            attempt_data[(mode, agent, model)].append(valid_passes)
+            attempt_data[(mode, agent, model, with_custom_tool, with_skill, with_ask_guidance)].append(valid_passes)
 
     result: dict[str, Any] = {}
-    for (mode, agent, model), attempts in sorted(attempt_data.items()):
+    for (mode, agent, model, with_custom_tool, with_skill, with_ask_guidance), attempts in sorted(attempt_data.items()):
         k_max = expected_passes
         num_attempts = len(attempts)
 
@@ -611,6 +622,9 @@ def summarize(
             "mode": mode,
             "agent": agent,
             "model": model,
+            "with_custom_tool": with_custom_tool,
+            "with_skill": with_skill,
+            "with_ask_guidance": with_ask_guidance,
             "num_attempts": num_attempts,
             "num_passes": k_max,
             "total_attempts_and_passes": total_attempts_and_passes,
@@ -666,7 +680,12 @@ def summarize(
             # how often agents asked despite having all info in their prompt.
             metrics["total_questions_full_info"] = int(total_questions_full_info)
 
-        key = f"{mode}/{agent}/{model}"
+        key = (
+            f"{mode}/{agent}/{model}"
+            f"/custom_tool={int(with_custom_tool)}"
+            f"/skill={int(with_skill)}"
+            f"/ask_guidance={int(with_ask_guidance)}"
+        )
         result[key] = metrics
 
     return result

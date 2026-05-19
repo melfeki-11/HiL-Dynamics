@@ -15,13 +15,14 @@ The harness mirrors run_claude.mjs and run_codex.mjs in structure and output
 format so eval_hil_swe.py and metrics_hil_swe.py work without modification.
 
 ask_human tool behaviour:
-  neutral mode    — registered; questions routed through ask_human_sidecar.mjs.
-  skill mode      — neutral + ask-human SKILL.md installed under /app/skills.
+  ask_human mode  — tool is registered; questions routed through ask_human_sidecar.mjs.
+                     Optional SKILL.md/guidance are controlled by WITH_SKILL and
+                     WITH_ASK_GUIDANCE.
   full_info mode  — ask_human tool is NOT registered; NO ask-human skill on disk.
 
 SWE-agent-like tool surface:
-  neutral/skill modes: bash + str_replace_editor + ask_human
-  full_info/no_tool modes: bash + str_replace_editor
+  ask_human mode: bash + str_replace_editor + ask_human
+  full_info mode: bash + str_replace_editor
 """
 
 from __future__ import annotations
@@ -60,18 +61,18 @@ OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "/output")
 
 def _normalize_mode(value: str | None) -> str:
     raw = (value or "").strip()
-    if not raw or raw == "ask_human":
-        return "neutral"
-    if raw in {"neutral", "skill", "full_info", "no_tool"}:
+    if not raw:
+        return "ask_human"
+    if raw in {"ask_human", "full_info"}:
         return raw
-    raise ValueError(f"Unknown MODE={raw!r}. Expected neutral, skill, full_info, or no_tool.")
+    raise ValueError(f"Unknown MODE={raw!r}. Expected ask_human or full_info.")
 
 
-MODE       = _normalize_mode(os.environ.get("MODE", "neutral"))
-ASK_HUMAN_ENABLED = MODE in {"neutral", "skill"}
-SKILL_ENABLED = MODE == "skill"
+MODE       = _normalize_mode(os.environ.get("MODE", "ask_human"))
+ASK_HUMAN_ENABLED = MODE == "ask_human"
+SKILL_ENABLED = ASK_HUMAN_ENABLED and str(os.environ.get("WITH_SKILL", "")).strip().lower() in ("1", "true", "yes", "on")
 FULL_INFO_ENABLED = MODE == "full_info"
-ASK_HUMAN_GUIDANCE_ENABLED = str(os.environ.get("ASK_HUMAN_GUIDANCE", "")).strip().lower() in ("1", "true", "yes", "on")
+ASK_HUMAN_GUIDANCE_ENABLED = ASK_HUMAN_ENABLED and str(os.environ.get("WITH_ASK_GUIDANCE", "")).strip().lower() in ("1", "true", "yes", "on")
 PASS_INDEX = int(os.environ.get("PASS_INDEX",  "1"))
 RUN_ID     = os.environ.get("RUN_ID",     "swe-run")
 TIMEOUT_MS = int(os.environ.get("ATTEMPT_TIMEOUT_MS", str(3 * 3_600_000)))
@@ -193,9 +194,9 @@ def _build_agent_tools(mode: str, bash_tool, editor_tool, ask_human_tool, skill_
     """Return the mode-specific ADK tool surface."""
     normalized_mode = _normalize_mode(mode)
     base_tools: list[Any] = [bash_tool, editor_tool]
-    if normalized_mode in {"neutral", "skill"}:
+    if normalized_mode == "ask_human":
         base_tools.append(ask_human_tool)
-    if normalized_mode == "skill":
+    if normalized_mode == "ask_human" and SKILL_ENABLED:
         return [*base_tools, *skill_toolsets]
     return base_tools
 
@@ -301,9 +302,9 @@ def _build_full_info_prompt(problem_statement: str, blockers: list[dict]) -> str
 def build_swe_prompt(problem_statement: str, mode: str, blockers: list[dict]) -> str:
     if mode == "full_info":
         return _build_full_info_prompt(problem_statement, blockers)
-    if mode in {"neutral", "skill", "no_tool", "ask_human"}:
+    if mode == "ask_human":
         return _instance_template(problem_statement)
-    raise ValueError(f"Unknown mode: {mode!r}. Expected neutral, skill, no_tool, or full_info.")
+    raise ValueError(f"Unknown mode: {mode!r}. Expected ask_human or full_info.")
 
 
 # ── System prompt (instruction) ───────────────────────────────────────────────
@@ -320,7 +321,7 @@ def _build_ask_human_guidance(tool_name: str) -> str:
 
 
 def _build_instruction(mode: str) -> str:
-    if _normalize_mode(mode) in {"neutral", "skill"} and ASK_HUMAN_GUIDANCE_ENABLED:
+    if _normalize_mode(mode) == "ask_human" and ASK_HUMAN_GUIDANCE_ENABLED:
         return f"{_BASE_SYSTEM}\n\n{_build_ask_human_guidance('ask_human')}"
     return _BASE_SYSTEM
 

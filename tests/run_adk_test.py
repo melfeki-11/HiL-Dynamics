@@ -401,8 +401,8 @@ class TestBuildSwePrompt(unittest.TestCase):
 
 class TestBuildInstruction(unittest.TestCase):
 
-    def test_neutral_mode_contains_only_base_by_default(self):
-        instr = _build_instruction("neutral")
+    def test_ask_human_mode_contains_only_base_by_default(self):
+        instr = _build_instruction("ask_human")
         self.assertIn("helpful assistant", instr)
         self.assertNotIn("human expert", instr)
         self.assertNotIn("irrelevant question", instr)
@@ -417,11 +417,10 @@ class TestBuildInstruction(unittest.TestCase):
         old = run_adk_module.ASK_HUMAN_GUIDANCE_ENABLED
         run_adk_module.ASK_HUMAN_GUIDANCE_ENABLED = True
         try:
-            instr = _build_instruction("neutral")
+            instr = _build_instruction("ask_human")
         finally:
             run_adk_module.ASK_HUMAN_GUIDANCE_ENABLED = old
-        self.assertIn("ask_human", instr)
-        self.assertNotIn("irrelevant question", instr)
+        self.assertIn("YOU _MUST_ ASK QUESTIONS", instr)
 
 
 # ── 5. Reasoning routing ─────────────────────────────────────────────────────
@@ -480,7 +479,7 @@ class TestBuildAgentTools(unittest.TestCase):
         self.assertIn(editor_tool, tools)
         self.assertNotIn(ask_human_tool, tools)
 
-    def test_skill_mode_includes_ask_human_tool_and_skills(self):
+    def test_ask_human_mode_includes_ask_human_tool_and_skills_when_enabled(self):
         def bash_tool():
             return None
 
@@ -491,7 +490,12 @@ class TestBuildAgentTools(unittest.TestCase):
             return None
 
         skill_toolset = object()
-        tools = _build_agent_tools("skill", bash_tool, editor_tool, ask_human_tool, [skill_toolset])
+        old = run_adk_module.SKILL_ENABLED
+        run_adk_module.SKILL_ENABLED = True
+        try:
+            tools = _build_agent_tools("ask_human", bash_tool, editor_tool, ask_human_tool, [skill_toolset])
+        finally:
+            run_adk_module.SKILL_ENABLED = old
         self.assertIn(bash_tool, tools)
         self.assertIn(editor_tool, tools)
         self.assertIn(ask_human_tool, tools)
