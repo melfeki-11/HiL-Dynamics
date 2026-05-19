@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Any
 
 
-ASK_METRIC_MODES = {"neutral", "skill", "ask_human"}
+ASK_METRIC_MODES = {"neutral", "skill"}
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNS_DIR = ROOT / "runs"
