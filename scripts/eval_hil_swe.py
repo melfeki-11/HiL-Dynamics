@@ -78,12 +78,14 @@ def _default_run_owner_dir() -> Path:
 RUN_OWNER_DIR = Path(os.getenv("HIL_BENCH_RUN_OWNER_DIR") or str(_default_run_owner_dir()))
 
 
-# Identify containers owned by this user via a docker label so
-# cleanup_orphaned_eval_containers can scope its --filter and not touch eval
-# containers launched by another user on the same host.  See the matching
-# constant + docstring in run_hil_swe.py for the multi-user rationale.
-TH_OWNER_LABEL = (os.getenv("USER") or getpass.getuser() or "unknown").strip()
-TH_OWNER_LABEL = re.sub(r"[^A-Za-z0-9_.-]+", "_", TH_OWNER_LABEL) or "unknown"
+# Identify containers owned by THIS process via a docker label so eval cleanup
+# never removes containers launched by any other process (same user or
+# different user). Include pid + random token unconditionally so ownership is
+# always process-unique even if HIL_BENCH_PROCESS_OWNER_LABEL collides.
+_owner_prefix = os.getenv("HIL_BENCH_PROCESS_OWNER_LABEL") or "thproc"
+_owner_prefix = re.sub(r"[^A-Za-z0-9_.-]+", "_", _owner_prefix) or "thproc"
+TH_OWNER_LABEL = f"{_owner_prefix}-{os.getpid()}-{uuid.uuid4().hex}"
+TH_OWNER_TOKEN = hashlib.sha1(TH_OWNER_LABEL.encode("utf-8")).hexdigest()[:10]
 
 # The eval container runs the base hilbench-swe image (not the harness).
 # It applies patches and runs run_script.sh / parser.py that are already baked in.
@@ -271,7 +273,7 @@ def cleanup_orphaned_eval_containers(uid: str) -> int:
     harness image, and base images vary per task).
 
     Mirrors cleanup_orphaned_containers in run_hil_swe.py:
-    - Scoped by the th_owner label so multi-user hosts don't cross-kill.
+    - Scoped by the th_owner label so cleanup is process-scoped only.
     - Exited containers: always remove.
     - Running containers: only remove if _uid_has_live_owner(uid) is False.
     """
@@ -804,14 +806,18 @@ set +e
         eval_script_file = tmp / "eval.sh"
         eval_script_file.write_text(eval_script)
 
-        # Unique name so we can kill by name on timeout (same pattern as run_hil_swe.py).
-        # Format: th-eval-<uid12>-<mode>-p<pass>-r<run_id_hash12>
-        container_name = f"th-eval-{uid[:12]}-{mode}-p{pass_index}-r{_run_id_token(run_id)}"
+        # Unique name so we can kill by name on timeout.
+        # Includes process-owner token to prevent collisions across concurrent
+        # processes that share run_id/uid/mode/pass.
+        # Format: th-eval-<uid12>-<mode>-p<pass>-r<run_id_hash12>-o<owner_hash10>
+        container_name = (
+            f"th-eval-{uid[:12]}-{mode}-p{pass_index}-r{_run_id_token(run_id)}-o{TH_OWNER_TOKEN}"
+        )
 
         cmd = [
             "docker", "run",
             "--name", container_name,
-            # Tag owner so cleanup_orphaned_eval_containers can filter cross-user noise.
+            # Tag owner so cleanup_orphaned_eval_containers is process-scoped only.
             "--label", f"th_owner={TH_OWNER_LABEL}",
             # hilbench-swe base images have ENTRYPOINT ["sleep", "infinity"] baked in.
             # The harness image clears this with ENTRYPOINT [] in Dockerfile.harness, but
