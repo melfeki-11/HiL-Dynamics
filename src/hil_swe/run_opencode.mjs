@@ -65,7 +65,7 @@ import {
 
 import { writeJson, writeText, ensureDir } from "../shared/io.mjs";
 import {
-  UNKNOWN_RESOLUTION, UNKNOWN_BLOCKER_ID,
+  UNKNOWN_RESOLUTION, CANT_ANSWER, UNKNOWN_BLOCKER_ID,
   ASK_HUMAN_REQUEST_TYPES, APPROVAL_REQUEST_TYPES,
 } from "../shared/human_input.mjs";
 
@@ -463,18 +463,24 @@ function extractTrajectory(serverEvents) {
       const output   = isError
         ? (state.error || part.error || "")
         : (state.output || part.output || part.result || "");
+      const hasInputObject = input && typeof input === "object" && Object.keys(input).length > 0;
+      const hasOutputText = String(output ?? "").trim().length > 0;
+
+      // Ignore no-op tool events that carry no identity, no args, and no output.
+      if (!toolName.trim() && !hasInputObject && !hasOutputText) continue;
 
       let act;
-      if (toolName === "ask_human") {
-        const q = String(input.question || "");
-        act = cap(`ask_human ${q}`, ACT_CAP);
+      if (isAskHumanToolName(toolName)) {
+        const q = extractAskQuestion({ input, state, part });
+        act = cap(`ask_human [custom_tool] ${q}`, ACT_CAP);
       } else if (toolName === "shell" || toolName === "bash") {
         const cmd = String(input.command || input.cmd || "");
-        act = cap(cmd || JSON.stringify(input), ACT_CAP);
+        act = cap(cmd || "shell: [missing command]", ACT_CAP);
       } else {
         let inputStr;
         try { inputStr = JSON.stringify(input); } catch { inputStr = String(input); }
-        act = cap(`${toolName}: ${inputStr}`, ACT_CAP);
+        const renderedName = toolName.trim() || "unknown_tool";
+        act = cap(`${renderedName}: ${inputStr}`, ACT_CAP);
       }
 
       steps.push({ thought: pendingThought, act, obs: cap(String(output), OBS_CAP) });
@@ -501,6 +507,98 @@ function extractTrajectory(serverEvents) {
 
   if (pendingThought) steps.push({ thought: pendingThought, act: "", obs: "" });
   return steps;
+}
+
+function isAskHumanToolName(toolName) {
+  const normalized = String(toolName || "").trim().toLowerCase();
+  if (!normalized) return false;
+  if (normalized === "ask_human" || normalized.endsWith(".ask_human")) return true;
+  return normalized.includes("ask_human");
+}
+
+function extractAskQuestion({ input, state, part }) {
+  const candidates = [
+    input?.question,
+    input?.ask_human?.question,
+    input?.arguments?.question,
+    input?.input?.question,
+    state?.input?.question,
+    part?.input?.question,
+    part?.args?.question,
+    part?.tool?.input?.question,
+    part?.tool?.arguments?.question,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string") {
+      return candidate;
+    }
+  }
+  return "";
+}
+
+function _askResolutionQueueFromEvents(events) {
+  const queue = [];
+  for (const ev of Array.isArray(events) ? events : []) {
+    if (ev?.type !== "human_input_result") continue;
+    const resolution = String(ev?.result?.resolution ?? "");
+    if (!resolution.trim()) continue;
+    queue.push(resolution);
+  }
+  return queue;
+}
+
+function _askQuestionQueueFromEvents(events) {
+  const queue = [];
+  const rawByRequestId = new Map();
+  for (const ev of Array.isArray(events) ? events : []) {
+    if (ev?.type !== "human_input_raw_event") continue;
+    if (!ASK_HUMAN_REQUEST_TYPES.has(ev?.request_type)) continue;
+    const requestId = String(ev?.request_id ?? "").trim();
+    if (!requestId) continue;
+    rawByRequestId.set(requestId, String(ev?.question ?? ""));
+  }
+  for (const ev of Array.isArray(events) ? events : []) {
+    if (ev?.type !== "human_input_result") continue;
+    const requestId = String(ev?.request_id ?? "").trim();
+    if (!requestId) continue;
+    if (!rawByRequestId.has(requestId)) continue;
+    queue.push(rawByRequestId.get(requestId) ?? "");
+  }
+  return queue;
+}
+
+function _canonicalAskObservation(obs) {
+  const text = String(obs ?? "").trim();
+  if (!text) return CANT_ANSWER;
+  if (text.startsWith("[no observation")) return CANT_ANSWER;
+  if (text.startsWith("[error]")) return CANT_ANSWER;
+  return text;
+}
+
+function normalizeAskObservations(trajectorySteps, events) {
+  const askResolutionQueue = _askResolutionQueueFromEvents(events);
+  const askQuestionQueue = _askQuestionQueueFromEvents(events);
+  return (Array.isArray(trajectorySteps) ? trajectorySteps : []).map((step) => {
+    if (!step || typeof step !== "object") return step;
+    const act = String(step.act || "");
+    if (!act.trim().startsWith("ask_human")) return step;
+    let normalizedAct = act;
+    if (/^ask_human\s+\[custom_tool\]\s*$/.test(act.trim()) && askQuestionQueue.length > 0) {
+      const matchedQuestion = String(askQuestionQueue.shift() ?? "");
+      if (matchedQuestion.length > 0) {
+        normalizedAct = `ask_human [custom_tool] ${matchedQuestion}`;
+      }
+    }
+    let obs = step.obs;
+    // OpenCode tool-part outputs for ask_human are often empty even when sidecar
+    // emitted a concrete resolution; consume sidecar result events in order.
+    if (askResolutionQueue.length > 0) obs = askResolutionQueue.shift();
+    return {
+      ...step,
+      act: cap(normalizedAct, ACT_CAP),
+      obs: cap(_canonicalAskObservation(obs), OBS_CAP),
+    };
+  });
 }
 
 // ── Utility ───────────────────────────────────────────────────────────────────
@@ -1007,7 +1105,10 @@ async function main() {
   ].filter(Boolean).join("\n").slice(-4000);
 
   const patch = await gitDiff(WORKSPACE);
-  const trajectorySteps = extractTrajectory(opencodeEvents);
+  const trajectorySteps = normalizeAskObservations(
+    extractTrajectory(opencodeEvents),
+    allEvents,
+  );
   const stats = {
     ...computeTrajectoryStats(allEvents, trajectorySteps, numBlockersTotal),
     ...computeResourceStats([...opencodeEvents, ...allEvents, proxyStats], trajectorySteps, runStartedAtMs),
