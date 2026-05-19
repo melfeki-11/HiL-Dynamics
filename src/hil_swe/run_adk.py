@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -70,9 +71,11 @@ def _normalize_mode(value: str | None) -> str:
 
 MODE       = _normalize_mode(os.environ.get("MODE", "ask_human"))
 ASK_HUMAN_ENABLED = MODE == "ask_human"
-SKILL_ENABLED = ASK_HUMAN_ENABLED and str(os.environ.get("WITH_SKILL", "")).strip().lower() in ("1", "true", "yes", "on")
+SKILL_TEMPLATE_VERSION = str(os.environ.get("WITH_SKILL", "")).strip() if ASK_HUMAN_ENABLED else ""
+SKILL_ENABLED = ASK_HUMAN_ENABLED and bool(SKILL_TEMPLATE_VERSION)
 FULL_INFO_ENABLED = MODE == "full_info"
-ASK_HUMAN_GUIDANCE_ENABLED = ASK_HUMAN_ENABLED and str(os.environ.get("WITH_ASK_GUIDANCE", "")).strip().lower() in ("1", "true", "yes", "on")
+ASK_HUMAN_GUIDANCE_TEMPLATE_VERSION = str(os.environ.get("WITH_ASK_GUIDANCE", "")).strip() if ASK_HUMAN_ENABLED else ""
+ASK_HUMAN_GUIDANCE_ENABLED = ASK_HUMAN_ENABLED and bool(ASK_HUMAN_GUIDANCE_TEMPLATE_VERSION)
 PASS_INDEX = int(os.environ.get("PASS_INDEX",  "1"))
 RUN_ID     = os.environ.get("RUN_ID",     "swe-run")
 TIMEOUT_MS = int(os.environ.get("ATTEMPT_TIMEOUT_MS", str(3 * 3_600_000)))
@@ -135,8 +138,7 @@ AGENT_NAME = "swe_agent"  # must be a valid Python identifier
 SKILL_NAME = "clarify-information"
 SKILL_TOOL_NAME = "ask_human"
 _TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
-_ASK_HUMAN_GUIDANCE_TEMPLATE_PATH = _TEMPLATE_DIR / "ask_human_guidance.txt"
-_SHARED_SKILL_TEMPLATE_PATH = _TEMPLATE_DIR / "ask_human_skill.md"
+_TEMPLATE_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 # ── Utility helpers ───────────────────────────────────────────────────────────
@@ -156,13 +158,28 @@ def _write_json(path: str | Path, data: Any) -> None:
     p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
-@lru_cache(maxsize=1)
-def _shared_skill_template() -> str:
-    return _SHARED_SKILL_TEMPLATE_PATH.read_text(encoding="utf-8")
+def _resolve_template_path(flag_name: str, version: str, extension: str) -> Path:
+    if not version:
+        raise RuntimeError(f"{flag_name} must be set when this feature is enabled.")
+    if not _TEMPLATE_VERSION_RE.fullmatch(version):
+        raise RuntimeError(
+            f"{flag_name} invalid value {version!r}. "
+            "Use only letters, digits, dot, underscore, or hyphen."
+        )
+    path = _TEMPLATE_DIR / f"{version}.{extension}"
+    if not path.exists():
+        raise RuntimeError(f"{flag_name}={version!r} requires template file {path}.")
+    return path
+
+
+@lru_cache(maxsize=8)
+def _shared_skill_template(version: str) -> str:
+    path = _resolve_template_path("WITH_SKILL", version, "md")
+    return path.read_text(encoding="utf-8")
 
 
 def _render_shared_skill(tool_name: str) -> str:
-    return _shared_skill_template().replace("{{TOOL_NAME}}", str(tool_name or ""))
+    return _shared_skill_template(SKILL_TEMPLATE_VERSION).replace("{{TOOL_NAME}}", str(tool_name or ""))
 
 
 def _install_workspace_skill_for_discovery(workspace: str, tool_name: str) -> Path:
@@ -311,13 +328,14 @@ def build_swe_prompt(problem_statement: str, mode: str, blockers: list[dict]) ->
 
 _BASE_SYSTEM = "You are a helpful assistant that can interact with a computer to solve tasks."
 
-@lru_cache(maxsize=1)
-def _ask_human_guidance_template() -> str:
-    return _ASK_HUMAN_GUIDANCE_TEMPLATE_PATH.read_text(encoding="utf-8")
+@lru_cache(maxsize=8)
+def _ask_human_guidance_template(version: str) -> str:
+    path = _resolve_template_path("WITH_ASK_GUIDANCE", version, "txt")
+    return path.read_text(encoding="utf-8")
 
 
 def _build_ask_human_guidance(tool_name: str) -> str:
-    return _ask_human_guidance_template().replace("{{TOOL_NAME}}", str(tool_name or ""))
+    return _ask_human_guidance_template(ASK_HUMAN_GUIDANCE_TEMPLATE_VERSION).replace("{{TOOL_NAME}}", str(tool_name or ""))
 
 
 def _build_instruction(mode: str) -> str:
@@ -750,6 +768,8 @@ async def main() -> None:
         "ask_human_tool_enabled": ASK_HUMAN_ENABLED,
         "skill_enabled": SKILL_ENABLED,
         "guidance_enabled": ASK_HUMAN_GUIDANCE_ENABLED,
+        "with_skill": SKILL_TEMPLATE_VERSION or "",
+        "with_ask_guidance": ASK_HUMAN_GUIDANCE_TEMPLATE_VERSION or "",
         "reasoning_effort_configured": ADK_REASONING_EFFORT or None,
         "reasoning_effort_forwarded": _adk_reasoning_effort_for_litellm(ADK_MODEL, ADK_REASONING_EFFORT) or None,
     })

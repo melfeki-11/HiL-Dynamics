@@ -22,8 +22,8 @@ def _row(uid: str, pass_index: int, resolved: int, total: int, questions: int = 
         "agent": "codex",
         "model": "gpt-5.5",
         "with_custom_tool": False,
-        "with_skill": False,
-        "with_ask_guidance": False,
+        "with_skill": "__none__",
+        "with_ask_guidance": "__none__",
         "pass_index": pass_index,
         "status": "resolved",
         "resolved": True,
@@ -37,7 +37,7 @@ def _row(uid: str, pass_index: int, resolved: int, total: int, questions: int = 
 
 
 class MetricsMicroTest(unittest.TestCase):
-    KEY = "ask_human/codex/gpt-5.5/custom_tool=0/skill=0/ask_guidance=0"
+    KEY = "ask_human/codex/gpt-5.5/custom_tool=0/skill=__none__/ask_guidance=__none__"
 
     def test_micro_recall_bounded_for_inflated_event_style_counts(self):
         """Capped micro keeps R in [0,1] even if stored counts exceed registry size."""

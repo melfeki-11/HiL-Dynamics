@@ -27,13 +27,11 @@ export function normalizeMode(mode) {
 
 export const MODE       = normalizeMode(process.env.MODE || "ask_human");
 export const ASK_HUMAN_ENABLED = MODE === "ask_human";
-export const SKILL_ENABLED = ASK_HUMAN_ENABLED && /^(1|true|yes|on)$/i.test(
-  String(process.env.WITH_SKILL || ""),
-);
+export const SKILL_TEMPLATE_VERSION = String(process.env.WITH_SKILL || "").trim();
+export const SKILL_ENABLED = ASK_HUMAN_ENABLED && SKILL_TEMPLATE_VERSION.length > 0;
 export const FULL_INFO_ENABLED = MODE === "full_info";
-export const ASK_HUMAN_GUIDANCE_ENABLED = ASK_HUMAN_ENABLED && /^(1|true|yes|on)$/i.test(
-  String(process.env.WITH_ASK_GUIDANCE || ""),
-);
+export const ASK_HUMAN_GUIDANCE_TEMPLATE_VERSION = String(process.env.WITH_ASK_GUIDANCE || "").trim();
+export const ASK_HUMAN_GUIDANCE_ENABLED = ASK_HUMAN_ENABLED && ASK_HUMAN_GUIDANCE_TEMPLATE_VERSION.length > 0;
 export const PASS_INDEX = Number(process.env.PASS_INDEX  || "1");
 export const RUN_ID     = process.env.RUN_ID     || "swe-run";
 export const TIMEOUT_MS = Number(process.env.ATTEMPT_TIMEOUT_MS || String(3 * 3600 * 1000));
@@ -64,8 +62,8 @@ export const ASK_HUMAN_MODEL = process.env.ASK_HUMAN_MODEL || DEFAULT_ASK_HUMAN_
 // Not injected in full_info mode — all context is already in the task prompt
 // and native questions are short-circuited to "irrelevant question" without ask-human guidance.
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ASK_HUMAN_GUIDANCE_TEMPLATE_PATH = path.join(__dirname, "templates", "ask_human_guidance.txt");
-const ASK_HUMAN_GUIDANCE_TEMPLATE = fs.readFileSync(ASK_HUMAN_GUIDANCE_TEMPLATE_PATH, "utf8");
+const TEMPLATES_DIR = path.join(__dirname, "templates");
+const TEMPLATE_VERSION_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 export const RICH_ASK_TOOL_DESC = /^(1|true|yes|on)$/i.test(
   String(process.env.RICH_ASK_TOOL_DESC || ""),
@@ -91,9 +89,21 @@ export function richAskHumanToolDescriptionForHarness() {
 
 export function buildAskHumanGuidance(toolName) {
   if (!ASK_HUMAN_GUIDANCE_ENABLED) return null;
-  // Keep one canonical guidance body across all SDKs/harnesses.
+  if (!TEMPLATE_VERSION_RE.test(ASK_HUMAN_GUIDANCE_TEMPLATE_VERSION)) {
+    throw new Error(
+      `Invalid WITH_ASK_GUIDANCE=${JSON.stringify(ASK_HUMAN_GUIDANCE_TEMPLATE_VERSION)}. ` +
+      "Use only letters, digits, dot, underscore, or hyphen.",
+    );
+  }
+  const fileName = `${ASK_HUMAN_GUIDANCE_TEMPLATE_VERSION}.txt`;
+  const filePath = path.join(TEMPLATES_DIR, fileName);
+  if (!fs.existsSync(filePath)) {
+    throw new Error(
+      `WITH_ASK_GUIDANCE=${JSON.stringify(ASK_HUMAN_GUIDANCE_TEMPLATE_VERSION)} requires ${fileName} in ${TEMPLATES_DIR}.`,
+    );
+  }
   void toolName;
-  return ASK_HUMAN_GUIDANCE_TEMPLATE;
+  return fs.readFileSync(filePath, "utf8");
 }
 
 // ── Trajectory extraction helpers ─────────────────────────────────────────────

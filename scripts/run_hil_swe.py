@@ -215,6 +215,7 @@ DATA_DIR = ROOT / "data" / "hil_bench_swe"
 TASKS_INDEX = DATA_DIR / "tasks_index.json"
 RUNS_DIR = ROOT / "runs"
 SRC_DIR = ROOT / "src"
+TEMPLATES_DIR = SRC_DIR / "hil_swe" / "templates"
 
 # SDK-specific configuration.  Values are overridden in main() based on --sdk.
 SDK_CONFIGS = {
@@ -355,6 +356,30 @@ def reasoning_env_for_sdk(sdk: str, effort: str) -> dict[str, str]:
     if sdk == "opencode":
         return {"OPENCODE_REASONING_EFFORT": eff}
     return {}
+
+
+_TEMPLATE_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _validate_template_version_name(flag_name: str, value: str) -> str:
+    version = (value or "").strip()
+    if not version:
+        raise ValueError(f"{flag_name} requires a non-empty template version name.")
+    if not _TEMPLATE_VERSION_RE.fullmatch(version):
+        raise ValueError(
+            f"{flag_name} invalid value {value!r}. "
+            "Use only letters, digits, dot, underscore, or hyphen."
+        )
+    return version
+
+
+def _require_template_file(flag_name: str, version: str, extension: str) -> None:
+    filename = f"{version}.{extension}"
+    path = TEMPLATES_DIR / filename
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{flag_name}={version!r} requires template {filename!r} at {path}"
+        )
 
 _print_lock = threading.Lock()
 
@@ -896,8 +921,7 @@ def main() -> None:
         default=None,
         help=(
             "Override reasoning effort tier for the selected SDK. "
-            "Takes precedence over --max-reasoning unless the SDK-specific env var "
-            "is explicitly set via --env."
+            "Takes precedence over --max-reasoning and env values."
         ),
     )
     parser.add_argument(
@@ -922,15 +946,23 @@ def main() -> None:
     )
     parser.add_argument(
         "--with-skill",
-        action="store_true",
-        default=False,
-        help="Enable shared SKILL.md exposure (ask_human mode only).",
+        type=str,
+        default=None,
+        metavar="TEMPLATE_BASENAME",
+        help=(
+            "Enable SKILL.md exposure using templates/<TEMPLATE_BASENAME>.md "
+            "(ask_human mode only)."
+        ),
     )
     parser.add_argument(
         "--with-ask-guidance",
-        action="store_true",
-        default=False,
-        help="Enable shared ask-human guidance injection (ask_human mode only).",
+        type=str,
+        default=None,
+        metavar="TEMPLATE_BASENAME",
+        help=(
+            "Enable ask guidance using templates/<TEMPLATE_BASENAME>.txt "
+            "(ask_human mode only)."
+        ),
     )
     args = parser.parse_args()
 
@@ -990,8 +1022,26 @@ def main() -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+    skill_version: str | None = None
+    guidance_version: str | None = None
+    if args.with_skill is not None:
+        try:
+            skill_version = _validate_template_version_name("--with-skill", args.with_skill)
+            _require_template_file("--with-skill", skill_version, "md")
+            args.with_skill = skill_version
+        except Exception as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
+    if args.with_ask_guidance is not None:
+        try:
+            guidance_version = _validate_template_version_name("--with-ask-guidance", args.with_ask_guidance)
+            _require_template_file("--with-ask-guidance", guidance_version, "txt")
+            args.with_ask_guidance = guidance_version
+        except Exception as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
     has_full_info = "full_info" in args.modes
-    if has_full_info and (args.with_custom_tool or args.with_skill or args.with_ask_guidance):
+    if has_full_info and (args.with_custom_tool or skill_version is not None or guidance_version is not None):
         print(
             "ERROR: --with-custom-tool, --with-skill, and --with-ask-guidance are only allowed for ask_human mode.",
             file=sys.stderr,
@@ -999,8 +1049,8 @@ def main() -> None:
         sys.exit(1)
     if args.sdk in {"claude", "codex"}:
         effective_env["WITH_CUSTOM_TOOL"] = "1" if args.with_custom_tool else "0"
-    effective_env["WITH_SKILL"] = "1" if args.with_skill else "0"
-    effective_env["WITH_ASK_GUIDANCE"] = "1" if args.with_ask_guidance else "0"
+    effective_env["WITH_SKILL"] = skill_version or ""
+    effective_env["WITH_ASK_GUIDANCE"] = guidance_version or ""
 
     # 5. Reasoning defaults/overrides.
     # CLI flags must take precedence over env/.env/--env values.
@@ -1278,8 +1328,8 @@ def main() -> None:
                     "agent": args.sdk,
                     "model": model,
                     "with_custom_tool": bool(args.with_custom_tool if args.sdk in {"claude", "codex"} else False),
-                    "with_skill": bool(args.with_skill),
-                    "with_ask_guidance": bool(args.with_ask_guidance),
+                    "with_skill": (args.with_skill or "__none__"),
+                    "with_ask_guidance": (args.with_ask_guidance or "__none__"),
                     "pass_index": pass_idx,
                     # Treat missing rows as unresolved so summary coverage is
                     # over the full run scope rather than only completed rows.

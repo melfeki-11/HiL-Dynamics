@@ -51,6 +51,7 @@ import { installAgentsSkill, removeInstalledAskHumanSkills, SKILL_TOOL_REF } fro
 import {
   WORKSPACE, TASK_DIR, OUTPUT_DIR,
   MODE, ASK_HUMAN_ENABLED, SKILL_ENABLED, FULL_INFO_ENABLED,
+  SKILL_TEMPLATE_VERSION, ASK_HUMAN_GUIDANCE_TEMPLATE_VERSION,
   ASK_HUMAN_GUIDANCE_ENABLED, PASS_INDEX, RUN_ID, TIMEOUT_MS,
   LITELLM_CALL_TIMEOUT_MS, STEP_LITELLM_TRIES,
   ASK_HUMAN_BASE_URL, ASK_HUMAN_MODEL, buildAskHumanGuidance,
@@ -1021,6 +1022,8 @@ async function main() {
     ask_human_tool_enabled: ASK_HUMAN_ENABLED,
     skill_enabled: SKILL_ENABLED,
     guidance_enabled: ASK_HUMAN_GUIDANCE_ENABLED,
+    with_skill: SKILL_TEMPLATE_VERSION || "",
+    with_ask_guidance: ASK_HUMAN_GUIDANCE_TEMPLATE_VERSION || "",
     ask_human_model: ASK_HUMAN_MODEL,
     ask_human_backend: ASK_HUMAN_ENABLED ? "ask_human_sidecar" : null,
     native_question_routing: ASK_HUMAN_ENABLED ? "requestUserInput -> ask_human_sidecar" : "requestUserInput -> irrelevant_question",
