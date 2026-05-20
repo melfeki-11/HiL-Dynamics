@@ -600,6 +600,7 @@ def run_attempt(
     pass_index: int,
     run_id: str,
     skip_if_complete: bool,
+    require_scoring_validity: bool = False,
     extra_env: dict[str, str],
     cleared_env_keys: set[str] | None = None,
 ) -> tuple[bool, str]:
@@ -610,7 +611,12 @@ def run_attempt(
     out_dir = output_dir_for(run_id, uid, mode, pass_index)
 
     if skip_if_complete and result_is_complete(out_dir):
-        return True, f"[{uid[:12]}|{mode}|p{pass_index}] already complete, skipped"
+        # Keep solve-time skip behavior aligned with build_job_list:
+        # when scoring validity is required, a pass with rerun-signal trajectory
+        # must be re-solved (not merely re-evaluated), otherwise it can get
+        # stuck permanently excluded from metrics.
+        if not require_scoring_validity or not pass_has_rerun_signal(out_dir):
+            return True, f"[{uid[:12]}|{mode}|p{pass_index}] already complete, skipped"
 
     harness_image = f"{HARNESS_IMAGE_PREFIX}:{uid}"
     if not docker_image_exists(harness_image):
@@ -1214,6 +1220,7 @@ def main() -> None:
             pass_index=job["pass_index"],
             run_id=args.run_id,
             skip_if_complete=not args.force,
+            require_scoring_validity=not args.skip_eval,
             extra_env=effective_env,
             cleared_env_keys=cleared_env_keys,
         )
