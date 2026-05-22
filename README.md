@@ -1,6 +1,6 @@
 # HiL-Dynamics
 
-Escalation Lens is a HiL-Bench diagnostic: it measures how `<model, harness>` pairs behave on under-specified coding tasks — when they ask for clarification, when they silently guess, and whether their questions actually resolve the blockers that block progress.
+HiL-Dynamics is a HiL-Bench diagnostic: it measures how `<model, harness>` pairs behave on under-specified coding tasks — when they ask for clarification, when they silently guess, and whether their questions actually resolve the blockers that block progress.
 
 The tool runs a prepared benchmark task through pluggable harnesses, collects structured trajectories, and computes ask precision/recall/F1 alongside pass@k. The output shows how far each `<agent, harness>` pair is from the *selective escalation* ideal: asking exactly when needed, with questions that resolve actual blockers.
 
@@ -254,12 +254,14 @@ Writes two files to `runs/<run-id>/`:
 
 ## Ask-Human Judge
 
-The `neutral` and `skill` arms route the agent's clarification questions through an LLM judge that matches them against the task's blocker registry. The default judge is the paper-compatible Llama route exposed through LiteLLM:
+The `neutral` and `skill` arms route the agent's clarification questions through an LLM judge that matches them against the task's blocker registry. **You must set `ASK_HUMAN_MODEL`** in your `.env` — there is no built-in default:
 
 ```bash
 ASK_HUMAN_BASE_URL="<defaults to LITELLM_BASE_URL/v1>"
-ASK_HUMAN_MODEL="llmengine/llama-3-3-70b-instruct"
+ASK_HUMAN_MODEL="<your-judge-model>"
 ```
+
+The paper results were produced with `meta-llama/Llama-3.3-70B-Instruct` served via LiteLLM. Any instruction-tuned model that can follow a structured JSON output schema will work, but reproducing the paper numbers requires the same judge model.
 
 `./bin/hilbench setup --strict` runs a live judge calibration probe and fails if the judge is unreachable or does not return the expected canonical responses.
 

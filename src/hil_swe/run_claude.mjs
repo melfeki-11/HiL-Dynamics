@@ -7,7 +7,7 @@
  *                                         blocker_registry.json, run_script.sh, parser.py
  *   /output/            (bind-mounted rw) trajectory.json, stats.json, patch.diff, result.json, attempt.json
  *   /app/               (built into image) repo at base commit — agent's workspace (/testbed is a symlink to /app)
- *   /opt/trust_horizon/ (built into image) node_modules; src/ is bind-mounted ro
+ *   /opt/hil_dynamics/ (built into image) node_modules; src/ is bind-mounted ro
  *
  * Required env vars (passed by the host orchestrator via docker run -e):
  *   ANTHROPIC_AUTH_TOKEN  Claude / LiteLLM API key

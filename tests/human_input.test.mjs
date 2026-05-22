@@ -63,8 +63,8 @@ test("ask_human selects a blocker id and returns the exact registry resolution",
   assert.deepEqual(result.selected_labels, ["Prefix before name"]);
 });
 
-test("ask_human defaults to the local LiteLLM selector model", () => {
-  assert.equal(DEFAULT_ASK_HUMAN_MODEL, "llmengine/llama-3-3-70b-instruct");
+test("ask_human default model is empty (must be configured via ASK_HUMAN_MODEL in .env)", () => {
+  assert.equal(DEFAULT_ASK_HUMAN_MODEL, "");
 });
 
 test("createAskHumanRequest preserves raw question and hashes exact text", () => {
@@ -181,8 +181,8 @@ test("cache key changes when model id changes", async () => {
     },
   ]);
 
-  await askHuman({ request: request(), registry: kb, cachePath, modelId: "llmengine/llama-3-3-70b-instruct", modelClient: async () => JSON.stringify({ blocker_id: "prefix-before-name" }) });
-  await askHuman({ request: request(), registry: kb, cachePath, modelId: "llmengine/llama-3-3-70b-instruct#pinned2", modelClient: async () => JSON.stringify({ blocker_id: "prefix-before-name" }) });
+  await askHuman({ request: request(), registry: kb, cachePath, modelId: "test-judge-model", modelClient: async () => JSON.stringify({ blocker_id: "prefix-before-name" }) });
+  await askHuman({ request: request(), registry: kb, cachePath, modelId: "test-judge-model#pinned2", modelClient: async () => JSON.stringify({ blocker_id: "prefix-before-name" }) });
   const cache = JSON.parse(await fs.readFile(cachePath, "utf8"));
   assert.equal(Object.keys(cache).length, 2);
 });

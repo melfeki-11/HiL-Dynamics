@@ -1,6 +1,6 @@
 # Harness Contract Audit
 
-This document records the human-interaction surfaces that Escalation Lens captures for real-agent HiL-SWE runs. It is intentionally implementation-facing: changes to any SDK adapter should update this audit and the trajectory validator.
+This document records the human-interaction surfaces that HiL-Dynamics captures for real-agent HiL-SWE runs. It is intentionally implementation-facing: changes to any SDK adapter should update this audit and the trajectory validator.
 
 ## Shared Contract
 
@@ -104,7 +104,7 @@ The service:
 - keys the cache by instance, request type, normalized question, options, registry hash, selector prompt hash, selector schema hash, selector version, and judge model;
 - uses lock files plus in-process locks so concurrent harness workers cannot corrupt the cache or duplicate the same selector call.
 
-Default judge model: `llmengine/llama-3-3-70b-instruct` through LiteLLM. The branch intentionally fails loudly if the judge probe cannot reach this route or returns non-canonical calibration responses.
+Judge model: configured via `ASK_HUMAN_MODEL` in `.env` (any LiteLLM-compatible model slug). Setup fails loudly if the judge probe cannot reach the configured route or returns non-canonical calibration responses.
 
 ## Budget and Resource Contract
 

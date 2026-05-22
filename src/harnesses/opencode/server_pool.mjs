@@ -15,7 +15,7 @@ function portEnd() {
 }
 
 function lockRoot() {
-  return process.env.OPENCODE_PORT_LOCK_DIR || path.join(os.tmpdir(), "trust-horizon-opencode-ports");
+  return process.env.OPENCODE_PORT_LOCK_DIR || path.join(os.tmpdir(), "hil-dynamics-opencode-ports");
 }
 
 function staleLeaseMs() {
