@@ -1,7 +1,7 @@
 /**
  * ask_human sidecar for run_adk.py
  *
- * Wraps the trust_horizon human input router (human_input.mjs) in a minimal HTTP
+ * Wraps the HiL-Dynamics human input router (human_input.mjs) in a minimal HTTP
  * server so the Python ADK harness can call it for question routing without
  * reimplementing the LLM judge logic in Python.
  *

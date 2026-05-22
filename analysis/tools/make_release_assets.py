@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate Trust Horizon release CSVs and lightweight SVG figures.
+"""Generate HiL-Dynamics release CSVs and lightweight SVG figures.
 
 This intentionally avoids plotting dependencies. Raw run roots are supplied by
 CLI flags, and the trajectory classifier helper is vendored beside this script
@@ -107,7 +107,7 @@ SECRET_TEXT_REPLACEMENTS = (
     ),
 )
 
-from trust_horizon_core import (
+from hil_dynamics_core import (
     analyze_trajectory,
     ask_relevance,
     event_type,
@@ -3439,7 +3439,7 @@ def write_release_md(
     rows = [row for row in summaries if row["condition"] == "ask_human"]
     full_info_rows = [row for row in summaries if row["condition"] == "full_info"]
     lines: list[str] = []
-    lines.append("# Trust Horizon Release Asset Pass")
+    lines.append("# HiL-Dynamics Release Asset Pass")
     lines.append("")
     lines.append("## Path Verification")
     lines.append("")
@@ -3571,7 +3571,7 @@ def find_full_info_dirs() -> list[str]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate Trust Horizon analysis CSVs and SVG figures from local run artifacts.",
+        description="Generate HiL-Dynamics analysis CSVs and SVG figures from local run artifacts.",
     )
     parser.add_argument(
         "--out-dir",

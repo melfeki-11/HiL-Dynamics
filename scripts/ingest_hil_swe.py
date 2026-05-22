@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Ingest HiL-Bench SWE tasks into trust_horizon's local task registry.
+Ingest HiL-Bench SWE tasks into HiL-Dynamics's local task registry.
 
 Public attempts are ingested from the ScaleAI/hil-bench HF dataset.
 Private attempts are ingested via the paper pipeline's native attempt loader
@@ -19,7 +19,7 @@ Output layout per task:
   data/hil_bench_swe/tasks/<attempt_id>/
     metadata.json           image_name, test_cmd, test_patch, tests_to_pass, test_files, uid, repo_name
     problem_statement.txt   raw problem statement
-    blocker_registry.json   {"version":1,"entries":[...]}  (trust_horizon KB format)
+    blocker_registry.json   {"version":1,"entries":[...]}  (HiL-Dynamics KB format)
     run_script.sh           extracted from Docker image /root/run_script.sh
     parser.py               extracted from Docker image /root/parser.py
 
@@ -190,17 +190,17 @@ def _load_paper_pipeline_helpers():
 
 
 def _normalize_blocker_entry(entry: dict) -> dict:
-    """Convert a hil_bench blocker entry to trust_horizon KB format.
+    """Convert a hil_bench blocker entry to HiL-Dynamics KB format.
 
     hil_bench uses: id, description, resolution, example_questions
-    trust_horizon uses: blocker_id, description, resolution, trigger_questions
+    HiL-Dynamics uses: blocker_id, description, resolution, trigger_questions
     We write both field names so the KB is compatible with any reader.
     """
     out = dict(entry)
-    # Ensure blocker_id is set (trust_horizon primary key)
+    # Ensure blocker_id is set (HiL-Dynamics primary key)
     if "blocker_id" not in out and "id" in out:
         out["blocker_id"] = out["id"]
-    # Map example_questions -> trigger_questions (trust_horizon field name)
+    # Map example_questions -> trigger_questions (HiL-Dynamics field name)
     if "trigger_questions" not in out:
         eq = out.get("example_questions") or out.get("acceptable_questions") or []
         out["trigger_questions"] = [str(q) for q in eq if str(q).strip()]
@@ -386,9 +386,9 @@ def ingest_task_from_hf(row: dict, token: str | None, skip_if_exists: bool) -> d
     # Step 3: Write problem_statement.txt
     (task_dir / "problem_statement.txt").write_text(str(row["problem"]))
 
-    # Step 4: Write blocker_registry.json in trust_horizon KB format
+    # Step 4: Write blocker_registry.json in HiL-Dynamics KB format
     # {"entries": [...]} is the format loadHumanKnowledgeBase() in human_input.mjs expects.
-    # Each entry has both blocker_id (trust_horizon) and id (hil_bench) for cross-compat.
+    # Each entry has both blocker_id (HiL-Dynamics) and id (hil_bench) for cross-compat.
     blocker_entries = normalize_blockers(row.get("blocker_registry"))
     blocker_registry = {"version": 1, "entries": blocker_entries}
     (task_dir / "blocker_registry.json").write_text(json.dumps(blocker_registry, indent=2))
@@ -595,7 +595,7 @@ def write_tasks_index(results: list[dict]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Ingest HiL-Bench SWE tasks into trust_horizon. "
+            "Ingest HiL-Bench SWE tasks into HiL-Dynamics. "
             "Public attempts are read from HF; private attempts are prepared through paper_pipeline."
         )
     )

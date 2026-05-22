@@ -2,7 +2,7 @@
  * End-to-end test: verify the ask_human LLM judge routing works against
  * a LiteLLM-compatible Llama-3.3-70B route.
  *
- * Usage (from trust_horizon/):
+ * Usage (from HiL-Dynamics/):
  *   node tests/test_vllm_routing.mjs [--uid 69c6ba856585e74e8ba6e0bc]
  *   # (ASK_HUMAN_BASE_URL and ASK_HUMAN_MODEL are read from .env via the harness,
  *   #  or set them explicitly for a standalone run)
@@ -26,7 +26,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT      = path.resolve(__dirname, "..");
 const DATA_ROOT = path.join(ROOT, "data", "hil_bench_swe", "tasks");
 
-// Load trust_horizon/.env into process.env (only fills gaps — does not override existing env vars).
+// Load HiL-Dynamics/.env into process.env (only fills gaps — does not override existing env vars).
 // This mirrors run_hil_swe.py's dotenv loading so the test works with `node tests/test_vllm_routing.mjs`.
 try {
   const envText = fs.readFileSync(path.join(ROOT, ".env"), "utf8");
@@ -59,7 +59,7 @@ if (!ASK_HUMAN_BASE_URL) {
 if (!ASK_HUMAN_MODEL) {
   console.error("ERROR: ASK_HUMAN_MODEL is not set.");
   console.error("  Set it to the model route the server is serving, e.g.:");
-  console.error("  ASK_HUMAN_MODEL=llmengine/llama-3-3-70b-instruct node tests/test_vllm_routing.mjs");
+  console.error("  ASK_HUMAN_MODEL=test-judge-model node tests/test_vllm_routing.mjs");
   process.exit(1);
 }
 
