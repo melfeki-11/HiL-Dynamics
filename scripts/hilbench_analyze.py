@@ -189,7 +189,7 @@ def _build_report(
 
     # ── Header ──
     lines += [
-        f"# Escalation Lens Report: {run_id}",
+        f"# HiL-Dynamics Report: {run_id}",
         f"",
         f"Generated: {generated_at}  |  SDK: {sdk_display}  |  Model: {model_display}  "
         f"|  Modes: {', '.join(modes) if modes else '—'}  |  UIDs: {num_uids}  |  Passes: {passes}",
