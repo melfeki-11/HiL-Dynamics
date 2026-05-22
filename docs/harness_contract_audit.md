@@ -1,6 +1,6 @@
 # Harness Contract Audit
 
-This document records the human-interaction surfaces that Escalation Lens captures for real-agent HiL-SWE runs. It is intentionally implementation-facing: changes to any SDK adapter should update this audit and the trajectory validator.
+This document records the human-interaction surfaces that HiL-Dynamics captures for real-agent HiL-SWE runs. It is intentionally implementation-facing: changes to any SDK adapter should update this audit and the trajectory validator.
 
 ## Shared Contract
 

@@ -25,7 +25,9 @@ OUT_DIR = TOOL_DIR.parent
 DATA_DIR = OUT_DIR / "data"
 FIG_DIR = OUT_DIR / "figures"
 MIN_EVAL_COVERAGE_FOR_FIGURES = 0.9
+MIN_EVAL_COVERAGE_FOR_CONTEXT_GAP = 0.75
 HARNESS_ROOT: Path | None = None
+NATIVE_RUN_ROOTS: list[Path] = []
 SKILL3_GLOB = "*_swe_skill3"
 EXTRA_NATIVE_RUN_NAMES = {
     "adk_swe_full_info",
@@ -34,6 +36,14 @@ EXTRA_NATIVE_RUN_NAMES = {
     "codex_swe_customtool2",
     "codex_swe_full_info",
     "opencode_swe_full_info",
+    "_swe_example9_skill_smoke10_claude",
+    "_swe_example9_skill_smoke10_codex",
+    "_swe_example9_smoke40_claude",
+    "_swe_example9_smoke40_codex",
+    "_swe_example9_smoke50b_claude",
+    "_swe_example9_smoke50b_codex",
+    "_swe_example9_smoke50c_claude",
+    "_swe_example9_smoke50c_codex",
 }
 NATIVE_RUN_SCAFFOLD_OVERRIDES = {
     "adk_swe_skill3": "adk",
@@ -46,10 +56,31 @@ NATIVE_RUN_SCAFFOLD_OVERRIDES = {
     "opencode_swe_skill3": "opencode",
     "opencode_swe_full_info": "opencode",
     "adk_swe_full_info": "adk",
+    "_swe_example9_skill_smoke10_claude": "claude-code-customtool-example9",
+    "_swe_example9_smoke40_claude": "claude-code-customtool-example9",
+    "_swe_example9_smoke50b_claude": "claude-code-customtool-example9",
+    "_swe_example9_smoke50c_claude": "claude-code-customtool-example9",
+    "_swe_example9_skill_smoke10_codex": "codex-customtool-example9",
+    "_swe_example9_smoke40_codex": "codex-customtool-example9",
+    "_swe_example9_smoke50b_codex": "codex-customtool-example9",
+    "_swe_example9_smoke50c_codex": "codex-customtool-example9",
 }
+COMPLETE_EVAL_FILTER_RUN_NAMES = {
+    "_swe_example9_skill_smoke10_claude",
+    "_swe_example9_skill_smoke10_codex",
+    "_swe_example9_smoke40_claude",
+    "_swe_example9_smoke40_codex",
+    "_swe_example9_smoke50b_claude",
+    "_swe_example9_smoke50b_codex",
+    "_swe_example9_smoke50c_claude",
+    "_swe_example9_smoke50c_codex",
+}
+UNSCORED_NATIVE_STATUSES = {"infra_error", "eval_error", "missing_eval"}
+NATIVE_SCOREABLE_FILTER_AUDIT: list[dict[str, Any]] = []
+EXCLUDED_PLOT_MODEL_LABELS = {"GPT-5.4"}
 SWE_AGENT_RAW_ROOT: Path | None = None
 SWE_AGENT_ANALYSIS_ROOT: Path | None = None
-SWE_AGENT_ANALYSIS_ONLY_MODEL_KEYS = {"gemini_3-1_pro_preview_customtools"}
+SWE_AGENT_ANALYSIS_ONLY_MODEL_KEYS = {"gemini_3-1_pro_preview_customtools", "glm_5-1"}
 HIL_BENCH_HARBOR_ROOTS: list[Path] = []
 SCRUB_LOCAL_PATHS = False
 PATH_FIELD_NAMES = {
@@ -100,6 +131,7 @@ MODEL_LABELS = {
     "google/gemini-3.1-pro-preview-customtools": "Gemini 3.1 Pro",
     "gemini_3-1_pro_preview_customtools": "Gemini 3.1 Pro",
     "fireworks_ai/glm-5p1": "GLM-5P1",
+    "glm_5-1": "GLM-5P1",
 }
 
 SCAFFOLD_LABELS = {
@@ -107,8 +139,10 @@ SCAFFOLD_LABELS = {
     "claude": "Native Claude Code",
     "claude-code": "Native Claude Code",
     "claude-code-customtool": "Native Claude Code Tool",
+    "claude-code-customtool-example9": "Native Claude Code Tool + custom skill",
     "codex": "Native Codex",
     "codex-customtool": "Native Codex Tool",
+    "codex-customtool-example9": "Native Codex Tool + custom skill",
     "opencode": "Native OpenCode",
     "swe-agent": "SWE-agent",
 }
@@ -123,6 +157,7 @@ TERMINAL_LABELS = {
     "timeout_after_patch": "timeout after patch",
     "turn_limit_or_timeout": "timeout before patch",
     "tool_or_environment_error": "tool/env error",
+    "analysis_csv_only": "analysis only",
     "unknown_terminal_evidence": "unknown",
 }
 
@@ -136,7 +171,19 @@ TERMINAL_COLORS = {
     "timeout_after_patch": "#1971c2",
     "turn_limit_or_timeout": "#4dabf7",
     "tool_or_environment_error": "#c92a2a",
+    "analysis_csv_only": "#94a3b8",
     "unknown_terminal_evidence": "#cbd5e1",
+}
+
+SWE_AGENT_TERMINAL_STATE_MAP = {
+    "visible_test_failure_at_end": "visible_red_at_end",
+    "local_green_hidden_fail": "visible_green_after_last_write",
+    "unverified_final_patch": "unverified_patch_submitted",
+    "polluted_final_diff": "unverified_patch_submitted",
+    "turn_limit_unresolved": "turn_limit_or_timeout",
+    "no_meaningful_progress_stall": "no_patch_or_no_submit",
+    "tool_corrupted_terminal": "tool_or_environment_error",
+    "unknown_terminal_state": "unknown_terminal_evidence",
 }
 
 ACTION_PHENOTYPE_LABELS = {
@@ -210,7 +257,7 @@ BLOCKER_LIFECYCLE_ORDER = [
     "not_detected",
 ]
 
-MODEL_FAMILY_ORDER = ["Claude", "GPT", "Gemini", "GLM", "Other"]
+MODEL_FAMILY_ORDER = ["GPT", "Claude", "Gemini", "GLM", "Other"]
 
 MODEL_FAMILY_SHAPES = {
     "Claude": "star",
@@ -361,6 +408,26 @@ def scaffold_label(value: str) -> str:
 
 def group_label(model: str, scaffold: str) -> str:
     return f"{model_key(model)} / {scaffold_label(scaffold)}"
+
+
+def display_scaffold_label(value: Any) -> str:
+    return str(value or "").replace("Native ", "")
+
+
+def model_scaffold_lines(row: dict[str, Any]) -> tuple[str, str]:
+    return str(row.get("model_label") or ""), display_scaffold_label(row.get("scaffold_label"))
+
+
+def model_scaffold_lines_for_label(
+    label: str,
+    summary_by_label: dict[str, dict[str, Any]] | None = None,
+) -> tuple[str, str]:
+    if summary_by_label and label in summary_by_label:
+        return model_scaffold_lines(summary_by_label[label])
+    if " / " in label:
+        model, scaffold = label.split(" / ", 1)
+        return model, display_scaffold_label(scaffold)
+    return label, ""
 
 
 def derived_ask_metrics(num_questions: int, blockers_resolved: int, blockers_total: int) -> tuple[float, float, float]:
@@ -573,16 +640,97 @@ def enrich_with_trajectory(base: dict[str, Any], trajectory_path: Path) -> dict[
     return row
 
 
+def native_pass_eval_state(pass_row: dict[str, Any], pass_dir: Path) -> dict[str, Any]:
+    result_path = pass_dir / "result.json"
+    eval_path = pass_dir / "eval_result.json"
+    result = read_json(result_path) if result_path.exists() else {}
+    eval_result = read_json(eval_path) if eval_path.exists() else {}
+    status = str(eval_result.get("eval_status") or pass_row.get("status") or result.get("stop_reason") or "")
+    status_key = status.strip().lower()
+    reasons: list[str] = []
+    if not result_path.exists():
+        reasons.append("missing_result_json")
+    if not eval_path.exists():
+        reasons.append("missing_eval_result_json")
+    if status_key in UNSCORED_NATIVE_STATUSES:
+        reasons.append(status_key)
+    if eval_result.get("test_ran") is False:
+        reasons.append("test_not_run")
+    if result.get("sdk_error"):
+        reasons.append("sdk_error")
+    eval_known = bool(eval_result) and status_key not in UNSCORED_NATIVE_STATUSES and eval_result.get("test_ran") is not False
+    scoreable = eval_known and result_path.exists() and not result.get("sdk_error")
+    resolved_source = eval_result if eval_result else pass_row
+    return {
+        "status": status or ("missing_eval" if not eval_path.exists() else ""),
+        "eval_known": eval_known,
+        "scoreable": scoreable,
+        "resolved": safe_bool(resolved_source.get("resolved")) if eval_known else False,
+        "reason": ";".join(dict.fromkeys(reasons)),
+        "result_path": str(result_path),
+        "eval_result_path": str(eval_path),
+    }
+
+
+def filter_complete_eval_pass_rows(pass_rows: list[dict[str, Any]], run_dir: Path) -> list[dict[str, Any]]:
+    if run_dir.name not in COMPLETE_EVAL_FILTER_RUN_NAMES:
+        return pass_rows
+
+    by_uid: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for pass_row in pass_rows:
+        by_uid[str(pass_row.get("uid") or "")].append(pass_row)
+
+    included: list[dict[str, Any]] = []
+    for uid, uid_rows in sorted(by_uid.items()):
+        rows_by_pass = {safe_int(row.get("pass_index"), 0): row for row in uid_rows}
+        uid_reasons: list[str] = []
+        for pass_index in (1, 2, 3):
+            pass_row = rows_by_pass.get(pass_index)
+            if pass_row is None:
+                uid_reasons.append(f"pass_{pass_index}:missing_pass_level_row")
+                continue
+            pass_dir = Path(str(pass_row.get("pass_dir") or ""))
+            if not pass_dir.exists():
+                pass_dir = run_dir / uid / str(pass_row.get("mode") or "ask_human") / f"pass_{pass_index}"
+            eval_state = native_pass_eval_state(pass_row, pass_dir)
+            if not eval_state["scoreable"]:
+                uid_reasons.append(f"pass_{pass_index}:{eval_state['reason'] or eval_state['status'] or 'unscoreable'}")
+
+        if uid_reasons:
+            for pass_row in uid_rows:
+                pass_index = safe_int(pass_row.get("pass_index"), 0)
+                pass_dir = Path(str(pass_row.get("pass_dir") or ""))
+                if not pass_dir.exists():
+                    pass_dir = run_dir / uid / str(pass_row.get("mode") or "ask_human") / f"pass_{pass_index}"
+                eval_state = native_pass_eval_state(pass_row, pass_dir)
+                NATIVE_SCOREABLE_FILTER_AUDIT.append(
+                    {
+                        "run_id": run_dir.name,
+                        "uid": uid,
+                        "pass_index": pass_index,
+                        "agent": pass_row.get("agent", ""),
+                        "model": pass_row.get("model", ""),
+                        "status": eval_state["status"],
+                        "scoreable": False,
+                        "exclude_reason": "|".join(uid_reasons),
+                        "pass_dir": str(pass_dir),
+                        "eval_result_path": eval_state["eval_result_path"],
+                    }
+                )
+            continue
+        included.extend(uid_rows)
+    return included
+
+
 def row_from_native_pass_level(pass_row: dict[str, Any], run_dir: Path) -> dict[str, Any]:
     pass_dir = Path(str(pass_row.get("pass_dir") or ""))
     if not pass_dir.exists():
         pass_dir = run_dir / str(pass_row.get("uid") or "") / str(pass_row.get("mode") or "ask_human") / f"pass_{pass_row.get('pass_index')}"
+    eval_state = native_pass_eval_state(pass_row, pass_dir)
     num_questions = safe_int(pass_row.get("num_questions"))
     blockers_resolved = safe_int(pass_row.get("num_blockers_resolved"))
     blockers_total = safe_int(pass_row.get("num_blockers_total"))
     ask_precision, blocker_recall, ask_f1 = derived_ask_metrics(num_questions, blockers_resolved, blockers_total)
-    status = str(pass_row.get("status") or "")
-    eval_known = status.strip().lower() not in {"infra_error", "eval_error", "missing_eval"}
     scaffold = NATIVE_RUN_SCAFFOLD_OVERRIDES.get(
         run_dir.name,
         str(pass_row.get("agent") or run_dir.name.replace("_swe_skill3", "")),
@@ -596,9 +744,11 @@ def row_from_native_pass_level(pass_row: dict[str, Any], run_dir: Path) -> dict[
         "harness": scaffold,
         "model": str(pass_row.get("model") or ""),
         "pass_index": safe_int(pass_row.get("pass_index"), 1),
-        "resolved": safe_bool(pass_row.get("resolved")) if eval_known else False,
-        "eval_known": eval_known,
-        "status": status,
+        "resolved": eval_state["resolved"],
+        "eval_known": eval_state["eval_known"],
+        "status": eval_state["status"],
+        "scoreable": eval_state["scoreable"],
+        "unscoreable_reason": eval_state["reason"],
         "num_questions": num_questions,
         "num_blockers_resolved": blockers_resolved,
         "num_blockers_total": blockers_total,
@@ -620,9 +770,15 @@ def row_from_native_pass_dir(pass_dir: Path, run_dir: Path) -> dict[str, Any]:
     blockers_resolved = safe_int(stats.get("num_blockers_resolved"))
     blockers_total = safe_int(stats.get("num_blockers_total"))
     ask_precision, blocker_recall, ask_f1 = derived_ask_metrics(num_questions, blockers_resolved, blockers_total)
-    eval_known = bool(eval_result)
-    resolved = safe_bool(eval_result.get("resolved")) if eval_known else False
     uid = str(attempt.get("uid") or pass_dir.parents[1].name)
+    eval_state = native_pass_eval_state(
+        {
+            "uid": uid,
+            "status": eval_result.get("eval_status") or result.get("stop_reason") or "",
+            "resolved": eval_result.get("resolved"),
+        },
+        pass_dir,
+    )
     scaffold = NATIVE_RUN_SCAFFOLD_OVERRIDES.get(
         run_dir.name,
         str(attempt.get("harness") or run_dir.name.replace("_swe_skill3", "")),
@@ -636,9 +792,11 @@ def row_from_native_pass_dir(pass_dir: Path, run_dir: Path) -> dict[str, Any]:
         "harness": scaffold,
         "model": str(attempt.get("model") or ""),
         "pass_index": safe_int(attempt.get("pass_index") or pass_dir.name.replace("pass_", ""), 1),
-        "resolved": resolved,
-        "eval_known": eval_known,
-        "status": str(eval_result.get("eval_status") or result.get("stop_reason") or ""),
+        "resolved": eval_state["resolved"],
+        "eval_known": eval_state["eval_known"],
+        "status": eval_state["status"],
+        "scoreable": eval_state["scoreable"],
+        "unscoreable_reason": eval_state["reason"],
         "num_questions": num_questions,
         "num_blockers_resolved": blockers_resolved,
         "num_blockers_total": blockers_total,
@@ -656,7 +814,8 @@ def row_from_native_pass_dir(pass_dir: Path, run_dir: Path) -> dict[str, Any]:
 def ingest_native_skill3() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     rows: list[dict[str, Any]] = []
     verification: list[dict[str, Any]] = []
-    if HARNESS_ROOT is None:
+    roots = NATIVE_RUN_ROOTS or ([HARNESS_ROOT] if HARNESS_ROOT is not None else [])
+    if not roots:
         verification.append(
             {
                 "root": "",
@@ -670,45 +829,65 @@ def ingest_native_skill3() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
             }
         )
         return rows, verification
-    if not HARNESS_ROOT.exists():
-        verification.append(
-            {
-                "root": str(HARNESS_ROOT),
-                "exists": False,
-                "pass_dirs": 0,
-                "ask_human_pass_dirs": 0,
-                "full_info_pass_dirs": 0,
-                "has_summary_json": False,
-                "has_pass_level_json": False,
-                "note": "native runs root missing",
-            }
-        )
-        return rows, verification
-    run_dirs = {path for path in HARNESS_ROOT.glob(SKILL3_GLOB)}
-    run_dirs.update(HARNESS_ROOT / name for name in EXTRA_NATIVE_RUN_NAMES)
-    for run_dir in sorted(path for path in run_dirs if path.exists()):
-        pass_level_path = run_dir / "metrics" / "pass_level.json"
-        summary_path = run_dir / "metrics" / "summary.json"
-        ask_pass_dirs = sorted(run_dir.glob("*/ask_human/pass_*"))
-        full_info_pass_dirs = sorted(run_dir.glob("*/full_info/pass_*"))
-        pass_dirs = sorted(ask_pass_dirs + full_info_pass_dirs)
-        verification.append(
-            {
-                "root": str(run_dir),
-                "exists": run_dir.exists(),
-                "pass_dirs": len(pass_dirs),
-                "ask_human_pass_dirs": len(ask_pass_dirs),
-                "full_info_pass_dirs": len(full_info_pass_dirs),
-                "has_summary_json": summary_path.exists(),
-                "has_pass_level_json": pass_level_path.exists(),
-            }
-        )
-        if pass_level_path.exists():
-            for pass_row in read_json(pass_level_path):
-                rows.append(row_from_native_pass_level(pass_row, run_dir))
-        else:
-            for pass_dir in pass_dirs:
-                rows.append(row_from_native_pass_dir(pass_dir, run_dir))
+
+    seen_run_dirs: set[Path] = set()
+    for root in roots:
+        if root is None:
+            continue
+        if not root.exists():
+            verification.append(
+                {
+                    "root": str(root),
+                    "exists": False,
+                    "pass_dirs": 0,
+                    "ask_human_pass_dirs": 0,
+                    "full_info_pass_dirs": 0,
+                    "has_summary_json": False,
+                    "has_pass_level_json": False,
+                    "note": "native runs root missing",
+                }
+            )
+            continue
+        run_dirs = {path for path in root.glob(SKILL3_GLOB)}
+        run_dirs.update(root / name for name in EXTRA_NATIVE_RUN_NAMES)
+        for run_dir in sorted(path for path in run_dirs if path.exists()):
+            resolved_run_dir = run_dir.resolve()
+            if resolved_run_dir in seen_run_dirs:
+                continue
+            seen_run_dirs.add(resolved_run_dir)
+            pass_level_path = run_dir / "metrics" / "pass_level.json"
+            summary_path = run_dir / "metrics" / "summary.json"
+            ask_pass_dirs = sorted(run_dir.glob("*/ask_human/pass_*"))
+            full_info_pass_dirs = sorted(run_dir.glob("*/full_info/pass_*"))
+            pass_dirs = sorted(ask_pass_dirs + full_info_pass_dirs)
+            excluded_before = len(NATIVE_SCOREABLE_FILTER_AUDIT)
+            input_pass_level_rows = 0
+            ingested_rows_before = len(rows)
+            if pass_level_path.exists():
+                pass_rows = read_json(pass_level_path)
+                input_pass_level_rows = len(pass_rows) if isinstance(pass_rows, list) else 0
+                if isinstance(pass_rows, list):
+                    pass_rows = filter_complete_eval_pass_rows(pass_rows, run_dir)
+                    for pass_row in pass_rows:
+                        rows.append(row_from_native_pass_level(pass_row, run_dir))
+            else:
+                for pass_dir in pass_dirs:
+                    rows.append(row_from_native_pass_dir(pass_dir, run_dir))
+            verification.append(
+                {
+                    "root": str(run_dir),
+                    "exists": run_dir.exists(),
+                    "pass_dirs": len(pass_dirs),
+                    "ask_human_pass_dirs": len(ask_pass_dirs),
+                    "full_info_pass_dirs": len(full_info_pass_dirs),
+                    "has_summary_json": summary_path.exists(),
+                    "has_pass_level_json": pass_level_path.exists(),
+                    "pass_level_rows": input_pass_level_rows,
+                    "rows_ingested": len(rows) - ingested_rows_before,
+                    "rows_excluded_by_scoreable_filter": len(NATIVE_SCOREABLE_FILTER_AUDIT) - excluded_before,
+                    "complete_eval_filter": run_dir.name in COMPLETE_EVAL_FILTER_RUN_NAMES,
+                }
+            )
     return rows, verification
 
 
@@ -790,14 +969,16 @@ def ingest_swe_agent_raw() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
 def ingest_swe_agent_analysis_only() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Ingest selected SWE-agent rows available only as derived analysis CSVs.
 
-    These rows are useful for headline pass/ask/strategy comparisons but do not
-    have raw terminal evidence, so terminal failure mix excludes this source.
+    These rows are useful for headline pass/ask/strategy comparisons. When the
+    derived terminal-state detector CSV is available, they also contribute
+    coarse terminal evidence labels.
     """
     if SWE_AGENT_ANALYSIS_ROOT is None:
         verification = [
             {
                 "root": "",
                 "first_ask_relevance_csv": False,
+                "terminal_state_detector_csv": False,
                 "trajectory_summary_csv": False,
                 "turn_actions_csv": False,
                 "model_keys_requested": sorted(SWE_AGENT_ANALYSIS_ONLY_MODEL_KEYS),
@@ -808,12 +989,19 @@ def ingest_swe_agent_analysis_only() -> tuple[list[dict[str, Any]], list[dict[st
         return [], verification
 
     first_ask_path = SWE_AGENT_ANALYSIS_ROOT / "failure_mode_investigation" / "first_ask_relevance_analysis.csv"
+    terminal_path = (
+        SWE_AGENT_ANALYSIS_ROOT
+        / "failure_mode_investigation"
+        / "terminal_state_detector"
+        / "terminal_state_detector_by_trajectory.csv"
+    )
     trajectory_path = SWE_AGENT_ANALYSIS_ROOT / "trajectory_summary_model_families.csv"
     turn_actions_path = SWE_AGENT_ANALYSIS_ROOT / "turn_actions_model_families.csv"
     verification = [
         {
             "root": str(SWE_AGENT_ANALYSIS_ROOT),
             "first_ask_relevance_csv": first_ask_path.exists(),
+            "terminal_state_detector_csv": terminal_path.exists(),
             "trajectory_summary_csv": trajectory_path.exists(),
             "turn_actions_csv": turn_actions_path.exists(),
             "model_keys_requested": sorted(SWE_AGENT_ANALYSIS_ONLY_MODEL_KEYS),
@@ -828,6 +1016,13 @@ def ingest_swe_agent_analysis_only() -> tuple[list[dict[str, Any]], list[dict[st
         model_id = str(row.get("model_key") or "")
         if model_id in SWE_AGENT_ANALYSIS_ONLY_MODEL_KEYS:
             trajectory_by_key[(model_id, str(row.get("attempt_id") or ""), safe_int(row.get("pass_num"), 1))] = row
+
+    terminal_by_key: dict[tuple[str, str, int], dict[str, str]] = {}
+    if terminal_path.exists():
+        for row in read_csv_rows(terminal_path):
+            model_id = str(row.get("model_key") or "")
+            if model_id in SWE_AGENT_ANALYSIS_ONLY_MODEL_KEYS:
+                terminal_by_key[(model_id, str(row.get("attempt_id") or ""), safe_int(row.get("pass_num"), 1))] = row
 
     actions_by_key: dict[tuple[str, str, int], list[tuple[int, str]]] = defaultdict(list)
     for row in read_csv_rows(turn_actions_path):
@@ -844,6 +1039,9 @@ def ingest_swe_agent_analysis_only() -> tuple[list[dict[str, Any]], list[dict[st
         pass_index = safe_int(ask_row.get("pass_num"), 1)
         key = (model_id, str(ask_row.get("attempt_id") or ""), pass_index)
         trajectory_row = trajectory_by_key.get(key, {})
+        terminal_row = terminal_by_key.get(key, {})
+        raw_terminal_state = str(terminal_row.get("terminal_state") or "")
+        terminal_state = SWE_AGENT_TERMINAL_STATE_MAP.get(raw_terminal_state, "analysis_csv_only")
         sequence = [
             "THOUGHT_ONLY" if action == "NO_ACTION" else action
             for _, action in sorted(actions_by_key.get(key, []))
@@ -894,8 +1092,8 @@ def ingest_swe_agent_analysis_only() -> tuple[list[dict[str, Any]], list[dict[st
             "submit_count": submit_count,
             "test_event_count": safe_int(trajectory_row.get("TEST")),
             "final_submit_present": submit_count > 0,
-            "terminal_evidence_state": "analysis_csv_only",
-            "terminal_state": "analysis_csv_only",
+            "terminal_evidence_state": terminal_state,
+            "terminal_state": raw_terminal_state or "analysis_csv_only",
             "model_label": model_key(model_id),
             "scaffold_label": scaffold_label("swe-agent"),
             "group_label": group_label(model_id, "swe-agent"),
@@ -1005,20 +1203,33 @@ def summarize_groups(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def full_info_gap_rows(summaries: list[dict[str, Any]], pass_rows: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    def include_ask_row(row: dict[str, Any]) -> bool:
+        scaffold = str(row.get("scaffold_label") or "")
+        if not scaffold.startswith("Native "):
+            return False
+        return "Tool" not in scaffold or "custom skill" in scaffold
+
+    def reference_scaffold_label(row: dict[str, Any]) -> str:
+        scaffold = str(row.get("scaffold_label") or "")
+        if scaffold == "Native Codex Tool + custom skill":
+            return "Native Codex"
+        if scaffold == "Native Claude Code Tool + custom skill":
+            return "Native Claude Code"
+        return scaffold
+
     ask_rows = [
         row
         for row in summaries
         if row.get("condition") == "ask_human"
-        and str(row.get("scaffold_label") or "").startswith("Native ")
-        and "Tool" not in str(row.get("scaffold_label") or "")
-        and plot_ready(row)
+        and include_ask_row(row)
+        and full_info_gap_ready(row)
     ]
     full_rows = [
         row
         for row in summaries
         if row.get("condition") == "full_info"
         and str(row.get("scaffold_label") or "").startswith("Native ")
-        and plot_ready(row)
+        and full_info_gap_ready(row, min_eval_coverage=MIN_EVAL_COVERAGE_FOR_FIGURES)
     ]
     full_by_key = {
         (str(row.get("model_label") or ""), str(row.get("scaffold_label") or "")): row
@@ -1026,11 +1237,13 @@ def full_info_gap_rows(summaries: list[dict[str, Any]], pass_rows: list[dict[str
     }
     out: list[dict[str, Any]] = []
     for ask in ask_rows:
-        key = (str(ask.get("model_label") or ""), str(ask.get("scaffold_label") or ""))
+        reference_scaffold = reference_scaffold_label(ask)
+        key = (str(ask.get("model_label") or ""), reference_scaffold)
         full = full_by_key.get(key)
         if not full:
             continue
-        comparison_scope = "all_available"
+        is_custom_skill_comparison = str(ask.get("scaffold_label") or "") != reference_scaffold
+        comparison_scope = "custom_skill_vs_base_fullinfo" if is_custom_skill_comparison else "all_available"
         num_intersected_tasks = ""
         ask_rows_for_metrics: list[dict[str, Any]] = []
         full_rows_for_metrics: list[dict[str, Any]] = []
@@ -1053,7 +1266,7 @@ def full_info_gap_rows(summaries: list[dict[str, Any]], pass_rows: list[dict[str
             full_task_ids = {str(row.get("task_id") or "") for row in full_group_rows}
             intersected_task_ids = ask_task_ids & full_task_ids
             if intersected_task_ids:
-                comparison_scope = "intersected_tasks"
+                comparison_scope = "intersected_tasks_custom_skill_vs_base_fullinfo" if is_custom_skill_comparison else "intersected_tasks"
                 num_intersected_tasks = len(intersected_task_ids)
                 ask_rows_for_metrics = [row for row in ask_group_rows if str(row.get("task_id") or "") in intersected_task_ids]
                 full_rows_for_metrics = [row for row in full_group_rows if str(row.get("task_id") or "") in intersected_task_ids]
@@ -1081,6 +1294,9 @@ def full_info_gap_rows(summaries: list[dict[str, Any]], pass_rows: list[dict[str
                 "model_label": ask.get("model_label", ""),
                 "scaffold_label": ask.get("scaffold_label", ""),
                 "group_label": ask.get("group_label", ""),
+                "full_info_reference_scaffold_label": reference_scaffold,
+                "full_info_reference_group_label": full.get("group_label", ""),
+                "is_custom_skill_comparison": is_custom_skill_comparison,
                 "comparison_scope": comparison_scope,
                 "num_intersected_tasks": num_intersected_tasks,
                 "ask_human_pass_at_3": ask_pass,
@@ -1100,7 +1316,27 @@ def full_info_gap_rows(summaries: list[dict[str, Any]], pass_rows: list[dict[str
 
 
 def plot_ready(row: dict[str, Any]) -> bool:
-    return safe_float(row.get("eval_coverage"), 0.0) >= MIN_EVAL_COVERAGE_FOR_FIGURES and not math.isnan(safe_float(row.get("pass_at_3")))
+    return (
+        str(row.get("model_label") or "") not in EXCLUDED_PLOT_MODEL_LABELS
+        and safe_float(row.get("eval_coverage"), 0.0) >= MIN_EVAL_COVERAGE_FOR_FIGURES
+        and not math.isnan(safe_float(row.get("pass_at_3")))
+    )
+
+
+def behavior_plot_ready(row: dict[str, Any]) -> bool:
+    return (
+        str(row.get("model_label") or "") not in EXCLUDED_PLOT_MODEL_LABELS
+        and safe_float(row.get("eval_coverage"), 0.0) >= MIN_EVAL_COVERAGE_FOR_CONTEXT_GAP
+        and not math.isnan(safe_float(row.get("pass_at_3")))
+    )
+
+
+def full_info_gap_ready(row: dict[str, Any], min_eval_coverage: float = MIN_EVAL_COVERAGE_FOR_CONTEXT_GAP) -> bool:
+    return (
+        str(row.get("model_label") or "") not in EXCLUDED_PLOT_MODEL_LABELS
+        and safe_float(row.get("eval_coverage"), 0.0) >= min_eval_coverage
+        and not math.isnan(safe_float(row.get("pass_at_3")))
+    )
 
 
 def terminal_evidence_bucket(row: dict[str, Any]) -> str:
@@ -1116,8 +1352,6 @@ def terminal_evidence_bucket(row: dict[str, Any]) -> str:
 def terminal_mix(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        if str(row.get("source") or "") == "swe_agent_analysis_csv":
-            continue
         if row.get("condition") == "ask_human" and safe_bool(row.get("eval_known")) and not safe_bool(row.get("resolved")):
             groups[str(row.get("group_label") or "")].append(row)
     out: list[dict[str, Any]] = []
@@ -1135,6 +1369,99 @@ def terminal_mix(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "unresolved_rows": total,
                 }
             )
+    return out
+
+
+def is_harness_permission_ask_event(event: dict[str, Any]) -> bool:
+    act = str(event.get("act") or "").strip().lower()
+    return act.startswith("mcp_elicitation") and "ask_human" in act
+
+
+def ask_sequence_without_permission_prompts(row: dict[str, Any]) -> str:
+    scaffold = str(row.get("scaffold_label") or "")
+    permission_prone = "Codex" in scaffold and "Tool" in scaffold
+    if not permission_prone:
+        if str(row.get("source") or "") == "swe_agent_analysis_csv":
+            has_irrelevant_first = safe_int(row.get("irrelevant_ask_count")) > 0
+            has_later_relevant = safe_int(row.get("relevant_ask_count")) > 0
+            if has_irrelevant_first:
+                return "I" + ("R" if has_later_relevant else "")
+            if has_later_relevant:
+                return "R"
+        return str(row.get("ask_sequence") or "")
+
+    path = Path(str(row.get("trajectory_path") or ""))
+    if path.name == "trajectory.json" and path.exists():
+        try:
+            trajectory = coerce_trajectory(read_json(path))
+        except Exception:
+            trajectory = []
+        if trajectory:
+            sequence: list[str] = []
+            for event in trajectory:
+                event = event if isinstance(event, dict) else {}
+                if is_harness_permission_ask_event(event):
+                    continue
+                if release_event_type_for_event(event) != "ASK":
+                    continue
+                relevance = ask_relevance(str(event.get("obs") or ""))
+                sequence.append("I" if relevance == "irrelevant" else "R" if relevance == "relevant" else "U")
+            return "".join(sequence)
+
+    if str(row.get("source") or "") == "swe_agent_analysis_csv":
+        has_irrelevant_first = safe_int(row.get("irrelevant_ask_count")) > 0
+        has_later_relevant = safe_int(row.get("relevant_ask_count")) > 0
+        if has_irrelevant_first:
+            return "I" + ("R" if has_later_relevant else "")
+        if has_later_relevant:
+            return "R"
+
+    return str(row.get("ask_sequence") or "")
+
+
+def bad_first_ask_recovery(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        if row.get("condition") != "ask_human" or not safe_bool(row.get("eval_known")):
+            continue
+        groups[str(row.get("group_label") or "")].append(row)
+
+    out: list[dict[str, Any]] = []
+    for label, group_rows in sorted(groups.items()):
+        first_failed: list[dict[str, Any]] = []
+        later_relevant: list[dict[str, Any]] = []
+        solved_after_first_failed = 0
+        solved_after_later_relevant = 0
+        for row in group_rows:
+            sequence = ask_sequence_without_permission_prompts(row)
+            if not sequence.startswith("I"):
+                continue
+            first_failed.append(row)
+            solved = safe_bool(row.get("resolved"))
+            if solved:
+                solved_after_first_failed += 1
+            if "R" in sequence[1:]:
+                later_relevant.append(row)
+                if solved:
+                    solved_after_later_relevant += 1
+
+        denominator = len(first_failed)
+        first_row = group_rows[0] if group_rows else {}
+        out.append(
+            {
+                "group_label": label,
+                "model_label": first_row.get("model_label", ""),
+                "scaffold_label": first_row.get("scaffold_label", ""),
+                "eval_known_rows": len(group_rows),
+                "first_failed_ask_runs": denominator,
+                "solved_after_first_failed_ask_runs": solved_after_first_failed,
+                "solved_after_first_failed_ask_rate": solved_after_first_failed / denominator if denominator else math.nan,
+                "asked_later_relevant_question_runs": len(later_relevant),
+                "asked_later_relevant_question_rate": len(later_relevant) / denominator if denominator else math.nan,
+                "solved_after_later_relevant_question_runs": solved_after_later_relevant,
+                "solved_after_later_relevant_question_rate": solved_after_later_relevant / denominator if denominator else math.nan,
+            }
+        )
     return out
 
 
@@ -1514,7 +1841,7 @@ def ask_timing_by_group(rows: list[dict[str, Any]], summaries: list[dict[str, An
     summary_by_label = {
         row["group_label"]: row
         for row in summaries
-        if row["condition"] == "ask_human" and plot_ready(row)
+        if row["condition"] == "ask_human" and behavior_plot_ready(row)
     }
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -2078,114 +2405,108 @@ def ordered_plot_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def compact_group_name(row: dict[str, Any]) -> str:
-    scaffold = str(row.get("scaffold_label") or "").replace("Native ", "")
+    scaffold = display_scaffold_label(row.get("scaffold_label"))
     return f"{row.get('model_label')} / {scaffold}"
+
+
+def group_display_sort_key(label: str, summary_by_label: dict[str, dict[str, Any]] | None = None) -> tuple[int, int, str]:
+    row = summary_by_label.get(label, {}) if summary_by_label else {}
+    model = str(row.get("model_label") or label)
+    scaffold = str(row.get("scaffold_label") or label)
+    family = model_family(model)
+    family_idx = MODEL_FAMILY_ORDER.index(family) if family in MODEL_FAMILY_ORDER else len(MODEL_FAMILY_ORDER)
+    scaffold_lower = scaffold.lower()
+    if "custom skill" in scaffold_lower:
+        scaffold_idx = 0
+    elif "tool" in scaffold_lower:
+        scaffold_idx = 1
+    elif scaffold_lower.startswith("native"):
+        scaffold_idx = 2
+    elif "swe-agent" in scaffold_lower:
+        scaffold_idx = 3
+    else:
+        scaffold_idx = 4
+    return family_idx, scaffold_idx, label
 
 
 def plot_same_model_dumbbell(summaries: list[dict[str, Any]], gap_rows: list[dict[str, Any]] | None = None) -> None:
     rows = list(gap_rows) if gap_rows is not None else full_info_gap_rows(summaries)
-    width, height = 1280, 760
-    margin_l, margin_r, margin_t, margin_b = 112, 380, 150, 98
+    width = 1280
+    margin_l, margin_r, margin_t, margin_b = 300, 190, 142, 100
     plot_w = width - margin_l - margin_r
-    plot_h = height - margin_t - margin_b
-    max_value = max(
-        [safe_float(row.get("ask_human_pass_at_3"), 0.0) for row in rows]
-        + [safe_float(row.get("full_info_pass_at_3"), 0.0) for row in rows]
-        + [0.85]
-    )
-    y_ticks = number_axis_ticks(max_value, 7)
-    axis_max = y_ticks[-1]
-    x_axis_min = 0.70
-    x_axis_max = axis_max
-    x_ticks = [tick / 100 for tick in range(int(x_axis_min * 100), int(x_axis_max * 100) + 1, 5)]
-
-    def x(value: float) -> float:
-        span = x_axis_max - x_axis_min
-        return margin_l + ((value - x_axis_min) / span) * plot_w if span else margin_l
-
-    def y(value: float) -> float:
-        return margin_t + (1 - value / axis_max) * plot_h
-
-    optimal_color = "#f59e0b"
-    real_color = "#2563eb"
-    body = []
-    body.append(svg_text(48, 42, "FullInfo vs AskHuman Pass@3", 28, "#101828", weight="700"))
-    body.append(svg_text(48, 68, "Matched native scaffolds on intersected tasks; gold marks no drop-off, blue marks observed HIL-Bench.", 15, "#667085"))
-    rail_x = width - margin_r + 46
-    body.append(svg_text(rail_x, 30, "Color = condition", 12, "#344054", weight="700"))
-    body.append(svg_marker(rail_x + 9, 56, 8, "GPT", optimal_color, "#ffffff", 1.6, 0.96))
-    body.append(svg_text(rail_x + 26, 60, "gold/orange = no drop-off", 11, "#667085"))
-    body.append(svg_marker(rail_x + 154, 56, 8, "GPT", real_color, "#ffffff", 1.6, 0.96))
-    body.append(svg_text(rail_x + 171, 60, "blue = HIL-Bench", 11, "#667085"))
-    body.extend(shape_legend(used_model_families([{"model_label": row.get("model_label")} for row in rows]), rail_x, 98))
-
-    body.append(
-        f'<polygon points="{x(x_axis_min):.1f},{y(0):.1f} {x(x_axis_min):.1f},{y(x_axis_min):.1f} '
-        f'{x(x_axis_max):.1f},{y(x_axis_max):.1f} {x(x_axis_max):.1f},{y(0):.1f}" '
-        'fill="#fff1f0" fill-opacity="0.58"/>'
-    )
-    body.append(f'<line class="axis" x1="{margin_l}" y1="{height-margin_b}" x2="{width-margin_r}" y2="{height-margin_b}"/>')
-    body.append(f'<line class="axis" x1="{margin_l}" y1="{margin_t}" x2="{margin_l}" y2="{height-margin_b}"/>')
-    for tick in x_ticks:
-        xx = x(tick)
-        body.append(f'<line class="grid" x1="{xx:.1f}" y1="{margin_t}" x2="{xx:.1f}" y2="{height-margin_b}"/>')
-        body.append(svg_text(xx, height - margin_b + 28, f"{int(round(tick * 100))}%", 12, "#667085", "middle"))
-    for tick in y_ticks:
-        yy = y(tick)
-        body.append(f'<line class="grid" x1="{margin_l}" y1="{yy:.1f}" x2="{width-margin_r}" y2="{yy:.1f}"/>')
-        body.append(svg_text(margin_l - 18, yy + 4, f"{int(round(tick * 100))}%", 12, "#667085", "end"))
-    body.append(
-        f'<line x1="{x(x_axis_min):.1f}" y1="{y(x_axis_min):.1f}" x2="{x(x_axis_max):.1f}" y2="{y(x_axis_max):.1f}" '
-        'stroke="#98a2b3" stroke-width="1.6" stroke-dasharray="6 6"/>'
-    )
-    body.append(svg_text(x(0.80), y(0.80) - 12, "no drop-off", 12, "#667085", "middle", "700"))
-    body.append(svg_text(x(0.80), y(axis_max * 0.28), "context drop-off region", 12, "#b42318", "middle", "700"))
-    body.append(svg_text(margin_l + plot_w / 2, height - 34, "FullInfo pass@3", 14, "#344054", "middle", "700"))
-    body.append(svg_text(margin_l, margin_t - 22, "AskHuman pass@3", 14, "#344054", "start", "700"))
-
-    if not rows:
-        body.append(svg_text(width / 2, height / 2, "No matched AskHuman/FullInfo native rows found.", 20, "#667085", "middle", "600"))
-        svg(FIG_DIR / "01_same_model_different_scaffold.svg", width, height, "\n".join(body))
-        return
-
-    indexed_rows = sorted(
-        rows,
+    baseline_rows = [row for row in rows if not safe_bool(row.get("is_custom_skill_comparison"))]
+    custom_rows = [row for row in rows if safe_bool(row.get("is_custom_skill_comparison"))]
+    custom_by_ref = {str(row.get("full_info_reference_group_label") or ""): row for row in custom_rows}
+    ordered_rows = sorted(
+        baseline_rows,
         key=lambda row: (
             -safe_float(row.get("full_info_minus_ask_human_pp"), -1),
             str(row.get("group_label") or ""),
         ),
     )
-    for row in indexed_rows:
-        ask = safe_float(row.get("ask_human_pass_at_3"), math.nan)
-        full = safe_float(row.get("full_info_pass_at_3"), math.nan)
-        if math.isnan(ask) or math.isnan(full):
-            continue
-        xx = x(full)
-        yy = y(ask)
-        diagonal_y = y(full)
-        family = model_family(str(row.get("model_label") or ""))
-        body.append(f'<line x1="{xx:.1f}" y1="{diagonal_y:.1f}" x2="{xx:.1f}" y2="{yy:.1f}" stroke="#98a2b3" stroke-width="2.2" stroke-linecap="round"/>')
-        body.append(svg_marker(xx, diagonal_y, 11, family, optimal_color, "#ffffff", 2.4, 0.96))
-        body.append(svg_marker(xx, yy, 14, family, real_color, "#ffffff", 3.0, 0.96))
+    row_h = 108
+    plot_bottom = margin_t + row_h * max(len(ordered_rows), 1) - 20
+    height = plot_bottom + 96
+    x_ticks = [tick / 100 for tick in range(0, 91, 10)]
 
-    table_top = 230
-    body.append(svg_text(rail_x, table_top, "Largest native context gaps", 14, "#344054", weight="700"))
-    body.append(svg_text(rail_x, table_top + 21, "Drop = FullInfo pass@3 minus AskHuman pass@3", 11, "#667085"))
-    for idx, row in enumerate(indexed_rows, start=1):
+    def x(value: float) -> float:
+        return margin_l + clamp01(value) / 0.9 * plot_w
+
+    optimal_color = "#f59e0b"
+    real_color = "#2563eb"
+    custom_skill_color = "#7c3aed"
+    body = []
+    body.append(svg_text(48, 42, "Selective Escalation Still Fails Under Strong Harnesses", 28, "#101828", weight="700"))
+    body.append(svg_text(48, 68, "FullInfo ceiling vs AskHuman pass@3; purple marks custom-skill reruns for Codex and Claude Code only.", 15, "#667085"))
+    rail_x = width - margin_r + 20
+    body.append(svg_text(rail_x, 30, "Color = condition", 12, "#344054", weight="700"))
+    body.append(svg_marker(rail_x + 9, 56, 8, "GPT", optimal_color, "#ffffff", 1.6, 0.96))
+    body.append(svg_text(rail_x + 26, 60, "FullInfo", 11, "#667085"))
+    body.append(svg_marker(rail_x + 9, 84, 8, "GPT", real_color, "#ffffff", 1.6, 0.96))
+    body.append(svg_text(rail_x + 26, 88, "AskHuman", 11, "#667085"))
+    body.append(svg_marker(rail_x + 9, 112, 8, "GPT", custom_skill_color, "#ffffff", 1.6, 0.96))
+    body.append(svg_text(rail_x + 26, 116, "custom skill", 11, "#667085"))
+
+    for tick in x_ticks:
+        xx = x(tick)
+        body.append(f'<line class="grid" x1="{xx:.1f}" y1="{margin_t - 22}" x2="{xx:.1f}" y2="{plot_bottom + 24}"/>')
+        body.append(svg_text(xx, margin_t - 34, f"{int(round(tick * 100))}%", 11, "#667085", "middle"))
+    body.append(f'<line class="axis" x1="{margin_l}" y1="{plot_bottom + 24}" x2="{width-margin_r}" y2="{plot_bottom + 24}"/>')
+    body.append(svg_text(margin_l + plot_w / 2, plot_bottom + 70, "pass@3", 14, "#344054", "middle", "700"))
+
+    if not ordered_rows:
+        body.append(svg_text(width / 2, height / 2, "No matched AskHuman/FullInfo native rows found.", 20, "#667085", "middle", "600"))
+        svg(FIG_DIR / "01_same_model_different_scaffold.svg", width, height, "\n".join(body))
+        return
+
+    for idx, row in enumerate(ordered_rows):
         ask = safe_float(row.get("ask_human_pass_at_3"), math.nan)
         full = safe_float(row.get("full_info_pass_at_3"), math.nan)
-        gap = safe_float(row.get("full_info_minus_ask_human_pp"), math.nan)
         if math.isnan(ask) or math.isnan(full):
             continue
-        yy = table_top + 60 + (idx - 1) * 78
+        y0 = margin_t + idx * row_h
+        y_mid = y0 + 24
+        model = str(row.get("model_label") or "")
+        scaffold = display_scaffold_label(row.get("scaffold_label"))
         family = model_family(str(row.get("model_label") or ""))
-        scaffold = str(row.get("scaffold_label") or "").replace("Native ", "")
-        n_text = f"n={row.get('num_intersected_tasks')} intersected tasks" if row.get("num_intersected_tasks") else f"n={row.get('ask_human_pass_at_3_n')} AskHuman tasks"
-        body.append(f'<line x1="{rail_x:.1f}" y1="{yy - 36:.1f}" x2="{width - 52:.1f}" y2="{yy - 36:.1f}" stroke="#e4e7ec" stroke-width="1"/>')
-        body.append(svg_marker(rail_x + 12, yy - 8, 8.5, family, real_color, "#ffffff", 1.7, 0.96))
-        body.append(svg_text(rail_x + 30, yy - 14, f"{idx}. {row.get('model_label')} / {scaffold}", 12, "#101828", weight="700"))
-        body.append(svg_text(rail_x + 30, yy + 4, f"Ask {pct(ask)}   Full {pct(full)}   drop {gap:.1f} pp", 11, "#667085"))
-        body.append(svg_text(rail_x + 30, yy + 21, n_text, 10, "#98a2b3"))
+        custom = custom_by_ref.get(str(row.get("group_label") or ""))
+        custom_value = safe_float(custom.get("ask_human_pass_at_3"), math.nan) if custom else math.nan
+        body.append(f'<line x1="48" y1="{y0 + row_h - 30:.1f}" x2="{width - 48}" y2="{y0 + row_h - 30:.1f}" stroke="#eef0f2" stroke-width="1"/>')
+        body.append(svg_text(48, y0 + 18, model, 12, "#101828", weight="700"))
+        body.append(svg_text(48, y0 + 36, scaffold, 11, "#667085"))
+        body.append(svg_text(48, y0 + 55, f"gap {safe_float(row.get('full_info_minus_ask_human_pp'), 0):.1f} pp", 10, "#98a2b3"))
+        body.append(f'<line x1="{x(ask):.1f}" y1="{y_mid:.1f}" x2="{x(full):.1f}" y2="{y_mid:.1f}" stroke="#98a2b3" stroke-width="2.2" stroke-linecap="round"/>')
+        body.append(svg_marker(x(ask), y_mid, 12.5, family, real_color, "#ffffff", 2.2, 0.96))
+        body.append(svg_marker(x(full), y_mid, 12.5, family, optimal_color, "#ffffff", 2.2, 0.96))
+        body.append(svg_text(x(ask), y_mid + 31, pct(ask), 10, real_color, "middle", "700"))
+        body.append(svg_text(x(full), y_mid - 22, pct(full), 10, optimal_color, "middle", "700"))
+        if not math.isnan(custom_value):
+            body.append(svg_marker(x(custom_value), y_mid, 15, family, custom_skill_color, "#ffffff", 3.0, 0.98))
+            body.append(svg_text(x(custom_value), y_mid - 25, pct(custom_value), 11, custom_skill_color, "middle", "700"))
+            delta = (custom_value - ask) * 100
+            body.append(svg_text(width - 48, y_mid + 4, f"custom skill +{delta:.1f} pp", 12, custom_skill_color, "end", "700"))
+        else:
+            body.append(svg_text(width - 48, y_mid + 4, "custom skill not tested", 11, "#98a2b3", "end"))
 
     svg(FIG_DIR / "01_same_model_different_scaffold.svg", width, height, "\n".join(body))
 
@@ -2295,10 +2616,11 @@ def plot_detection_targeting(summaries: list[dict[str, Any]]) -> None:
         "GPT-5.5 / Native Codex Tool": (12, -22, "start"),
         "Claude Opus 4.7 / Native Claude Code": (16, -10, "start"),
         "Claude Opus 4.7 / Native Claude Code Tool": (16, 32, "start"),
+        "Claude Opus 4.7 / Native Claude Code Tool + custom skill": (-16, 36, "end"),
         "Claude Opus 4.7 / SWE-agent": (-16, -10, "end"),
         "Gemini 3.1 Pro / SWE-agent": (-16, -22, "end"),
         "GLM-5P1 / Native OpenCode": (16, -22, "start"),
-        "GPT-5.4 / SWE-agent": (-16, -8, "end"),
+        "GPT-5.5 / Native Codex Tool + custom skill": (16, -22, "start"),
     }
     for idx, row in enumerate(sorted(rows, key=lambda row: row["group_label"])):
         precision = max(0.0, min(1.0, safe_float(row["ask_precision"], 0.0)))
@@ -2311,7 +2633,7 @@ def plot_detection_targeting(summaries: list[dict[str, Any]]) -> None:
         yy = y(recall)
         body.append(svg_marker(xx, yy, marker_size, family, color))
         dx, dy, anchor = label_offsets.get(row["group_label"], (12 if idx % 2 == 0 else -12, -marker_size - 8, "start" if idx % 2 == 0 else "end"))
-        body.append(svg_text(xx + dx, yy + dy, f'{row["model_label"]} / {row["scaffold_label"].replace("Native ", "")}', 12, "#101828", anchor, "700"))
+        body.append(svg_text(xx + dx, yy + dy, f'{row["model_label"]} / {display_scaffold_label(row["scaffold_label"])}', 12, "#101828", anchor, "700"))
         if math.isnan(pass3):
             body.append(svg_text(xx + dx, yy + dy + 16, "pass@3 n/a", 11, "#667085", anchor))
         else:
@@ -2370,7 +2692,7 @@ def plot_pass_vs_ask_burden(summaries: list[dict[str, Any]]) -> None:
             dx, anchor = -12, "end"
         else:
             dx, anchor = 12, "start"
-        body.append(svg_text(xx + dx, yy - marker_size - 8, f'{row["model_label"]} / {row["scaffold_label"].replace("Native ", "")}', 12, "#101828", anchor, "700"))
+        body.append(svg_text(xx + dx, yy - marker_size - 8, f'{row["model_label"]} / {display_scaffold_label(row["scaffold_label"])}', 12, "#101828", anchor, "700"))
         body.append(svg_text(xx + dx, yy - marker_size + 8, f"asks/pass {asks_per_pass:.2f}", 11, "#667085", anchor))
 
     svg(FIG_DIR / "03_pass_vs_ask_burden.svg", width, height, "\n".join(body))
@@ -2378,7 +2700,7 @@ def plot_pass_vs_ask_burden(summaries: list[dict[str, Any]]) -> None:
 
 def plot_ask_funnel(summaries: list[dict[str, Any]]) -> None:
     rows = ordered_plot_rows([row for row in summaries if row["condition"] == "ask_human" and plot_ready(row)])
-    width = 1240
+    width = 1280
     row_h = 64
     margin_t = 150
     margin_b = 70
@@ -2423,9 +2745,10 @@ def plot_ask_funnel(summaries: list[dict[str, Any]]) -> None:
 
     for idx, row in enumerate(rows):
         y = margin_t + idx * row_h
-        label = compact_group_name(row)
-        body.append(svg_text(label_x, y + 3, label, 12, "#101828", weight="700"))
-        body.append(svg_text(label_x, y + 21, f"asks/pass {safe_float(row.get('avg_questions_per_pass'), 0):.2f}", 11, "#667085"))
+        model, scaffold = model_scaffold_lines(row)
+        body.append(svg_text(label_x, y + 1, model, 12, "#101828", weight="700"))
+        body.append(svg_text(label_x, y + 19, scaffold, 11, "#667085"))
+        body.append(svg_text(label_x, y + 37, f"asks/pass {safe_float(row.get('avg_questions_per_pass'), 0):.2f}", 10, "#98a2b3"))
 
         recall = clamp01(safe_float(row.get("ask_recall"), 0.0))
         precision = clamp01(safe_float(row.get("ask_precision"), 0.0))
@@ -2449,12 +2772,15 @@ def plot_ask_funnel(summaries: list[dict[str, Any]]) -> None:
 
 
 def plot_first_ask_timing(timing_rows: list[dict[str, Any]], summaries: list[dict[str, Any]]) -> None:
-    summary_by_label = {row["group_label"]: row for row in summaries if row["condition"] == "ask_human" and plot_ready(row)}
-    rows = ordered_plot_rows([row for row in timing_rows if row["group_label"] in summary_by_label])
-    width = 1240
-    row_h = 54
-    margin_l, margin_t, margin_b = 295, 142, 74
-    margin_r = 72
+    summary_by_label = {row["group_label"]: row for row in summaries if row["condition"] == "ask_human" and behavior_plot_ready(row)}
+    rows = sorted(
+        [row for row in timing_rows if row["group_label"] in summary_by_label],
+        key=lambda row: group_display_sort_key(str(row.get("group_label") or ""), summary_by_label),
+    )
+    width = 1280
+    row_h = 62
+    margin_l, margin_t, margin_b = 340, 142, 74
+    margin_r = 190
     height = margin_t + row_h * len(rows) + margin_b
     plot_w = width - margin_l - margin_r
     bar_h = 24
@@ -2483,12 +2809,14 @@ def plot_first_ask_timing(timing_rows: list[dict[str, Any]], summaries: list[dic
 
     for idx, row in enumerate(rows):
         y = margin_t + idx * row_h
-        label = compact_group_name(row)
-        body.append(svg_text(48, y + 7, label, 12, "#101828", weight="700"))
+        model, scaffold = model_scaffold_lines(row)
+        body.append(svg_text(48, y + 6, model, 12, "#101828", weight="700"))
+        body.append(svg_text(48, y + 24, scaffold, 11, "#667085"))
         ask_med = safe_float(row.get("median_first_ask_turn"), math.nan)
         write_med = safe_float(row.get("median_first_write_turn"), math.nan)
         med_label = f"median ask {ask_med:.0f}, edit {write_med:.0f}" if not math.isnan(ask_med) and not math.isnan(write_med) else "median unavailable"
-        body.append(svg_text(48, y + 25, med_label, 11, "#667085"))
+        body.append(svg_text(width - 48, y + 6, f"n={safe_int(row.get('num_pass_rows'))}", 11, "#667085", "end"))
+        body.append(svg_text(width - 48, y + 24, med_label, 10, "#98a2b3", "end"))
         x0 = margin_l
         yy = y - 11
         for bucket, _, color in buckets:
@@ -2736,11 +3064,10 @@ def plot_blocker_lifecycle_proxy(lifecycle_summary_rows: list[dict[str, Any]], s
 
 
 def plot_terminal_mix(mix_rows: list[dict[str, Any]], summaries: list[dict[str, Any]]) -> None:
-    summary_by_label = {row["group_label"]: row for row in summaries if row["condition"] == "ask_human" and plot_ready(row)}
+    summary_by_label = {row["group_label"]: row for row in summaries if row["condition"] == "ask_human" and behavior_plot_ready(row)}
     groups = sorted(
         {row["group_label"] for row in mix_rows if row["group_label"] in summary_by_label},
-        key=lambda label: safe_float(summary_by_label.get(label, {}).get("pass_at_3"), -1),
-        reverse=True,
+        key=lambda label: group_display_sort_key(label, summary_by_label),
     )
     states = [state for state in TERMINAL_LABELS if any(row["terminal_evidence_state"] == state for row in mix_rows)]
     width = 1280
@@ -2749,11 +3076,11 @@ def plot_terminal_mix(mix_rows: list[dict[str, Any]], summaries: list[dict[str, 
     height = margin_t + row_h * max(len(groups), 1) + margin_b
     plot_w = width - margin_l - margin_r
     by_group_state = {(row["group_label"], row["terminal_evidence_state"]): row for row in mix_rows}
-    totals = {label: sum(by_group_state.get((label, state), {}).get("count", 0) for state in states) for label in groups}
+    totals = {label: sum(safe_int(by_group_state.get((label, state), {}).get("count")) for state in states) for label in groups}
 
     body = []
     body.append(svg_text(48, 42, "Terminal Evidence Mix", 28, "#101828", weight="700"))
-    body.append(svg_text(48, 68, "Deterministic labels over failed AskHuman pass-level trajectories; no LLM judge required.", 15, "#667085"))
+    body.append(svg_text(48, 68, "Deterministic labels over failed AskHuman trajectories; SWE-agent Gemini/GLM use derived detector labels.", 15, "#667085"))
     body.append(svg_text(margin_l, margin_t - 24, "Share of failed AskHuman passes", 12, "#344054", weight="700"))
     body.append(svg_text(width - margin_r, margin_t - 24, "failed passes", 12, "#667085", "end"))
     for tick in [0, 0.25, 0.5, 0.75, 1.0]:
@@ -2762,13 +3089,13 @@ def plot_terminal_mix(mix_rows: list[dict[str, Any]], summaries: list[dict[str, 
         body.append(svg_text(xx, height - margin_b + 28, f"{int(tick * 100)}%", 12, "#667085", "middle"))
     for idx, label in enumerate(groups):
         yy = margin_t + idx * row_h
-        model, scaffold = (label.split(" / ", 1) + [""])[:2] if " / " in label else (label, "")
+        model, scaffold = model_scaffold_lines_for_label(label, summary_by_label)
         body.append(svg_text(48, yy + 14, model, 12, "#101828", weight="700"))
         body.append(svg_text(48, yy + 32, scaffold, 11, "#667085"))
         x0 = margin_l
         total = totals[label]
         for state in states:
-            count = by_group_state.get((label, state), {}).get("count", 0)
+            count = safe_int(by_group_state.get((label, state), {}).get("count"))
             share = count / total if total else 0
             w = share * plot_w
             if w <= 0:
@@ -2801,12 +3128,11 @@ def plot_terminal_mix(mix_rows: list[dict[str, Any]], summaries: list[dict[str, 
 
 
 def plot_strategy_buckets(bucket_rows: list[dict[str, Any]], summaries: list[dict[str, Any]]) -> None:
-    summary_by_label = {row["group_label"]: row for row in summaries if row["condition"] == "ask_human" and plot_ready(row)}
+    summary_by_label = {row["group_label"]: row for row in summaries if row["condition"] == "ask_human" and behavior_plot_ready(row)}
     ready_labels = set(summary_by_label)
     groups = sorted(
         {row["group_label"] for row in bucket_rows if row["group_label"] in ready_labels},
-        key=lambda label: safe_float(summary_by_label[label].get("pass_at_3"), -1),
-        reverse=True,
+        key=lambda label: group_display_sort_key(label, summary_by_label),
     )
     buckets = [
         "explored then asked before write",
@@ -2837,10 +3163,10 @@ def plot_strategy_buckets(bucket_rows: list[dict[str, Any]], summaries: list[dic
         label: sum(safe_int(by_group_bucket.get((label, bucket), {}).get("count")) for bucket in buckets)
         for label in groups
     }
-    width = 1180
-    row_gap = 54
+    width = 1280
+    row_gap = 62
     bar_h = 24
-    margin_l, margin_r, margin_t = 330, 92, 122
+    margin_l, margin_r, margin_t = 340, 170, 122
     legend_top = margin_t + row_gap * max(len(groups), 1) + 30
     height = legend_top + 68
     plot_w = width - margin_l - margin_r
@@ -2857,8 +3183,12 @@ def plot_strategy_buckets(bucket_rows: list[dict[str, Any]], summaries: list[dic
     for idx, label in enumerate(groups):
         yy = margin_t + idx * row_gap
         body.append(f'<line x1="48" y1="{yy + bar_h + 14:.1f}" x2="{width - 48}" y2="{yy + bar_h + 14:.1f}" stroke="#eef0f2" stroke-width="1"/>')
-        body.append(svg_text(48, yy + 17, label, 13, "#101828", weight="700"))
-        body.append(svg_text(width - 48, yy + 17, f"n={totals[label]}", 12, "#667085", "end"))
+        model, scaffold = model_scaffold_lines_for_label(label, summary_by_label)
+        body.append(svg_text(48, yy + 12, model, 12, "#101828", weight="700"))
+        body.append(svg_text(48, yy + 30, scaffold, 11, "#667085"))
+        pass3 = safe_float(summary_by_label.get(label, {}).get("pass_at_3"), math.nan)
+        body.append(svg_text(width - 48, yy + 10, f"n={totals[label]}", 11, "#667085", "end"))
+        body.append(svg_text(width - 48, yy + 28, f"pass@3 {pct(pass3)}", 10, "#98a2b3", "end"))
         body.append(
             f'<rect x="{margin_l}" y="{yy}" width="{plot_w}" height="{bar_h}" fill="#eef0f2" stroke="#d0d5dd" stroke-width="1"/>'
         )
@@ -2889,6 +3219,91 @@ def plot_strategy_buckets(bucket_rows: list[dict[str, Any]], summaries: list[dic
     svg(FIG_DIR / "05_strategy_buckets.svg", width, height, "\n".join(body))
 
 
+def plot_codex_strategy_buckets(bucket_rows: list[dict[str, Any]], summaries: list[dict[str, Any]]) -> None:
+    summary_by_label = {row["group_label"]: row for row in summaries if row["condition"] == "ask_human" and behavior_plot_ready(row)}
+    labels = [
+        "GPT-5.5 / Native Codex Tool + custom skill",
+        "GPT-5.5 / Native Codex Tool",
+        "GPT-5.5 / Native Codex",
+        "GPT-5.5 / SWE-agent",
+    ]
+    groups = [label for label in labels if label in summary_by_label]
+    buckets = [
+        "explored then asked before write",
+        "upfront ask before read",
+        "wrote before first ask",
+        "no ask",
+        "ask logged, no ask action",
+        "other mixed strategy",
+    ]
+    display_labels = {
+        "explored then asked before write": "explore -> ask -> write",
+        "upfront ask before read": "ask before read",
+        "wrote before first ask": "write before ask",
+        "no ask": "no ask",
+        "ask logged, no ask action": "logged ask, no parsed action",
+        "other mixed strategy": "other mixed",
+    }
+    colors = {
+        "explored then asked before write": "#009e73",
+        "upfront ask before read": "#e69f00",
+        "wrote before first ask": "#d55e00",
+        "no ask": "#4b5563",
+        "ask logged, no ask action": "#0072b2",
+        "other mixed strategy": "#cc79a7",
+    }
+    by_group_bucket = {(row["group_label"], row["strategy_bucket"]): row for row in bucket_rows}
+    totals = {
+        label: sum(safe_int(by_group_bucket.get((label, bucket), {}).get("count")) for bucket in buckets)
+        for label in groups
+    }
+    width = 1180
+    row_gap = 72
+    bar_h = 28
+    margin_l, margin_r, margin_t = 330, 140, 132
+    legend_top = margin_t + row_gap * max(len(groups), 1) + 28
+    height = legend_top + 68
+    plot_w = width - margin_l - margin_r
+    body: list[str] = []
+    body.append(svg_text(48, 42, "GPT-5.5 Strategy Moves Across Harnesses", 28, "#101828", weight="700"))
+    body.append(svg_text(48, 68, "Coarse strategy buckets show how Codex customization reshapes the asking workflow.", 15, "#667085"))
+    grid_bottom = margin_t + row_gap * max(len(groups) - 1, 0) + bar_h + 18
+    for tick in [0, 0.25, 0.5, 0.75, 1.0]:
+        xx = margin_l + tick * plot_w
+        body.append(f'<line class="grid" x1="{xx:.1f}" y1="{margin_t - 18}" x2="{xx:.1f}" y2="{grid_bottom:.1f}"/>')
+        body.append(svg_text(xx, margin_t - 28, f"{int(tick * 100)}%", 12, "#667085", "middle"))
+    for idx, label in enumerate(groups):
+        yy = margin_t + idx * row_gap
+        model, scaffold = model_scaffold_lines_for_label(label, summary_by_label)
+        body.append(svg_text(48, yy + 13, model, 12, "#101828", weight="700"))
+        body.append(svg_text(48, yy + 31, scaffold, 11, "#667085"))
+        body.append(svg_text(width - 48, yy + 12, f"n={totals[label]}", 11, "#667085", "end"))
+        body.append(svg_text(width - 48, yy + 30, f"pass@3 {pct(safe_float(summary_by_label[label].get('pass_at_3')))}", 10, "#98a2b3", "end"))
+        body.append(f'<rect x="{margin_l}" y="{yy}" width="{plot_w}" height="{bar_h}" fill="#eef0f2" stroke="#d0d5dd" stroke-width="1"/>')
+        x0 = margin_l
+        for bucket in buckets:
+            share = safe_float(by_group_bucket.get((label, bucket), {}).get("share_within_group"), 0.0)
+            w = share * plot_w
+            if w <= 0:
+                continue
+            color = colors[bucket]
+            body.append(f'<rect x="{x0:.1f}" y="{yy:.1f}" width="{w:.1f}" height="{bar_h}" fill="{color}"/>')
+            if share >= 0.11:
+                body.append(svg_text(x0 + w / 2, yy + 18, f"{int(round(share * 100))}%", 11, text_fill_for_background(color), "middle", "700"))
+            if x0 > margin_l and w > 2:
+                body.append(f'<line x1="{x0:.1f}" y1="{yy:.1f}" x2="{x0:.1f}" y2="{yy + bar_h:.1f}" stroke="#fbfbf8" stroke-width="1.2"/>')
+            x0 += w
+    legend_y = legend_top + 4
+    legend_x = 48
+    for bucket in buckets[:4]:
+        label = display_labels[bucket]
+        item_w = max(116, 8.0 * len(label) + 34)
+        body.append(f'<rect x="{legend_x}" y="{legend_y-11}" width="13" height="13" fill="{colors[bucket]}"/>')
+        body.append(svg_text(legend_x + 18, legend_y, label, 12, "#344054"))
+        legend_x += item_w
+    svg(FIG_DIR / "14_codex_strategy_buckets.svg", width, height, "\n".join(body))
+
+
 def plot_trajectory_action_phenotype_families(
     action_rows: list[dict[str, Any]],
     summaries: list[dict[str, Any]],
@@ -2909,12 +3324,12 @@ def plot_trajectory_action_phenotype_families(
     paths: list[Path] = []
     for family in included_families:
         labels = sorted(
-            rows_by_family_label_turn.get(family, {}),
+            (label for label in rows_by_family_label_turn.get(family, {}) if label in summary_by_label),
             key=lambda label: phenotype_group_sort_key(label, summary_by_label),
         )
         if not labels:
             continue
-        max_turns = max(max(turns) for turns in rows_by_family_label_turn[family].values() if turns)
+        max_turns = max(max(rows_by_family_label_turn[family][label]) for label in labels)
         width = 1240
         panel_h = 104
         row_gap = 146
@@ -2948,10 +3363,11 @@ def plot_trajectory_action_phenotype_families(
             y0 = margin_t + idx * row_gap
             y_base = y0 + panel_h
             show_x_labels = idx == len(labels) - 1
-            body.append(svg_text(48, y0 + 17, label, 13, "#101828", weight="700"))
-            body.append(svg_text(48, y0 + 36, f"pass@3 {pct(safe_float(summary.get('pass_at_3')))}", 12, "#667085"))
+            model, scaffold = model_scaffold_lines_for_label(label, summary_by_label)
+            body.append(svg_text(48, y0 + 15, model, 12, "#101828", weight="700"))
+            body.append(svg_text(48, y0 + 33, scaffold, 11, "#667085"))
             trajectory_n = safe_int(rows_by_family_label_turn[family][label].get(1, {}).get("trajectories"))
-            body.append(svg_text(48, y0 + 54, f"n={trajectory_n}", 12, "#667085"))
+            body.append(svg_text(48, y0 + 51, f"pass@3 {pct(safe_float(summary.get('pass_at_3')))}   n={trajectory_n}", 11, "#98a2b3"))
             body.append(f'<rect x="{margin_l}" y="{y0}" width="{plot_w}" height="{panel_h}" fill="#ffffff" stroke="#d0d5dd" stroke-width="1"/>')
 
             for frac in (0.25, 0.5, 0.75):
@@ -2993,6 +3409,28 @@ def plot_trajectory_action_phenotype_families(
     return paths
 
 
+def write_swe_agent_model_family_strategy_artifact() -> Path | None:
+    if SWE_AGENT_ANALYSIS_ROOT is None:
+        return None
+    src = SWE_AGENT_ANALYSIS_ROOT / "figure10_model_families_full_raw_120turn.svg"
+    if not src.exists():
+        return None
+    text = src.read_text()
+    text = text.replace(
+        "Model-family Figure 10 action counts (120 turns)",
+        "Model-family action fingerprints (raw counts, 120 turns)",
+    )
+    text = text.replace(
+        "Rows group model families; raw counts per turn; SWE prompteng2 ask_human.",
+        "Rows group model families; raw action counts per turn under SWE-agent AskHuman.",
+    )
+    text = text.replace("Chinese models", "Open models")
+    out = FIG_DIR / "13_swe_agent_model_family_strategy.svg"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text)
+    return out
+
+
 def write_release_md(
     verification: dict[str, Any],
     summaries: list[dict[str, Any]],
@@ -3005,12 +3443,18 @@ def write_release_md(
     lines.append("")
     lines.append("## Path Verification")
     lines.append("")
-    lines.append("- Native release roots are read from `--native-runs-root`; the script looks for `*_swe_skill3` plus explicitly listed custom-tool and FullInfo run directories.")
+    lines.append("- Native release roots are read from one or more `--native-runs-root` values; the script looks for `*_swe_skill3` plus explicitly listed custom-tool, FullInfo, and custom-skill/example9 run directories.")
     for item in verification["native_skill3"]:
         note = f" ({item['note']})" if item.get("note") else ""
+        filter_note = ""
+        if item.get("complete_eval_filter"):
+            filter_note = (
+                f", pass_level_rows={item.get('pass_level_rows', 0)}, ingested={item.get('rows_ingested', 0)}, "
+                f"scoreable_filter_excluded={item.get('rows_excluded_by_scoreable_filter', 0)}"
+            )
         lines.append(
             f"  - `{Path(item['root']).name if item['root'] else 'not configured'}`: {item['pass_dirs']} pass dirs, "
-            f"summary={item['has_summary_json']}, pass_level={item['has_pass_level_json']}.{note}"
+            f"summary={item['has_summary_json']}, pass_level={item['has_pass_level_json']}{filter_note}.{note}"
         )
     lines.append("- SWE-agent raw rows are read from `--swe-agent-raw-root` when configured.")
     for item in verification["swe_agent_raw"]:
@@ -3050,7 +3494,9 @@ def write_release_md(
     lines.append("- `ask logged, no ask action` means blocker/question metadata records questions, but the action trace has no parsed `ASK` action; this is a parser/format audit bucket, not a model strategy.")
     lines.append("- `data/question_blocker_integration_proxy.csv` adds deterministic follow-through proxies for question/blocker integration. It is not a semantic answer-incorporation judge.")
     lines.append("- `data/ask_timing_by_group.csv` breaks pass rows into ask-before-edit, ask-after-edit, ask-without-edit, parser-audit, and no-ask buckets.")
+    lines.append("- `data/bad_first_ask_recovery.csv` recomputes the first-failed-ask recovery slice while ignoring harness permission prompts for `ask_human`.")
     lines.append("- `data/blocker_lifecycle_proxy.csv` is blocker-centered: one row per known blocker per evaluated pass, with deterministic stages for detection, targeted asking, matched answers, follow-up, and solved runs. It skips analysis-only rows without raw trajectories or registries.")
+    lines.append("- `data/native_scoreable_filter_audit.csv` records native custom-skill/example9 pass rows excluded because a UID did not have all three clean evaluated passes.")
     lines.append("- Action-phenotype panels use `Idle/end` as a top cap in the main files; active-normalized context copies are emitted for readers familiar with the earlier turn-normalized plots.")
     lines.append("- `Thought only` means a logged trajectory turn with a non-empty thought but no parsed tool action; it is separated from the post-trajectory `Idle/end` cap.")
     lines.append("- `data/native_other_no_action_audit.csv` audits Native Codex/Claude Code `OTHER` and raw `NO_ACTION` buckets. The release classifier now unwraps common harness action wrappers, so Codex `Edit:` calls count as `WRITE`, wrapped shell snippets can count as `EXECUTE`/`READ`/`TEST`, and raw thought-only empty actions count as `THOUGHT_ONLY`.")
@@ -3071,6 +3517,8 @@ def write_release_md(
     lines.append("- `figures/10_same_model_harness_failure_profile.svg`: same-model Native vs SWE-agent profiles for pass@3, precision, and recall.")
     lines.append("- `figures/11_blocker_lifecycle_proxy.svg`: known-blocker lifecycle stack showing detection, targeted asking, answer matching, follow-up, and solved-run endpoints.")
     lines.append("- `figures/12_full_info_gap.svg`: matched native FullInfo vs AskHuman pass@3 ceiling gap.")
+    lines.append("- `figures/13_swe_agent_model_family_strategy.svg`: SWE-agent model-family action fingerprints copied from the derived model-family analysis artifact.")
+    lines.append("- `figures/14_codex_strategy_buckets.svg`: GPT-5.5/Codex-only strategy bucket comparison.")
     lines.append("")
     lines.append("## AskHuman Summary")
     lines.append("")
@@ -3107,15 +3555,18 @@ def write_release_md(
 
 
 def find_full_info_dirs() -> list[str]:
-    if HARNESS_ROOT is None or not HARNESS_ROOT.exists():
+    roots = NATIVE_RUN_ROOTS or ([HARNESS_ROOT] if HARNESS_ROOT is not None else [])
+    existing_roots = [root for root in roots if root is not None and root.exists()]
+    if not existing_roots:
         return []
     roots = []
-    for run_name in ("codex_swe", "claude_swe", "adk_swe", "opencode_swe"):
-        run_dir = HARNESS_ROOT / run_name
-        if run_dir.exists():
-            roots.extend(str(path) for path in sorted(run_dir.glob("*/full_info")))
-    roots.extend(str(path) for path in sorted(HARNESS_ROOT.glob("fullinfo-e2e-*/*/full_info")))
-    return roots
+    for native_root in existing_roots:
+        for run_name in ("codex_swe", "claude_swe", "adk_swe", "opencode_swe"):
+            run_dir = native_root / run_name
+            if run_dir.exists():
+                roots.extend(str(path) for path in sorted(run_dir.glob("*/full_info")))
+        roots.extend(str(path) for path in sorted(native_root.glob("fullinfo-e2e-*/*/full_info")))
+    return sorted(dict.fromkeys(roots))
 
 
 def parse_args() -> argparse.Namespace:
@@ -3131,6 +3582,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--native-runs-root",
         type=Path,
+        action="append",
+        default=[],
         help="Root containing native harness run directories such as *_swe_skill3 and *_swe_full_info.",
     )
     parser.add_argument(
@@ -3160,13 +3613,15 @@ def parse_args() -> argparse.Namespace:
 
 def configure_paths(args: argparse.Namespace) -> None:
     global OUT_DIR, DATA_DIR, FIG_DIR
-    global HARNESS_ROOT, SWE_AGENT_RAW_ROOT, SWE_AGENT_ANALYSIS_ROOT, HIL_BENCH_HARBOR_ROOTS
+    global HARNESS_ROOT, NATIVE_RUN_ROOTS, SWE_AGENT_RAW_ROOT, SWE_AGENT_ANALYSIS_ROOT, HIL_BENCH_HARBOR_ROOTS
     global SCRUB_LOCAL_PATHS
 
+    NATIVE_SCOREABLE_FILTER_AUDIT.clear()
     OUT_DIR = args.out_dir.expanduser().resolve()
     DATA_DIR = OUT_DIR / "data"
     FIG_DIR = OUT_DIR / "figures"
-    HARNESS_ROOT = args.native_runs_root.expanduser().resolve() if args.native_runs_root else None
+    NATIVE_RUN_ROOTS = [path.expanduser().resolve() for path in getattr(args, "native_runs_root", [])]
+    HARNESS_ROOT = NATIVE_RUN_ROOTS[0] if NATIVE_RUN_ROOTS else None
     SWE_AGENT_RAW_ROOT = args.swe_agent_raw_root.expanduser().resolve() if args.swe_agent_raw_root else None
     if args.swe_agent_analysis_root:
         SWE_AGENT_ANALYSIS_ROOT = args.swe_agent_analysis_root.expanduser().resolve()
@@ -3196,6 +3651,7 @@ def main() -> None:
     if not rows:
         write_csv(DATA_DIR / "per_run_features.csv", [])
         write_csv(DATA_DIR / "summary_by_group.csv", [])
+        write_csv(DATA_DIR / "native_scoreable_filter_audit.csv", [scrub_row_for_output(row) for row in NATIVE_SCOREABLE_FILTER_AUDIT])
         (DATA_DIR / "path_verification.json").write_text(json.dumps(verification_output, indent=2, sort_keys=True) + "\n")
         write_release_md(verification_output, [], verification_output["full_info_dirs_found_outside_requested_roots"])
         print("No input rows found. Check --native-runs-root, --swe-agent-raw-root, and --swe-agent-analysis-root.")
@@ -3212,10 +3668,12 @@ def main() -> None:
     action_phenotypes_with_end = trajectory_action_phenotypes_by_turn(rows, summaries, include_idle_end=True)
     integration = question_blocker_integration(rows)
     timing = ask_timing_by_group(rows, summaries)
+    bad_first_recovery = bad_first_ask_recovery(rows)
     blocker_lifecycle_rows, blocker_lifecycle_summary = blocker_lifecycle_proxy(rows)
 
     write_csv(DATA_DIR / "per_run_features.csv", [scrub_row_for_output(row) for row in rows])
     write_csv(DATA_DIR / "summary_by_group.csv", summaries)
+    write_csv(DATA_DIR / "native_scoreable_filter_audit.csv", [scrub_row_for_output(row) for row in NATIVE_SCOREABLE_FILTER_AUDIT])
     write_csv(DATA_DIR / "full_info_gap.csv", full_gap)
     write_csv(DATA_DIR / "terminal_evidence_mix.csv", mix)
     write_csv(DATA_DIR / "strategy_buckets.csv", buckets)
@@ -3226,6 +3684,7 @@ def main() -> None:
     write_csv(DATA_DIR / "trajectory_action_phenotypes_by_turn_active_normalized.csv", action_phenotypes_active)
     write_csv(DATA_DIR / "question_blocker_integration_proxy.csv", integration)
     write_csv(DATA_DIR / "ask_timing_by_group.csv", timing)
+    write_csv(DATA_DIR / "bad_first_ask_recovery.csv", bad_first_recovery)
     write_csv(DATA_DIR / "blocker_lifecycle_proxy.csv", blocker_lifecycle_rows)
     write_csv(DATA_DIR / "blocker_lifecycle_summary.csv", blocker_lifecycle_summary)
     (DATA_DIR / "path_verification.json").write_text(json.dumps(verification_output, indent=2, sort_keys=True) + "\n")
@@ -3241,8 +3700,10 @@ def main() -> None:
     plot_blocker_lifecycle_proxy(blocker_lifecycle_summary, summaries)
     plot_terminal_mix(mix, summaries)
     plot_strategy_buckets(buckets, summaries)
+    plot_codex_strategy_buckets(buckets, summaries)
     plot_trajectory_action_phenotype_families(action_phenotypes_with_end, summaries, include_idle_end=True, file_suffix="")
     plot_trajectory_action_phenotype_families(action_phenotypes_active, summaries, file_suffix="_active_normalized")
+    write_swe_agent_model_family_strategy_artifact()
     write_release_md(verification_output, summaries, verification_output["full_info_dirs_found_outside_requested_roots"])
 
     print(f"Wrote {len(rows)} per-pass rows")

@@ -1,4 +1,4 @@
-# Escalation Lens — Run Output Schema
+# HiL-Dynamics — Run Output Schema
 
 All run outputs are written under `trust_horizon/runs/`. Nothing in `runs/` is committed to git.
 

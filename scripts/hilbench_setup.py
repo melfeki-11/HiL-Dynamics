@@ -1,5 +1,5 @@
 """
-hilbench setup — pre-flight checker for Escalation Lens / HiL-Bench runs.
+hilbench setup — pre-flight checker for HiL-Dynamics / HiL-Bench runs.
 
 Verifies that all required tools, credentials, data, and Docker images are in
 place before launching a benchmark run.
@@ -270,7 +270,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    print(f"\n{_BOLD}Escalation Lens — setup check{_RESET}\n")
+    print(f"\n{_BOLD}HiL-Dynamics — setup check{_RESET}\n")
 
     results: list[bool] = []
 
