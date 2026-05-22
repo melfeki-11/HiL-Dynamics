@@ -9,7 +9,7 @@ Tests cover:
 
 Run with:
   python3 -m pytest tests/run_adk_test.py -v
-  (from trust_horizon root)
+  (from HiL-Dynamics root)
 """
 
 from __future__ import annotations

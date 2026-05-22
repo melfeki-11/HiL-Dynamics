@@ -7,7 +7,7 @@
  *                                         blocker_registry.json
  *   /output/            (bind-mounted rw) trajectory.json, stats.json, patch.diff, result.json, attempt.json
  *   /app/               (built into image) repo at base commit — agent's workspace
- *   /opt/trust_horizon/ (built into image) node_modules + src
+ *   /opt/hil_dynamics/ (built into image) node_modules + src
  *
  * Required env vars (forwarded by run_hil_swe.py via docker run -e):
  *   LITELLM_BASE_URL        LiteLLM proxy base URL (e.g. http://localhost:4000)

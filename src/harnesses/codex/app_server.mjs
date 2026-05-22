@@ -148,7 +148,7 @@ export async function runCodexAppServerAttempt({ prompt, args, env, workspaceDir
   try {
     await appendJsonl(trajectoryFile, { type: "codex_app_server_start", timestamp: new Date().toISOString(), attempt_dir: attemptDir });
     await rpc.request("initialize", {
-      clientInfo: { name: "trust-horizon", title: "Trust Horizon", version: "0.1.0" },
+      clientInfo: { name: "hil-dynamics", title: "HiL-Dynamics", version: "0.1.0" },
       capabilities: { experimentalApi: true },
     });
     const threadStart = await rpc.request("thread/start", {

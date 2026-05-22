@@ -1,5 +1,5 @@
 """
-Metrics calculation for trust_horizon HiL-SWE runs.
+Metrics calculation for HiL-Dynamics HiL-SWE runs.
 
 Reads eval_result.json and stats.json from each pass directory under a run and
 computes aggregate metrics following the formulas from paper_pipeline.py:
@@ -745,7 +745,7 @@ def summarize(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Compute aggregate metrics for a trust_horizon HiL-SWE run."
+        description="Compute aggregate metrics for a HiL-Dynamics HiL-SWE run."
     )
     parser.add_argument("--run-id", required=True, help="Run identifier.")
     parser.add_argument(

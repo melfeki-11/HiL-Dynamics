@@ -1,5 +1,5 @@
 """
-Evaluation pipeline for trust_horizon HiL-SWE runs.
+Evaluation pipeline for HiL-Dynamics HiL-SWE runs.
 
 For each completed (uid, mode, pass) attempt that has a patch.diff, spins up a fresh
 hilbench-swe:<uid> Docker container, applies the agent patch + the hidden test patch,
@@ -1058,7 +1058,7 @@ def discover_jobs(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Evaluate trust_horizon HiL-SWE solve attempts."
+        description="Evaluate HiL-Dynamics HiL-SWE solve attempts."
     )
     parser.add_argument("--run-id", required=True, help="Run identifier (subdirectory under runs/).")
     parser.add_argument("--uids", nargs="+", metavar="UID", help="Restrict evaluation to these UIDs.")

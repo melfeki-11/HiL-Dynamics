@@ -1,4 +1,4 @@
-"""Trust Horizon v0 analysis helpers for HIL-Bench trajectories."""
+"""HiL-Dynamics v0 analysis helpers for HIL-Bench trajectories."""
 
 from __future__ import annotations
 
@@ -799,7 +799,7 @@ def write_methodology_note(path: Path, *, k_values: Iterable[int]) -> None:
     path.write_text(
         "\n".join(
             [
-                "# Trust Horizon v0 Methodology",
+                "# HiL-Dynamics v0 Methodology",
                 "",
                 "## Inputs",
                 "",
@@ -859,7 +859,7 @@ def run_analysis(input_csvs: list[Path], output_dir: Path, *, k_values: list[int
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run Trust Horizon v0 analysis from per-run CSV inputs.")
+    parser = argparse.ArgumentParser(description="Run HiL-Dynamics v0 analysis from per-run CSV inputs.")
     parser.add_argument("--input-csv", action="append", type=Path, required=True, help="Per-run CSV input. Repeat for multiple conditions.")
     parser.add_argument("--condition", action="append", help="Optional condition override for each --input-csv.")
     parser.add_argument("--output-dir", type=Path, required=True)
