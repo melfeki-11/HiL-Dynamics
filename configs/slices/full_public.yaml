@@ -1,0 +1,9 @@
+# Full public partition: 100 tasks from the HiL-Bench public set.
+# Requires: python3 scripts/ingest_hil_swe.py --p-set public
+p_set: public
+modes:
+  - full_info
+  - neutral
+  - skill
+passes: 3
+workers: 10

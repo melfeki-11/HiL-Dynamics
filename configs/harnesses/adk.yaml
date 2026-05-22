@@ -1,0 +1,3 @@
+sdk: adk
+model: gemini/gemini-3.1-pro
+reasoning_effort: high

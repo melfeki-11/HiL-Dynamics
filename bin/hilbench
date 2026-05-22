@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# hilbench — HiL-Dynamics: Diagnosing Ask Behavior Across Agent Harnesses
+# Usage: ./bin/hilbench <command> [options]
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PYTHON_BIN="${PYTHON:-python3}"
+CMD="${1:-help}"
+shift || true
+
+case "$CMD" in
+  setup)
+    "$PYTHON_BIN" "$REPO_ROOT/scripts/hilbench_setup.py" "$@"
+    ;;
+  run)
+    "$PYTHON_BIN" "$REPO_ROOT/scripts/hilbench_run.py" "$@"
+    ;;
+  analyze)
+    "$PYTHON_BIN" "$REPO_ROOT/scripts/hilbench_analyze.py" "$@"
+    ;;
+  help|--help|-h)
+    cat <<'HELP'
+Usage: ./bin/hilbench <command> [options]
+
+Commands:
+  setup    Check deps, API keys, data, and Docker images before a run
+  run      Configure and launch agent + eval + metrics
+  analyze  Generate report.md and metadata.json for a completed run
+
+Examples:
+  ./bin/hilbench setup --sdk claude --slice smoke
+  ./bin/hilbench run --harness claude --slice smoke
+  ./bin/hilbench run --harness claude --slice test20 --dry-run
+  ./bin/hilbench analyze --run-id my-first-run
+
+Run ./bin/hilbench <command> --help for per-command options.
+HELP
+    ;;
+  *)
+    echo "hilbench: unknown command '$CMD'" >&2
+    echo "Run './bin/hilbench help' for usage." >&2
+    exit 1
+    ;;
+esac
