@@ -59,7 +59,7 @@ if (!ASK_HUMAN_BASE_URL) {
 if (!ASK_HUMAN_MODEL) {
   console.error("ERROR: ASK_HUMAN_MODEL is not set.");
   console.error("  Set it to the model route the server is serving, e.g.:");
-  console.error("  ASK_HUMAN_MODEL=llmengine/llama-3-3-70b-instruct node tests/test_vllm_routing.mjs");
+  console.error("  ASK_HUMAN_MODEL=test-judge-model node tests/test_vllm_routing.mjs");
   process.exit(1);
 }
 

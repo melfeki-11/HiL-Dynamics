@@ -170,8 +170,6 @@ def find_env_file(explicit: str | None = None) -> Path | None:
         Path(explicit) if explicit else None,
         Path(os.environ["LITELLM_CREDENTIALS_FILE"]) if os.environ.get("LITELLM_CREDENTIALS_FILE") else None,
         ROOT / ".env",
-        ROOT.parent / "litellm" / "LOCAL_LITELLM_CREDENTIALS.env",
-        ROOT.parent / "research_evals" / "hil_bench" / ".env",
     ]
     for p in candidates:
         if p and p.exists():

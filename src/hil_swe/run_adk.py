@@ -1098,11 +1098,11 @@ async def main() -> None:
         session_service = InMemorySessionService()
         runner          = Runner(
             agent=agent,
-            app_name="trust_horizon_swe",
+            app_name="hil_dynamics_swe",
             session_service=session_service,
         )
         session = await session_service.create_session(
-            app_name="trust_horizon_swe",
+            app_name="hil_dynamics_swe",
             user_id="swe_user",
         )
         run_config = RunConfig(max_llm_calls=MAX_STEPS) if MAX_STEPS > 0 else RunConfig()

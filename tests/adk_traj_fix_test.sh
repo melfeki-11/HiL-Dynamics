@@ -22,7 +22,7 @@ docker run --rm \
   -e ADK_MODEL="gemini/gemini-3.1-pro" \
   -e LITELLM_BASE_URL="${LITELLM_BASE_URL}" \
   -e LITELLM_API_KEY="${LITELLM_API_KEY}" \
-  -e ASK_HUMAN_MODEL="llmengine/llama-3-3-70b-instruct" \
+  -e ASK_HUMAN_MODEL="test-judge-model" \
   -e TASK_DIR=/task \
   -e OUTPUT_DIR=/output \
   -e ADK_SUPPRESS_GEMINI_LITELLM_WARNINGS=true \

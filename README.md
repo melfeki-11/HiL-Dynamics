@@ -254,11 +254,11 @@ Writes two files to `runs/<run-id>/`:
 
 ## Ask-Human Judge
 
-The `neutral` and `skill` arms route the agent's clarification questions through an LLM judge that matches them against the task's blocker registry. The default judge is the paper-compatible Llama route exposed through LiteLLM:
+The `neutral` and `skill` arms route the agent's clarification questions through an LLM judge that matches them against the task's blocker registry. The judge is configured via `.env`:
 
 ```bash
 ASK_HUMAN_BASE_URL="<defaults to LITELLM_BASE_URL/v1>"
-ASK_HUMAN_MODEL="llmengine/llama-3-3-70b-instruct"
+ASK_HUMAN_MODEL="<your-judge-model>"   # e.g. meta-llama/Llama-3.3-70B-Instruct
 ```
 
 `./bin/hilbench setup --strict` runs a live judge calibration probe and fails if the judge is unreachable or does not return the expected canonical responses.

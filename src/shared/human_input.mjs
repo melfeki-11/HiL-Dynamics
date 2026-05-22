@@ -30,7 +30,7 @@ const STRICT_SELECTOR_SCHEMA = {
   required: ["reasoning", "blocker_id"],
 };
 
-const ASK_HUMAN_SELECTOR_VERSION = "trust-horizon-ask-human-selector-v4";
+const ASK_HUMAN_SELECTOR_VERSION = "hil-dynamics-ask-human-selector-v4";
 const cacheWriteLocks = new Map();
 
 export function stableJson(value) {
