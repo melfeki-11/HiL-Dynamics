@@ -1,4 +1,4 @@
-# Hil-Dynamics: Productionizing Tool For Hil-Bench
+# HiL-Dynamics
 
 Escalation Lens is a HiL-Bench diagnostic: it measures how `<model, harness>` pairs behave on under-specified coding tasks — when they ask for clarification, when they silently guess, and whether their questions actually resolve the blockers that block progress.
 
@@ -100,18 +100,22 @@ Optional overrides (defaults shown):
 ```bash
 # CLAUDE_MODEL="claude-opus-4-7"
 # ASK_HUMAN_BASE_URL="<defaults to LITELLM_BASE_URL/v1>"
-# ASK_HUMAN_MODEL="llmengine/llama-3-3-70b-instruct"
+# ASK_HUMAN_MODEL="<your-judge-model>"
 ```
-
-The local credentials file under `../litellm/LOCAL_LITELLM_CREDENTIALS.env` is supported by the runner for private local use, but it must stay gitignored and must never be committed.
 
 **2. Ingest benchmark tasks**
 
 ```bash
-python3 scripts/ingest_hil_swe.py --uid-file data/hil_swe_public12_uids.txt
-```
+# Ingest a specific slice (UIDs are defined in configs/slices/)
+python3 scripts/ingest_hil_swe.py --uids $(python3 -c "
+import yaml
+c = yaml.safe_load(open('configs/slices/public12.yaml'))
+print(' '.join(c['uids']))
+")
 
-This branch starts with 12 public HiL-Bench SWE tasks for local testing. `public3` is the fast smoke slice; `public12` is the local validation slice. Avoid running `test20` while iterating on prompts/skills.
+# Or ingest all public tasks at once
+python3 scripts/ingest_hil_swe.py --p-set public
+```
 
 **3. Build Docker harness images**
 
@@ -363,8 +367,10 @@ python3 scripts/run_hil_swe.py \
 # Solve only (skip eval and metrics)
 python3 scripts/run_hil_swe.py --run-id pilot --uids ... --skip-eval --skip-metrics
 
-# Train split for skill iteration
+# Train split for skill iteration (80 public UIDs)
 python3 scripts/run_hil_swe.py --run-id train80-neutral --uids $(grep -v '^#' data/hil_swe_80_remaining_public_uids.txt) --modes neutral --passes 3
+# Or equivalently via the hilbench CLI:
+# ./bin/hilbench run --harness claude --slice train80 --arm neutral
 
 # All 100 public tasks
 python3 scripts/run_hil_swe.py --run-id pub100 --p-set public --modes neutral skill full_info --passes 3
