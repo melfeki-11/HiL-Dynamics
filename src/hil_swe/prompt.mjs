@@ -1,5 +1,5 @@
 /**
- * SWE task prompt construction for trust_horizon.
+ * SWE task prompt construction for HiL-Dynamics.
  *
  * ask_human mode: standard SWE-bench instance template
  * full_info mode: standard SWE-bench instance template + blocker resolutions

@@ -2,14 +2,14 @@
 
 This folder contains the scripts used to derive the analysis CSVs and SVG figures for the HIL-Bench model-harness writeup.
 
-The code is self-contained in the sense that it does not import from an external `autonomy_calibration` checkout. The trajectory classifier helper is vendored as `trust_horizon_core.py`. The raw run artifacts are not included here, so reproducing the figures still requires local copies of the evaluated runs.
+The code is self-contained in the sense that it does not import from an external `autonomy_calibration` checkout. The trajectory classifier helper is vendored as `hil_dynamics_core.py`. The raw run artifacts are not included here, so reproducing the figures still requires local copies of the evaluated runs.
 
 ## Files
 
 - `make_release_assets.py`: ingests run artifacts, writes `data/*.csv`, and generates lightweight SVG figures.
 - `make_trajectory_phenotype_panels.py`: regenerates the `06_action_phenotypes_*` panels from cached CSVs.
 - `convert_svgs_to_png.py`: optional helper for converting generated SVGs to PNGs.
-- `trust_horizon_core.py`: vendored deterministic trajectory classifier used by the release asset script.
+- `hil_dynamics_core.py`: vendored deterministic trajectory classifier used by the release asset script.
 
 ## Requirements
 
@@ -19,7 +19,7 @@ Python 3.10+ and the standard library. No plotting package is required; figures 
 
 `make_release_assets.py` accepts these roots:
 
-- `--native-runs-root`: Trust Horizon native harness runs, including `*_swe_skill3`, custom-tool, FullInfo, and explicitly listed custom-skill/example9 directories. May be repeated to combine runs from multiple checkouts.
+- `--native-runs-root`: HiL-Dynamics native harness runs, including `*_swe_skill3`, custom-tool, FullInfo, and explicitly listed custom-skill/example9 directories. May be repeated to combine runs from multiple checkouts.
 - `--swe-agent-raw-root`: SWE-agent raw per-model trajectory directories.
 - `--swe-agent-analysis-root`: derived SWE-agent CSV analysis directory. If omitted, this defaults to `../analysis/figure10_model_families` relative to `--swe-agent-raw-root`.
 - `--harbor-root`: HIL-Bench Harbor SWE task root containing blocker registries. May be repeated.
@@ -30,8 +30,8 @@ From the repository root:
 
 ```bash
 python analysis/tools/make_release_assets.py \
-  --native-runs-root /path/to/trust_horizon/runs \
-  --native-runs-root /path/to/trust_horizon_extra/runs \
+  --native-runs-root /path/to/HiL-Dynamics/runs \
+  --native-runs-root /path/to/HiL-Dynamics_extra/runs \
   --swe-agent-raw-root /path/to/swe_prompteng2_trajectory_analysis/raw \
   --swe-agent-analysis-root /path/to/swe_prompteng2_trajectory_analysis/analysis/figure10_model_families \
   --harbor-root /path/to/hil-bench-public/harbor_swe \

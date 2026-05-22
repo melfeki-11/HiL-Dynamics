@@ -216,7 +216,7 @@ async function probeChatCompletion({ base, token, model }) {
 }
 
 async function checkOpenCodeCli() {
-  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "trust-horizon-opencode-preflight-"));
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "hil-dynamics-opencode-preflight-"));
   const env = {
     ...process.env,
     HOME: path.join(tempRoot, "home"),

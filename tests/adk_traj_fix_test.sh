@@ -30,10 +30,10 @@ docker run --rm \
   -e PAGER=cat \
   --add-host=host.docker.internal:host-gateway \
   -v "${TASK_DIR}:/task:ro" \
-  -v "${ROOT_DIR}/src:/opt/trust_horizon/src:ro" \
+  -v "${ROOT_DIR}/src:/opt/hil_dynamics/src:ro" \
   -v "${TEST_OUTPUT}:/output" \
   "$HARNESS_IMAGE" \
-  python3.adk /opt/trust_horizon/src/hil_swe/run_adk.py 2>&1
+  python3.adk /opt/hil_dynamics/src/hil_swe/run_adk.py 2>&1
 EXIT=$?
 echo "Docker exited with: $EXIT"
 
