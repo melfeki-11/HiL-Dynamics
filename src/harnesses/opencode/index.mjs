@@ -245,7 +245,7 @@ async function waitForOpenCodeIdle({ client, sessionId, workspaceDir, trajectory
 
 function mcpRuntimeEnv({ instanceId, args, trajectoryFile, workspaceDir }) {
   return {
-    TRUST_HORIZON_INSTANCE_ID: instanceId,
+    HIL_DYNAMICS_INSTANCE_ID: instanceId,
     HARNESS_HUMAN_KB: args.humanKb || "",
     HARNESS_ASK_HUMAN_CACHE: args.askHumanCache || "",
     HARNESS_ASK_HUMAN_REPLAY: args.askHumanReplay ? "true" : "false",
@@ -264,7 +264,7 @@ function mcpConfig({ args }) {
       type: "local",
       command: [process.execPath, path.join(rootDir, "src", "shared", "judge_mcp.mjs")],
       environment: {
-        INSTANCE_ID: "{env:TRUST_HORIZON_INSTANCE_ID}",
+        INSTANCE_ID: "{env:HIL_DYNAMICS_INSTANCE_ID}",
         HARNESS_HUMAN_KB: "{env:HARNESS_HUMAN_KB}",
         HARNESS_ASK_HUMAN_CACHE: "{env:HARNESS_ASK_HUMAN_CACHE}",
         HARNESS_ASK_HUMAN_REPLAY: "{env:HARNESS_ASK_HUMAN_REPLAY}",

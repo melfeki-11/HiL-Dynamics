@@ -15,7 +15,7 @@
  *   /task/      ro  metadata.json, problem_statement.txt, blocker_registry.json, ...
  *   /output/    rw  trajectory.json, stats.json, patch.diff, result.json, attempt.json
  *   /app/           repo at base commit — agent workspace
- *   /opt/trust_horizon/  node_modules (npm ci); src/ bind-mounted ro
+ *   /opt/hil_dynamics/  node_modules (npm ci); src/ bind-mounted ro
  *
  * Required env vars (passed by run_hil_swe.py via docker run -e):
  *   LITELLM_BASE_URL                    LiteLLM proxy base URL
@@ -915,7 +915,7 @@ async function runCodexAppServer({ prompt, env, uid, sidecarUrl, pushEvent, abor
     (async () => {
       try {
         await rpc.request("initialize", {
-          clientInfo:   { name: "trust-horizon-hil-swe", title: "Trust Horizon HiL-SWE", version: "0.1.0" },
+          clientInfo:   { name: "hil-dynamics-hil-swe", title: "HiL-Dynamics HiL-SWE", version: "0.1.0" },
           capabilities: { experimentalApi: true },
         });
 

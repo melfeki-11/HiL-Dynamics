@@ -1,5 +1,5 @@
 """
-Host-side orchestrator for trust_horizon HiL-SWE runs.
+Host-side orchestrator for HiL-Dynamics HiL-SWE runs.
 
 Runs the full pipeline in one shot:
   Phase 1 — Solve:    spin up harness containers in parallel; each produces patch.diff + trajectory
@@ -170,8 +170,6 @@ def find_env_file(explicit: str | None = None) -> Path | None:
         Path(explicit) if explicit else None,
         Path(os.environ["LITELLM_CREDENTIALS_FILE"]) if os.environ.get("LITELLM_CREDENTIALS_FILE") else None,
         ROOT / ".env",
-        ROOT.parent / "litellm" / "LOCAL_LITELLM_CREDENTIALS.env",
-        ROOT.parent / "research_evals" / "hil_bench" / ".env",
     ]
     for p in candidates:
         if p and p.exists():
@@ -231,7 +229,7 @@ TEMPLATES_DIR = SRC_DIR / "hil_swe" / "templates"
 SDK_CONFIGS = {
     "claude": {
         "harness_image_prefix": "hilbench-swe-harness-claude",
-        "entrypoint":           "/opt/trust_horizon/src/hil_swe/run_claude.mjs",
+        "entrypoint":           "/opt/hil_dynamics/src/hil_swe/run_claude.mjs",
         "model_env_key":        "CLAUDE_MODEL",
         "default_model":        "claude-opus-4-7",
         "executable_env":       "CLAUDE_CODE_EXECUTABLE=claude",
@@ -239,14 +237,14 @@ SDK_CONFIGS = {
     },
     "codex": {
         "harness_image_prefix": "hilbench-swe-harness-codex",
-        "entrypoint":           "/opt/trust_horizon/src/hil_swe/run_codex.mjs",
+        "entrypoint":           "/opt/hil_dynamics/src/hil_swe/run_codex.mjs",
         "model_env_key":        "CODEX_MODEL",
         "default_model":        "gpt-5.5",
         "executable_env":       "CODEX_CODE_EXECUTABLE=codex",
     },
     "adk": {
         "harness_image_prefix": "hilbench-swe-harness-adk",
-        "entrypoint":           "/opt/trust_horizon/src/hil_swe/run_adk.py",
+        "entrypoint":           "/opt/hil_dynamics/src/hil_swe/run_adk.py",
         "model_env_key":        "ADK_MODEL",
         "default_model":        "gemini/gemini-3.1-pro",
         "executable_env":       "ADK_SUPPRESS_GEMINI_LITELLM_WARNINGS=true",
@@ -260,7 +258,7 @@ SDK_CONFIGS = {
     },
     "opencode": {
         "harness_image_prefix": "hilbench-swe-harness-opencode",
-        "entrypoint":           "/opt/trust_horizon/src/hil_swe/run_opencode.mjs",
+        "entrypoint":           "/opt/hil_dynamics/src/hil_swe/run_opencode.mjs",
         "model_env_key":        "OPENCODE_MODEL",
         "default_model":        "fireworks_ai/glm-5p1",
         # Suppress auto-update banner; belt-and-suspenders with autoupdate:false in config
@@ -733,7 +731,7 @@ def _run_attempt_inner(
         # task data (read-only)
         "-v", f"{task_dir.resolve()}:/task:ro",
         # harness source (read-only) — changes don't need image rebuilds
-        "-v", f"{SRC_DIR.resolve()}:/opt/trust_horizon/src:ro",
+        "-v", f"{SRC_DIR.resolve()}:/opt/hil_dynamics/src:ro",
         # output (read-write)
         "-v", f"{out_dir.resolve()}:/output",
         *env_args,
@@ -859,7 +857,7 @@ def build_job_list(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Run trust_horizon HiL-SWE attempts via Docker containers."
+        description="Run HiL-Dynamics HiL-SWE attempts via Docker containers."
     )
     parser.add_argument("--run-id", required=True, help="Unique run identifier (used as output directory name).")
     uid_group = parser.add_mutually_exclusive_group(required=True)
@@ -898,7 +896,7 @@ def main() -> None:
         "--env-file", metavar="PATH",
         help=(
             "Path to a .env file with LiteLLM credentials "
-            "(default: auto-discovers trust_horizon/.env or hil_bench/.env)."
+            "(default: auto-discovers HiL-Dynamics/.env or hil_bench/.env)."
         ),
     )
     parser.add_argument(
@@ -1124,14 +1122,14 @@ def main() -> None:
 
     if not api_key:
         print(
-            "ERROR: No API key found.  Set LITELLM_API_KEY in trust_horizon/.env "
+            "ERROR: No API key found.  Set LITELLM_API_KEY in HiL-Dynamics/.env "
             "(or ANTHROPIC_AUTH_TOKEN / LITELLM_AWS_SECRET_ID+LITELLM_AWS_SECRET_KEY).",
             file=sys.stderr,
         )
         sys.exit(1)
     if not base_url:
         print(
-            "ERROR: No base URL found.  Set LITELLM_BASE_URL in trust_horizon/.env "
+            "ERROR: No base URL found.  Set LITELLM_BASE_URL in HiL-Dynamics/.env "
             "(e.g. https://<your-litellm-endpoint>).",
             file=sys.stderr,
         )

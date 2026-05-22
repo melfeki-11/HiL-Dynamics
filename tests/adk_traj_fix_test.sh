@@ -22,7 +22,7 @@ docker run --rm \
   -e ADK_MODEL="gemini/gemini-3.1-pro" \
   -e LITELLM_BASE_URL="${LITELLM_BASE_URL}" \
   -e LITELLM_API_KEY="${LITELLM_API_KEY}" \
-  -e ASK_HUMAN_MODEL="llmengine/llama-3-3-70b-instruct" \
+  -e ASK_HUMAN_MODEL="test-judge-model" \
   -e TASK_DIR=/task \
   -e OUTPUT_DIR=/output \
   -e ADK_SUPPRESS_GEMINI_LITELLM_WARNINGS=true \
@@ -30,10 +30,10 @@ docker run --rm \
   -e PAGER=cat \
   --add-host=host.docker.internal:host-gateway \
   -v "${TASK_DIR}:/task:ro" \
-  -v "${ROOT_DIR}/src:/opt/trust_horizon/src:ro" \
+  -v "${ROOT_DIR}/src:/opt/hil_dynamics/src:ro" \
   -v "${TEST_OUTPUT}:/output" \
   "$HARNESS_IMAGE" \
-  python3.adk /opt/trust_horizon/src/hil_swe/run_adk.py 2>&1
+  python3.adk /opt/hil_dynamics/src/hil_swe/run_adk.py 2>&1
 EXIT=$?
 echo "Docker exited with: $EXIT"
 

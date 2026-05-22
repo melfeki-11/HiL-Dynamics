@@ -3,7 +3,7 @@ set -e
 # Start the drop-params proxy
 REAL_LITELLM_URL="${LITELLM_BASE_URL}" \
   LITELLM_API_KEY="${LITELLM_API_KEY}" \
-  node /opt/trust_horizon/src/hil_swe/litellm_drop_params_proxy.mjs >/tmp/pp.txt 2>/dev/null &
+  node /opt/hil_dynamics/src/hil_swe/litellm_drop_params_proxy.mjs >/tmp/pp.txt 2>/dev/null &
 PROXY_PID=$!
 sleep 2
 PORT=$(grep PROXY_PORT /tmp/pp.txt | cut -d= -f2 | tr -d "\n")
