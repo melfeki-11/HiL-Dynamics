@@ -6,7 +6,7 @@
  * (item/tool/requestUserInput) can be intercepted and routed through the same
  * LLM-backed human simulator used by run_claude.mjs.  This means:
  *
- *   ask_human mode : item/tool/requestUserInput → createHumanInputRouter → LLM judge
+ *   ask_human mode : item/tool/requestUserInput → ask_human_sidecar → LLM judge
  *                    (identical to claude-code AskUserQuestion routing)
  *   full_info mode : item/tool/requestUserInput → answers filled with UNKNOWN_RESOLUTION
  *                    ("irrelevant question") — mirrors claude-code full_info behaviour
@@ -36,12 +36,11 @@
 import path from "node:path";
 import fs from "node:fs/promises";
 import os from "node:os";
-import http from "node:http";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
-  createHumanInputRouter,
   UNKNOWN_RESOLUTION,
+  CANT_ANSWER,
   UNKNOWN_BLOCKER_ID,
   ASK_HUMAN_REQUEST_TYPES,
   APPROVAL_REQUEST_TYPES,
@@ -52,23 +51,24 @@ import { buildSwePrompt } from "./prompt.mjs";
 import { installAgentsSkill, removeInstalledAskHumanSkills, SKILL_TOOL_REF } from "./skills.mjs";
 import {
   WORKSPACE, TASK_DIR, OUTPUT_DIR,
-  MODE, PASS_INDEX, RUN_ID, TIMEOUT_MS,
+  MODE, ASK_HUMAN_ENABLED, SKILL_ENABLED, FULL_INFO_ENABLED,
+  SKILL_TEMPLATE_VERSION, ASK_HUMAN_GUIDANCE_TEMPLATE_VERSION,
+  ASK_HUMAN_GUIDANCE_ENABLED, PASS_INDEX, RUN_ID, TIMEOUT_MS,
   LITELLM_CALL_TIMEOUT_MS, STEP_LITELLM_TRIES,
   ASK_HUMAN_BASE_URL, ASK_HUMAN_MODEL, buildAskHumanGuidance,
-  CLAUDE_MD_HINT, RICH_ASK_TOOL_DESC,
-  buildPerTaskMemoryHint,
-  THOUGHT_CAP, ACT_CAP, OBS_CAP, cap, gitDiff,
+  THOUGHT_CAP, ACT_CAP, OBS_CAP, cap, computeResourceStats, gitDiff,
 } from "./constants.mjs";
+import { httpGetJson, sidecarAsk, startAskHumanSidecar, stopSidecar } from "./ask_human_sidecar_client.mjs";
 
-// Codex's native question-asking tool is requestUserInput. The recall-tweak
-// flags (SEED_BLOCKER_TODOS / etc.) modulate the appended guidance internally.
-const ASK_HUMAN_GUIDANCE = buildAskHumanGuidance("requestUserInput", "codex");
+// Codex's native question-asking tool is requestUserInput. Guidance is an
+// explicit diagnostic flag, not part of ask_human by default.
+const ASK_HUMAN_GUIDANCE = buildAskHumanGuidance("requestUserInput and/or ask_human");
 
 // ── Configuration from env ──────────────────────────────────────────────────
 
 const CODEX_MODEL = process.env.CODEX_MODEL || "gpt-5.5";
 const CODEX_BIN   = process.env.CODEX_CODE_EXECUTABLE || "codex";
-const WITH_CUSTOM_TOOL = /^(1|true|yes|on)$/i.test(String(process.env.WITH_CUSTOM_TOOL || ""));
+const WITH_CUSTOM_TOOL = ASK_HUMAN_ENABLED && /^(1|true|yes|on)$/i.test(String(process.env.WITH_CUSTOM_TOOL ?? "0"));
 const CODEX_APPROVAL_POLICY = "on-request";
 // Optional reasoning effort override (none | minimal | low | medium | high | xhigh).
 // When set, plumbed three ways for belt-and-suspenders propagation:
@@ -85,99 +85,13 @@ if (CODEX_REASONING_EFFORT && !VALID_REASONING_EFFORTS.has(CODEX_REASONING_EFFOR
     `Must be one of: ${[...VALID_REASONING_EFFORTS].join(", ")}.`,
   );
 }
-// MAX_TURNS: max completed items (commands + file edits + tool calls) before we interrupt
+// MAX_STEPS: max completed items (commands + file edits + tool calls) before we interrupt
 // the turn via turn/interrupt.  0 or unset = no limit (wall-clock TIMEOUT_MS still applies).
 // The codex app-server has no native turn limit param, so we implement it by counting
 // ItemCompletedNotification events and calling turn/interrupt when the threshold is reached.
-const MAX_TURNS   = Number(process.env.MAX_TURNS || "0");
+const MAX_STEPS   = Number(process.env.MAX_STEPS || "0");
 const __dirname   = path.dirname(fileURLToPath(import.meta.url));
-const SIDECAR_SCRIPT = path.join(__dirname, "ask_human_sidecar.mjs");
 const BRIDGE_SCRIPT  = path.join(__dirname, "ask_human_mcp_bridge.mjs");
-
-// ── Sidecar helpers (for optional custom MCP ask_human tool) ────────────────
-
-function httpGetJson(url) {
-  return new Promise((resolve, reject) => {
-    const req = http.get(url, (res) => {
-      let data = "";
-      res.on("data", (chunk) => { data += chunk; });
-      res.on("end", () => {
-        try { resolve(JSON.parse(data || "{}")); }
-        catch (err) { reject(err); }
-      });
-    });
-    req.on("error", reject);
-    req.setTimeout(5000, () => req.destroy(new Error("GET timeout")));
-  });
-}
-
-async function startSidecar(uid) {
-  const env = {
-    ...process.env,
-    MODE,
-    TASK_DIR,
-    TASK_UID: uid,
-    ASK_HUMAN_BASE_URL: ASK_HUMAN_BASE_URL || "",
-    ASK_HUMAN_MODEL: ASK_HUMAN_MODEL || "",
-  };
-  const proc = spawn("node", [SIDECAR_SCRIPT], {
-    env,
-    cwd: WORKSPACE,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-
-  proc.stderr.on("data", (chunk) => {
-    process.stderr.write(`[ask_human_sidecar] ${String(chunk)}`);
-  });
-
-  let buf = "";
-  const portLine = await new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      reject(new Error(`sidecar startup timeout after 20000ms. output=${buf}`));
-    }, 20_000);
-
-    const onData = (chunk) => {
-      buf += String(chunk);
-      const idx = buf.indexOf("\n");
-      if (idx < 0) return;
-      const line = buf.slice(0, idx).trim();
-      clearTimeout(timeout);
-      proc.stdout.off("data", onData);
-      resolve(line);
-    };
-
-    proc.stdout.on("data", onData);
-    proc.once("exit", (code) => {
-      clearTimeout(timeout);
-      reject(new Error(`sidecar exited with code ${code} before announcing port. buf=${buf}`));
-    });
-    proc.once("error", (err) => {
-      clearTimeout(timeout);
-      reject(new Error(`sidecar spawn error: ${err.message}`));
-    });
-  });
-
-  const m = /^SIDECAR_PORT=(\d+)$/.exec(String(portLine || ""));
-  if (!m) throw new Error(`sidecar did not announce port. got=${portLine}`);
-  const port = Number(m[1]);
-  const url = `http://127.0.0.1:${port}`;
-
-  for (let i = 0; i < 20; i++) {
-    try {
-      const health = await httpGetJson(`${url}/health`);
-      if (health?.ok) return { proc, url };
-    } catch {
-      // keep polling
-    }
-    await new Promise((r) => setTimeout(r, 250));
-  }
-  throw new Error("sidecar health check failed after 20 attempts");
-}
-
-function stopSidecar(proc) {
-  if (!proc) return;
-  try { proc.kill("SIGTERM"); } catch {}
-}
 
 // ── API env helpers ──────────────────────────────────────────────────────────
 
@@ -234,8 +148,10 @@ function codexApiEnv({ sidecarUrl = "" } = {}) {
     );
   }
 
-  // Optional custom top-level ask_human tool for codex via MCP.
-  // This is additive: native requestUserInput remains available.
+  // Custom top-level ask_human tool for Codex via MCP.
+  // This is additive: native requestUserInput remains available and is routed
+  // through the same sidecar backend. Set WITH_CUSTOM_TOOL=0 to hide the MCP tool
+  // during diagnostic runs while keeping native requestUserInput interception.
   if (WITH_CUSTOM_TOOL) {
     if (!sidecarUrl) {
       throw new Error("WITH_CUSTOM_TOOL requires a started ask_human sidecar URL");
@@ -246,16 +162,7 @@ function codexApiEnv({ sidecarUrl = "" } = {}) {
         args: [BRIDGE_SCRIPT],
         env: {
           SIDECAR_URL: sidecarUrl,
-          // Forward the Tweak D rich-description flag to the bridge subprocess.
           RICH_ASK_TOOL_DESC: process.env.RICH_ASK_TOOL_DESC || "",
-          SOFTEN_CATEGORY_MANDATE: process.env.SOFTEN_CATEGORY_MANDATE || "",
-          MAX_ASKS_PER_PASS: process.env.MAX_ASKS_PER_PASS || "",
-          IRRELEVANT_COOLDOWN: process.env.IRRELEVANT_COOLDOWN || "",
-          BLOCKER_SCALED_CAP: process.env.BLOCKER_SCALED_CAP || "",
-          IRRELEVANT_FIRST_THROTTLE: process.env.IRRELEVANT_FIRST_THROTTLE || "",
-          STOP_WHEN_BLOCKERS_RESOLVED: process.env.STOP_WHEN_BLOCKERS_RESOLVED || "",
-          READ_BEFORE_ASK: process.env.READ_BEFORE_ASK || "",
-          READ_BEFORE_ASK_MIN_FILES: process.env.READ_BEFORE_ASK_MIN_FILES || "",
         },
       },
     };
@@ -355,33 +262,40 @@ class JsonRpcProcess {
  * Handle item/tool/requestUserInput — Codex's native question-asking mechanism.
  * Mirrors handleRequestUserInput() in app_server.mjs.
  *
- * ask_human mode : route each question through the LLM judge (createHumanInputRouter).
+ * ask_human mode: route each question through the shared ask_human sidecar.
  * full_info mode : fill answers with UNKNOWN_RESOLUTION ("irrelevant question") — all info
  *                  is already in the prompt so the agent should not need to ask.
  */
-async function handleRequestUserInput({ params, router, pushEvent }) {
+function appendSidecarEvents(result, pushEvent) {
+  for (const ev of Array.isArray(result?.events) ? result.events : []) {
+    pushEvent?.(ev);
+  }
+}
+
+async function handleRequestUserInput({ params, sidecarUrl, pushEvent }) {
   const answers = {};
   for (const question of params.questions || []) {
-    const prompt = question.question || "Clarification request";
+    const prompt = typeof question?.question === "string" ? question.question : "";
 
-    if (router) {
+    if (sidecarUrl) {
       // ask_human mode: route to the LLM-backed human simulator
-      const result = await router.route({
+      const result = await sidecarAsk({
+        sidecarUrl,
+        question: prompt,
         requestType:      "clarification",
         nativeEventType:  "codex.item/tool/requestUserInput",
         rawEvent:         question,
-        question:         prompt,
         options:          question.options || [],
         context: {
           question_id: question.id,
           isOther:     question.isOther,
           isSecret:    question.isSecret,
         },
+        fallbackSource: "codex_native_request_user_input_error_fallback",
       });
-      const selected = result.selected_labels?.length
-        ? result.selected_labels
-        : [result.resolution || UNKNOWN_RESOLUTION];
-      answers[question.id] = { answers: selected };
+      appendSidecarEvents(result, pushEvent);
+      const answerText = String(result.resolution ?? UNKNOWN_RESOLUTION);
+      answers[question.id] = { answers: [answerText] };
       // Emit a structured event so extractCodexTrajectorySteps can include the
       // ask/answer pair in trajectory.json.  requestUserInput arrives as a JSON-RPC
       // *request* (not a notification), so it never appears as an sdk_event and would
@@ -390,7 +304,7 @@ async function handleRequestUserInput({ params, router, pushEvent }) {
         type:        "codex_ask_question",
         timestamp:   new Date().toISOString(),
         question:    prompt,
-        answer:      selected.join("; "),
+        answer:      answerText,
         question_id: question.id,
         source:      "native_requestUserInput",
       });
@@ -418,25 +332,28 @@ function parseResolutionJson(resolution) {
   }
 }
 
-async function handleElicitationRequest({ params, router, pushEvent }) {
+async function handleElicitationRequest({ params, sidecarUrl, pushEvent }) {
   // In ask_human mode, route elicitation prompts through the same human router.
   // In full_info mode, still accept with canonical unknown resolution to avoid
   // hard MCP-call rejection loops.
-  if (!router) {
+  if (!sidecarUrl) {
     return { action: "accept", content: parseResolutionJson(UNKNOWN_RESOLUTION), _meta: null };
   }
 
-  const result = await router.route({
+  const result = await sidecarAsk({
+    sidecarUrl,
+    question: params?.message || params?.url || "MCP elicitation request",
     requestType: "elicitation",
     nativeEventType: "codex.mcpServer/elicitation/request",
     rawEvent: params,
-    question: params?.message || params?.url || "MCP elicitation request",
     context: {
       serverName: params?.serverName,
       mode: params?.mode,
       requestedSchema: params?.requestedSchema,
     },
+    fallbackSource: "codex_mcp_elicitation_error_fallback",
   });
+  appendSidecarEvents(result, pushEvent);
   pushEvent({
     type:      "codex_mcp_elicitation",
     timestamp: new Date().toISOString(),
@@ -463,6 +380,33 @@ function safeJson(value) {
 
 function mcpToolName(item) {
   return `${item?.server || ""}.${item?.tool || ""}`.replace(/^\./, "");
+}
+
+function readAskQuestionFromValue(value) {
+  if (value == null) return "";
+  if (typeof value === "string") {
+    if (!value.length) return "";
+    try {
+      return readAskQuestionFromValue(JSON.parse(value));
+    } catch {
+      return value;
+    }
+  }
+  if (typeof value !== "object") return "";
+  if (typeof value.question === "string") return value.question;
+  if (value.arguments && typeof value.arguments === "object") {
+    const nested = readAskQuestionFromValue(value.arguments);
+    if (nested !== "") return nested;
+  }
+  if (value.input && typeof value.input === "object") {
+    const nested = readAskQuestionFromValue(value.input);
+    if (nested !== "") return nested;
+  }
+  if (value.ask_human && typeof value.ask_human === "object") {
+    const nested = readAskQuestionFromValue(value.ask_human);
+    if (nested !== "") return nested;
+  }
+  return "";
 }
 
 function extractMcpResultText(result) {
@@ -550,7 +494,7 @@ function extractCodexTrajectorySteps(events) {
     if (ev.type === "ask_question_full_info_mode") {
       steps.push({
         thought: currentThought,
-        act:     cap(`ask_human ${ev.question || ""}`, ACT_CAP),
+        act:     cap(`ask_human [native] ${ev.question || ""}`, ACT_CAP),
         obs:     UNKNOWN_RESOLUTION,
       });
       currentThought = "";
@@ -656,8 +600,8 @@ function extractCodexTrajectorySteps(events) {
       const toolName = mcpToolName(item);
       let act = `${toolName}: ${safeJson(item.arguments || {})}`;
       if (toolName === "human_input.ask_human") {
-        const q = String(item?.arguments?.question || "");
-        act = `ask_human [custom_mcp] ${q}`;
+        const q = readAskQuestionFromValue(item?.arguments);
+        act = `ask_human [custom_tool] ${q}`;
       }
       steps.push({
         thought: currentThought,
@@ -669,7 +613,16 @@ function extractCodexTrajectorySteps(events) {
     }
   }
 
-  return steps;
+  return steps.map((step) => {
+    if (!step || typeof step !== "object") return step;
+    const act = String(step.act || "");
+    if (!act.trim().startsWith("ask_human")) return step;
+    const obs = String(step.obs ?? "").trim();
+    if (!obs || obs.startsWith("[no observation") || obs.startsWith("[error]")) {
+      return { ...step, obs: CANT_ANSWER };
+    }
+    return step;
+  });
 }
 
 /**
@@ -781,7 +734,7 @@ function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
  * Server requests (user input, approvals) are pushed as { type: "codex_server_request", event }
  * and responded to immediately.
  */
-async function runCodexAppServer({ prompt, env, uid, humanRouter, pushEvent, abortController }) {
+async function runCodexAppServer({ prompt, env, uid, sidecarUrl, pushEvent, abortController }) {
   // Isolate codex state to avoid polluting /root in the container
   // Keep CODEX_HOME out of /tmp. Codex warns when helper binaries would be
   // created under temporary directories ("/tmp"), which is noisy and can
@@ -843,7 +796,7 @@ async function runCodexAppServer({ prompt, env, uid, humanRouter, pushEvent, abo
 
         // ── Native question-asking ─────────────────────────────────────────
         if (method === "item/tool/requestUserInput") {
-          return handleRequestUserInput({ params, router: humanRouter, pushEvent });
+          return handleRequestUserInput({ params, sidecarUrl, pushEvent });
         }
 
         // ── Approval requests — auto-approve (container is security boundary) ──
@@ -875,7 +828,7 @@ async function runCodexAppServer({ prompt, env, uid, humanRouter, pushEvent, abo
 
         // MCP elicitation prompts are unsupported in this harness path.
         if (method === "mcpServer/elicitation/request") {
-          return handleElicitationRequest({ params, router: humanRouter, pushEvent });
+          return handleElicitationRequest({ params, sidecarUrl, pushEvent });
         }
 
         // Defensive MCP fallback: if Codex introduces additional mcpServer/*
@@ -925,21 +878,21 @@ async function runCodexAppServer({ prompt, env, uid, humanRouter, pushEvent, abo
         }
 
         // Count completed items (commands + file edits + MCP tool calls).
-        // When MAX_TURNS is set and the threshold is reached, interrupt the turn.
+        // When MAX_STEPS is set and the threshold is reached, interrupt the turn.
         // This is the codex equivalent of Claude SDK's maxTurns — the app-server
         // protocol has no native turn/step limit parameter.
         if (msg.method === "item/completed" &&
-            MAX_TURNS > 0 &&
+            MAX_STEPS > 0 &&
             !settled &&
             currentTurnId &&
             threadId) {
           itemsDone++;
-          if (itemsDone >= MAX_TURNS) {
+          if (itemsDone >= MAX_STEPS) {
             pushEvent({
-              type: "max_turns_reached",
+              type: "max_steps_reached",
               timestamp: new Date().toISOString(),
               items_done: itemsDone,
-              max_turns: MAX_TURNS,
+              max_steps: MAX_STEPS,
             });
             // Fire-and-forget: don't await so we don't block the notification handler
             rpc.request("turn/interrupt", { threadId, turnId: currentTurnId }).catch(() => {});
@@ -1026,7 +979,7 @@ async function runCodexAppServer({ prompt, env, uid, humanRouter, pushEvent, abo
           },
           config:               env.CODEX_APP_CONFIG ? JSON.parse(env.CODEX_APP_CONFIG) : undefined,
           ephemeral:            true,
-          ...(MODE === "ask_human" ? { developerInstructions: ASK_HUMAN_GUIDANCE } : {}),
+          ...(ASK_HUMAN_ENABLED && ASK_HUMAN_GUIDANCE_ENABLED ? { developerInstructions: ASK_HUMAN_GUIDANCE } : {}),
         });
 
         threadId = threadStart?.thread?.id;
@@ -1068,10 +1021,11 @@ async function main() {
   // In-memory event log — same pattern as run_claude.mjs
   const allEvents = [];
   const pushEvent = (ev) => allEvents.push(ev);
+  const runStartedAtMs = Date.now();
 
   // 2. Build prompt
   let blockers = [];
-  if (MODE === "full_info") {
+  if (FULL_INFO_ENABLED) {
     const registry = JSON.parse(await fs.readFile(path.join(TASK_DIR, "blocker_registry.json"), "utf8"));
     blockers = (registry.entries || registry.blockers || []).map((e) => ({
       description: e.description,
@@ -1079,49 +1033,9 @@ async function main() {
     }));
   }
   const prompt = buildSwePrompt({ problemStatement, mode: MODE, blockers });
-  if (MODE === "full_info") {
-    await removeInstalledAskHumanSkills(WORKSPACE);
-  } else {
+  await removeInstalledAskHumanSkills(WORKSPACE);
+  if (SKILL_ENABLED) {
     await installAgentsSkill(WORKSPACE, SKILL_TOOL_REF.codex);
-  }
-
-  // 2b. Tweak B — per-task AGENTS.md hint (Codex auto-injects AGENTS.md from
-  // workspace root, mirroring the CLAUDE_MD_HINT flag in run_claude.mjs).
-  // Only written in ask_human mode; the file is appended to so we don't clobber
-  // the skill's existing AGENTS.md if installAgentsSkill wrote one already.
-  if (MODE === "ask_human" && CLAUDE_MD_HINT) {
-    let numBlockersForHint = 0;
-    try {
-      const reg = JSON.parse(
-        await fs.readFile(path.join(TASK_DIR, "blocker_registry.json"), "utf8"),
-      );
-      numBlockersForHint = (reg.entries || reg.blockers || []).length;
-    } catch { /* metadata-only fallback */ }
-    const hint = buildPerTaskMemoryHint({
-      uid,
-      numBlockers: numBlockersForHint,
-      sdk: "codex",
-    });
-    try {
-      const agentsMdPath = path.join(WORKSPACE, "AGENTS.md");
-      let existing = "";
-      try { existing = await fs.readFile(agentsMdPath, "utf8"); } catch {}
-      const combined = existing ? `${existing.trimEnd()}\n\n${hint}\n` : `${hint}\n`;
-      await fs.writeFile(agentsMdPath, combined, "utf8");
-      pushEvent({
-        type: "agents_md_hint_written",
-        timestamp: new Date().toISOString(),
-        path: agentsMdPath,
-        num_blockers_hinted: numBlockersForHint,
-        bytes: Buffer.byteLength(combined),
-      });
-    } catch (err) {
-      pushEvent({
-        type: "agents_md_hint_error",
-        timestamp: new Date().toISOString(),
-        error: String(err?.message || err),
-      });
-    }
   }
 
   // 3. Write attempt metadata
@@ -1132,7 +1046,7 @@ async function main() {
     pass_index: PASS_INDEX,
     harness:    "codex",
     model:      CODEX_MODEL,
-    max_turns:  MAX_TURNS > 0 ? MAX_TURNS : null,  // null = no limit (timeout only)
+    max_steps:  MAX_STEPS > 0 ? MAX_STEPS : null,  // null = no limit (timeout only)
     timeout_ms: TIMEOUT_MS,
     workspace:  WORKSPACE,
     task_dir:   TASK_DIR,
@@ -1140,26 +1054,23 @@ async function main() {
     started_at: new Date().toISOString(),
     prompt,
     with_custom_tool: WITH_CUSTOM_TOOL,
+    ask_human_tool_enabled: ASK_HUMAN_ENABLED,
+    skill_enabled: SKILL_ENABLED,
+    guidance_enabled: ASK_HUMAN_GUIDANCE_ENABLED,
+    with_skill: SKILL_TEMPLATE_VERSION || "",
+    with_ask_guidance: ASK_HUMAN_GUIDANCE_TEMPLATE_VERSION || "",
+    ask_human_model: ASK_HUMAN_MODEL,
+    ask_human_backend: ASK_HUMAN_ENABLED ? "ask_human_sidecar" : null,
+    native_question_routing: ASK_HUMAN_ENABLED ? "requestUserInput -> ask_human_sidecar" : "requestUserInput -> irrelevant_question",
   });
   pushEvent({ type: "attempt_start", timestamp: new Date().toISOString(), uid, mode: MODE, pass_index: PASS_INDEX, prompt });
 
-  // 4. Set up human router (ask_human mode only — full_info has no routing)
-  const humanRouter = MODE === "ask_human"
-    ? createHumanInputRouter({
-        instanceId:    uid,
-        kbPath:        path.join(TASK_DIR, "blocker_registry.json"),
-        trajectoryFile: pushEvent,  // router pushes human_input_* events here
-        workspaceDir:  WORKSPACE,
-        approvalPolicy: "allow",    // container is security boundary
-        ...(ASK_HUMAN_BASE_URL ? { baseUrl:  ASK_HUMAN_BASE_URL } : {}),
-        ...(ASK_HUMAN_MODEL    ? { modelId: ASK_HUMAN_MODEL    } : {}),
-      })
-    : null;
-
   // 5. Run agent with up to 3 attempts
   // Retries occur only on transient SDK errors; timeouts and clean completions
-  // exit immediately.  allEvents is cleared in-place between attempts so only
-  // the successful attempt's events are preserved in the final trajectory.
+  // exit immediately. allEvents is cleared in-place between attempts so only
+  // the successful attempt's events are preserved in the final trajectory. Each
+  // attempt gets its own sidecar so native requestUserInput and explicit MCP
+  // ask_human calls share the same backend path without stale event leakage.
   let sdkError = null;
   const MAX_RETRIES = STEP_LITELLM_TRIES;
   const _runStart = Date.now();
@@ -1186,11 +1097,18 @@ async function main() {
     let sidecarUrl = "";
 
     try {
-      if (WITH_CUSTOM_TOOL) {
-        ({ proc: sidecarProc, url: sidecarUrl } = await startSidecar(uid));
+      if (ASK_HUMAN_ENABLED) {
+        ({ proc: sidecarProc, url: sidecarUrl } = await startAskHumanSidecar({
+          uid,
+          mode: MODE,
+          taskDir: TASK_DIR,
+          workspace: WORKSPACE,
+          askHumanBaseUrl: ASK_HUMAN_BASE_URL,
+          askHumanModel: ASK_HUMAN_MODEL,
+        }));
       }
       const env = codexApiEnv({ sidecarUrl });
-      await runCodexAppServer({ prompt, env, uid, humanRouter, pushEvent, abortController });
+      await runCodexAppServer({ prompt, env, uid, sidecarUrl, pushEvent, abortController });
     } catch (err) {
       const text = redactString(String(err?.stack || err));
       sdkError = abortController.signal.aborted
@@ -1238,7 +1156,10 @@ async function main() {
     numBlockersTotal = (reg.entries || reg.blockers || []).length;
   } catch { /* non-fatal */ }
 
-  const stats = computeTrajectoryStats(allEvents, trajectorySteps, numBlockersTotal);
+  const stats = {
+    ...computeTrajectoryStats(allEvents, trajectorySteps, numBlockersTotal),
+    ...computeResourceStats(allEvents, trajectorySteps, runStartedAtMs),
+  };
   await writeJson(path.join(OUTPUT_DIR, "trajectory.json"), trajectorySteps);
   await writeJson(path.join(OUTPUT_DIR, "stats.json"), stats);
 

@@ -19,7 +19,7 @@
  *   RUN_ID                run identifier string
  *   CLAUDE_MODEL          model slug (default: claude-sonnet-4-6)
  *   CLAUDE_REASONING_EFFORT reasoning effort (low|medium|high|xhigh|max), optional
- *   MAX_TURNS             max agent turns (default: 200)
+ *   MAX_STEPS             max agent steps (default: 0 = unbounded)
  *   ATTEMPT_TIMEOUT_MS    hard timeout in ms (default: 10800000 = 3 h)
  *   PERMISSION_MODE       claude permissionMode (default: acceptEdits)
  *   TASK_DIR              path to mounted task dir (default: /task)
@@ -35,7 +35,7 @@ import path from "node:path";
 import fs from "node:fs/promises";
 import { createSdkMcpServer, query, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
-import { createHumanInputRouter, approvalPolicyRouter, UNKNOWN_RESOLUTION, CANT_ANSWER, UNKNOWN_BLOCKER_ID, ASK_HUMAN_REQUEST_TYPES, APPROVAL_REQUEST_TYPES } from "../shared/human_input.mjs";
+import { approvalPolicyRouter, UNKNOWN_RESOLUTION, CANT_ANSWER, UNKNOWN_BLOCKER_ID, ASK_HUMAN_REQUEST_TYPES, APPROVAL_REQUEST_TYPES } from "../shared/human_input.mjs";
 import { ensureDir, writeJson, writeText } from "../shared/io.mjs";
 import { redactString } from "../shared/redact.mjs";
 import { buildSwePrompt } from "./prompt.mjs";
@@ -46,18 +46,19 @@ import {
 } from "./skills.mjs";
 import {
   WORKSPACE, TASK_DIR, OUTPUT_DIR,
-  MODE, PASS_INDEX, RUN_ID, TIMEOUT_MS,
+  MODE, ASK_HUMAN_ENABLED, SKILL_ENABLED, FULL_INFO_ENABLED,
+  SKILL_TEMPLATE_VERSION, ASK_HUMAN_GUIDANCE_TEMPLATE_VERSION,
+  ASK_HUMAN_GUIDANCE_ENABLED, PASS_INDEX, RUN_ID, TIMEOUT_MS,
   LITELLM_CALL_TIMEOUT_MS, STEP_LITELLM_TRIES,
   ASK_HUMAN_BASE_URL, ASK_HUMAN_MODEL, buildAskHumanGuidance,
-  CLAUDE_MD_HINT, richAskHumanToolDescriptionForHarness,
-  buildPerTaskMemoryHint,
-  THOUGHT_CAP, ACT_CAP, OBS_CAP, cap, gitDiff,
+  richAskHumanToolDescriptionForHarness,
+  THOUGHT_CAP, ACT_CAP, OBS_CAP, cap, computeResourceStats, gitDiff,
 } from "./constants.mjs";
-import { createAskLimitTracker } from "./ask_limits.mjs";
+import { sidecarAsk, startAskHumanSidecar, stopSidecar } from "./ask_human_sidecar_client.mjs";
 
-// Claude's native question-asking tool is AskUserQuestion. The recall-tweak
-// flags (SEED_BLOCKER_TODOS / etc.) modulate the appended guidance internally.
-const ASK_HUMAN_GUIDANCE = buildAskHumanGuidance("AskUserQuestion", "claude");
+// Claude's native question-asking tool is AskUserQuestion. Guidance is an
+// explicit diagnostic flag, not part of ask_human by default.
+const ASK_HUMAN_GUIDANCE = buildAskHumanGuidance("AskUserQuestion and/or ask_human");
 
 // ── Configuration from env ──────────────────────────────────────────────────
 
@@ -67,13 +68,13 @@ const CLAUDE_REASONING_EFFORT = (
   process.env.CLAUDE_EFFORT || // backward-compat alias
   ""
 ).trim().toLowerCase();
-const MAX_TURNS       = Number(process.env.MAX_TURNS || "200");
+const MAX_STEPS       = Number(process.env.MAX_STEPS || "0");
 // "acceptEdits" auto-approves file edits while still letting canUseTool fire for
 // shell/MCP/AskUserQuestion calls so we can intercept them.  bypassPermissions would
 // skip the canUseTool callback for some tool types entirely.
 const PERMISSION_MODE = process.env.PERMISSION_MODE || "acceptEdits";
 const CLAUDE_BIN      = process.env.CLAUDE_CODE_EXECUTABLE || "claude";
-const WITH_CUSTOM_TOOL = /^(1|true|yes|on)$/i.test(String(process.env.WITH_CUSTOM_TOOL || ""));
+const WITH_CUSTOM_TOOL = ASK_HUMAN_ENABLED && /^(1|true|yes|on)$/i.test(String(process.env.WITH_CUSTOM_TOOL ?? "0"));
 const VALID_CLAUDE_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
 if (CLAUDE_REASONING_EFFORT && !VALID_CLAUDE_EFFORTS.has(CLAUDE_REASONING_EFFORT)) {
   throw new Error(
@@ -98,7 +99,7 @@ function claudeApiEnv() {
   if (!baseUrl) throw new Error("Missing base URL: set LITELLM_BASE_URL or ANTHROPIC_BASE_URL");
   // Inside Docker (non-host-network), localhost refers to the container itself.
   // Rewrite localhost URLs to use host.docker.internal so Claude can reach the
-  // LiteLLM proxy / vLLM server on the host.  The orchestrator adds
+  // LiteLLM proxy / judge server on the host.  The orchestrator adds
   // --add-host=host.docker.internal:host-gateway to make this work.
   baseUrl = baseUrl.replace(/\blocalhost\b/g, "host.docker.internal");
   return {
@@ -137,21 +138,13 @@ function isCustomAskHumanTool(toolName) {
   return String(toolName || "") === "mcp__human_input__ask_human";
 }
 
-function extractReadPathsForSkill9(toolName, input) {
-  const name = String(toolName || "");
-  const paths = [];
-  if (name === "Read" || name === "Glob" || name === "LS") {
-    for (const key of ["file_path", "path", "target_file", "file"]) {
-      if (input?.[key]) paths.push(input[key]);
-    }
+function appendSidecarEvents(result, pushEvent) {
+  for (const ev of Array.isArray(result?.events) ? result.events : []) {
+    pushEvent?.(ev);
   }
-  if (/Grep|Search|search/i.test(name) && input?.path) {
-    paths.push(input.path);
-  }
-  return paths.map((p) => String(p)).filter(Boolean);
 }
 
-function createCustomAskHumanMcpServer({ router, pushEvent, askLimitTracker }) {
+function createCustomAskHumanMcpServer({ sidecarUrl, pushEvent }) {
   const toolDesc =
     richAskHumanToolDescriptionForHarness() ??
     "Ask a focused clarification question about task requirements.";
@@ -172,43 +165,18 @@ function createCustomAskHumanMcpServer({ router, pushEvent, askLimitTracker }) {
           const question = String(input?.question || "");
           const requestType = input?.request_type || "clarification";
           try {
-            if (!router) {
-              // full_info mode: keep tool exposed but always return irrelevant_question.
-              pushEvent({
-                type: "ask_question_full_info_mode",
-                timestamp: new Date().toISOString(),
-                question,
-                source: "custom_mcp",
-              });
-              return { content: [{ type: "text", text: UNKNOWN_RESOLUTION }] };
-            }
-            if (askLimitTracker) {
-              const gate = askLimitTracker.checkBeforeJudge();
-              if (gate.shortCircuit) {
-                pushEvent({
-                  type: "ask_human_suppressed",
-                  timestamp: new Date().toISOString(),
-                  reason: gate.reason,
-                  question,
-                  sdk: "claude_custom_mcp",
-                });
-                return { content: [{ type: "text", text: gate.responseText }] };
-              }
-              askLimitTracker.notifyRoutedToJudge();
-            }
-            const result = await router.route({
+            const result = await sidecarAsk({
+              sidecarUrl,
+              question,
               requestType,
               nativeEventType: "claude.mcp.ask_human",
               rawEvent: input,
-              question,
               options: input.options || [],
               context: { source: "claude_mcp_tool" },
+              fallbackSource: "claude_mcp_tool_error_fallback",
             });
-            const resolution = result.resolution || UNKNOWN_RESOLUTION;
-            askLimitTracker?.recordJudgeResolution(resolution, {
-              blockerId: result.blocker_id,
-              status: result.status,
-            });
+            appendSidecarEvents(result, pushEvent);
+            const resolution = String(result.resolution ?? UNKNOWN_RESOLUTION);
             return { content: [{ type: "text", text: resolution }] };
           } catch (err) {
             // Best-effort tool failure handling: keep the agent loop alive and
@@ -260,7 +228,7 @@ function createCustomAskHumanMcpServer({ router, pushEvent, askLimitTracker }) {
   });
 }
 
-async function answerClaudeAskUserQuestion({ router, input, permission, askLimitTracker, pushEvent }) {
+async function answerClaudeAskUserQuestion({ sidecarUrl, input, permission, pushEvent }) {
   const questions = Array.isArray(input?.questions) ? input.questions : [input];
   const answerParts = [];
   // AskUserQuestionOutput.answers is keyed by question text (not header).
@@ -269,49 +237,22 @@ async function answerClaudeAskUserQuestion({ router, input, permission, askLimit
   const answersMap = {};
   let hitJudgeAny = false;
   for (const question of questions) {
-    const prompt = question?.question || "Clarification request";
+    const prompt = typeof question?.question === "string" ? question.question : "";
     let answerStr;
 
-    if (askLimitTracker) {
-      const gate = askLimitTracker.checkBeforeJudge();
-      if (gate.shortCircuit) {
-        pushEvent?.({
-          type: "ask_human_suppressed",
-          timestamp: new Date().toISOString(),
-          reason: gate.reason,
-          question: prompt,
-          sdk: "claude_native",
-        });
-        answerStr = gate.responseText;
-      } else {
-        askLimitTracker.notifyRoutedToJudge();
-        const result = await router.route({
-          requestType: "clarification",
-          nativeEventType: "claude.AskUserQuestion.canUseTool",
-          rawEvent: { input, permission: serializablePermission(permission) },
-          question: prompt,
-          options: question?.options || [],
-          context: { source: "claude_builtin_AskUserQuestion" },
-        });
-        answerStr = result.resolution || UNKNOWN_RESOLUTION;
-        askLimitTracker.recordJudgeResolution(answerStr, {
-          blockerId: result.blocker_id,
-          status: result.status,
-        });
-        hitJudgeAny = true;
-      }
-    } else {
-      const result = await router.route({
-        requestType: "clarification",
-        nativeEventType: "claude.AskUserQuestion.canUseTool",
-        rawEvent: { input, permission: serializablePermission(permission) },
-        question: prompt,
-        options: question?.options || [],
-        context: { source: "claude_builtin_AskUserQuestion" },
-      });
-      answerStr = result.resolution || UNKNOWN_RESOLUTION;
-      hitJudgeAny = true;
-    }
+    const result = await sidecarAsk({
+      sidecarUrl,
+      question: prompt,
+      requestType: "clarification",
+      nativeEventType: "claude.AskUserQuestion.canUseTool",
+      rawEvent: { input, permission: serializablePermission(permission) },
+      options: question?.options || [],
+      context: { source: "claude_builtin_AskUserQuestion" },
+      fallbackSource: "claude_native_ask_user_question_error_fallback",
+    });
+    appendSidecarEvents(result, pushEvent);
+    answerStr = String(result.resolution ?? UNKNOWN_RESOLUTION);
+    hitJudgeAny = true;
 
     answerParts.push(`${prompt}\n${answerStr}`);
     answersMap[prompt] = answerStr;
@@ -329,8 +270,14 @@ async function answerClaudeAskUserQuestion({ router, input, permission, askLimit
 function formatAct(toolName, toolInput) {
   const name = String(toolName || "");
   if (!name) return "";
-  const q = toolInput?.question || toolInput?.questions?.[0]?.question || JSON.stringify(toolInput || {});
-  if (isCustomAskHumanTool(name)) return `ask_human [custom_mcp] ${q}`;
+  let q = "";
+  if (typeof toolInput?.question === "string") q = toolInput.question;
+  else if (typeof toolInput?.questions?.[0]?.question === "string") q = toolInput.questions[0].question;
+  else if (typeof toolInput === "string") q = toolInput;
+  else {
+    try { q = JSON.stringify(toolInput || {}); } catch { q = ""; }
+  }
+  if (isCustomAskHumanTool(name)) return `ask_human [custom_tool] ${q}`;
   if (isAskUserQuestionTool(name)) return `ask_human [native] ${q}`;
   if (/ask_human/i.test(name)) return `ask_human [other] ${q}`;
   try {
@@ -419,7 +366,6 @@ function extractTrajectorySteps(events) {
     // not create a duplicate trajectory step.
     if (event.type === "ask_question_full_info_mode") {
       const p = pending.get(event.tool_use_id);
-      const source = event.source || "unknown";
       const pairs = Array.isArray(event.qa_pairs) && event.qa_pairs.length
         ? event.qa_pairs
         : [{ question: event.question, answer: UNKNOWN_RESOLUTION }];
@@ -427,7 +373,7 @@ function extractTrajectorySteps(events) {
       for (const pair of pairs) {
         steps.push({
           thought: first ? (p?.thought ?? "") : "",
-          act:     cap(`ask_human [${source}] ${pair?.question || ""}`, ACT_CAP),
+          act:     cap(`ask_human [native] ${pair?.question || ""}`, ACT_CAP),
           obs:     cap(String(pair?.answer ?? UNKNOWN_RESOLUTION), OBS_CAP),
         });
         first = false;
@@ -496,7 +442,16 @@ function extractTrajectorySteps(events) {
   }
   pending.clear();
 
-  return steps;
+  return steps.map((step) => {
+    if (!step || typeof step !== "object") return step;
+    const act = String(step.act || "");
+    if (!act.trim().startsWith("ask_human")) return step;
+    const obs = String(step.obs ?? "").trim();
+    if (!obs || obs.startsWith("[no observation") || obs.startsWith("[error]")) {
+      return { ...step, obs: CANT_ANSWER };
+    }
+    return step;
+  });
 }
 
 /**
@@ -615,10 +570,11 @@ async function main() {
   // After the run, used to build trajectory.json and stats.json.
   const allEvents = [];
   const pushEvent = (ev) => allEvents.push(ev);
+  const runStartedAtMs = Date.now();
 
   // 2. Build prompt
   let blockers = [];
-  if (MODE === "full_info") {
+  if (FULL_INFO_ENABLED) {
     const registryPath = path.join(TASK_DIR, "blocker_registry.json");
     const registry = JSON.parse(await fs.readFile(registryPath, "utf8"));
     blockers = (registry.entries || registry.blockers || []).map((e) => ({
@@ -627,44 +583,9 @@ async function main() {
     }));
   }
   const prompt = buildSwePrompt({ problemStatement, mode: MODE, blockers });
-  if (MODE === "full_info") {
-    await removeInstalledAskHumanSkills(WORKSPACE);
-  } else {
+  await removeInstalledAskHumanSkills(WORKSPACE);
+  if (SKILL_ENABLED) {
     await installClaudeSkill(WORKSPACE, SKILL_TOOL_REF.claude);
-  }
-
-  // 2b. Tweak B — per-task CLAUDE.md hint (auto-injected by the Claude Code SDK
-  // via its memdir subsystem). Only written in ask_human mode and when the
-  // CLAUDE_MD_HINT flag is set, so the skill3 baseline is unchanged by default.
-  if (MODE === "ask_human" && CLAUDE_MD_HINT) {
-    let numBlockersForHint = 0;
-    try {
-      const reg = JSON.parse(
-        await fs.readFile(path.join(TASK_DIR, "blocker_registry.json"), "utf8"),
-      );
-      numBlockersForHint = (reg.entries || reg.blockers || []).length;
-    } catch { /* metadata-only fallback */ }
-    const hint = buildPerTaskMemoryHint({
-      uid,
-      numBlockers: numBlockersForHint,
-      sdk: "claude",
-    });
-    try {
-      await fs.writeFile(path.join(WORKSPACE, "CLAUDE.md"), hint, "utf8");
-      pushEvent({
-        type: "claude_md_hint_written",
-        timestamp: new Date().toISOString(),
-        path: path.join(WORKSPACE, "CLAUDE.md"),
-        num_blockers_hinted: numBlockersForHint,
-        bytes: Buffer.byteLength(hint),
-      });
-    } catch (err) {
-      pushEvent({
-        type: "claude_md_hint_error",
-        timestamp: new Date().toISOString(),
-        error: String(err?.message || err),
-      });
-    }
   }
 
   // 3. Write attempt metadata
@@ -675,39 +596,31 @@ async function main() {
     pass_index: PASS_INDEX,
     harness: "claude-code",
     model: CLAUDE_MODEL,
-    max_turns: MAX_TURNS,
+    max_steps: MAX_STEPS > 0 ? MAX_STEPS : null,
     timeout_ms: TIMEOUT_MS,
     workspace: WORKSPACE,
     task_dir: TASK_DIR,
     output_dir: OUTPUT_DIR,
     started_at: new Date().toISOString(),
     prompt,
+    ask_human_tool_enabled: ASK_HUMAN_ENABLED,
+    skill_enabled: SKILL_ENABLED,
+    guidance_enabled: ASK_HUMAN_GUIDANCE_ENABLED,
+    with_skill: SKILL_TEMPLATE_VERSION || "",
+    with_ask_guidance: ASK_HUMAN_GUIDANCE_TEMPLATE_VERSION || "",
+    ask_human_model: ASK_HUMAN_MODEL,
+    with_custom_tool: WITH_CUSTOM_TOOL,
+    ask_human_backend: ASK_HUMAN_ENABLED ? "ask_human_sidecar" : null,
+    native_question_routing: ASK_HUMAN_ENABLED ? "AskUserQuestion -> ask_human_sidecar" : "AskUserQuestion -> irrelevant_question",
   };
   await writeJson(path.join(OUTPUT_DIR, "attempt.json"), attemptMeta);
   pushEvent({ type: "attempt_start", timestamp: new Date().toISOString(), uid, mode: MODE, pass_index: PASS_INDEX, prompt });
 
-  // 4. Set up human router (ask_human mode only — full_info has no clarification routing)
-  // approvalPolicy "allow": inside a per-task Docker container the container IS the security
-  // boundary.  The registry hard-deny checks (paths outside workspaceDir) still apply, but
-  // the safe-looking allowlist is intentionally bypassed so complex SWE commands (pip install,
-  // npm install, custom test runners, …) are not blocked.
-  const humanRouter = MODE === "ask_human"
-    ? createHumanInputRouter({
-        instanceId: uid,
-        kbPath: path.join(TASK_DIR, "blocker_registry.json"),
-        trajectoryFile: pushEvent,
-        workspaceDir: WORKSPACE,
-        approvalPolicy: "allow",
-        ...(ASK_HUMAN_BASE_URL ? { baseUrl: ASK_HUMAN_BASE_URL } : {}),
-        ...(ASK_HUMAN_MODEL ? { modelId: ASK_HUMAN_MODEL } : {}),
-      })
-    : null;
-
-  // 5. Run agent with up to 3 attempts
+  // 4. Run agent with up to 3 attempts.
   // Retries occur only on transient SDK errors; timeouts and clean completions
-  // exit immediately.  Each attempt re-uses the same humanRouter and pushEvent
-  // callback but clears allEvents so only the successful attempt's events are
-  // preserved in the final trajectory.
+  // exit immediately. Each attempt starts its own ask_human sidecar so native
+  // AskUserQuestion and the optional explicit MCP ask_human tool share the same
+  // backend path as ADK/OpenCode and no sidecar events leak across retries.
   let sdkError = null;
   let stopReason = "complete";
   const MAX_RETRIES = STEP_LITELLM_TRIES;
@@ -726,13 +639,6 @@ async function main() {
     sdkError = null;
     allEvents.length = 0;   // clear in-place so pushEvent closure remains valid
 
-    const askLimitTracker = humanRouter
-      ? createAskLimitTracker({ numBlockersTotal })
-      : null;
-    const customAskHumanMcp = WITH_CUSTOM_TOOL
-      ? createCustomAskHumanMcpServer({ router: humanRouter, pushEvent, askLimitTracker })
-      : null;
-
     const PER_ATTEMPT_TIMEOUT_MS = LITELLM_CALL_TIMEOUT_MS;
     const remainingMs    = TIMEOUT_MS - (Date.now() - _runStart);
     const attemptTimeout = Math.min(remainingMs, PER_ATTEMPT_TIMEOUT_MS);
@@ -747,8 +653,25 @@ async function main() {
       () => abortController.abort(new Error(`SWE claude attempt timed out after ${PER_ATTEMPT_TIMEOUT_MS}ms`)),
       attemptTimeout,
     );
+    let sidecarProc = null;
+    let sidecarUrl = "";
 
     try {
+      if (ASK_HUMAN_ENABLED) {
+        ({ proc: sidecarProc, url: sidecarUrl } = await startAskHumanSidecar({
+          uid,
+          mode: MODE,
+          taskDir: TASK_DIR,
+          workspace: WORKSPACE,
+          askHumanBaseUrl: ASK_HUMAN_BASE_URL,
+          askHumanModel: ASK_HUMAN_MODEL,
+        }));
+      }
+
+      const customAskHumanMcp = WITH_CUSTOM_TOOL
+        ? createCustomAskHumanMcpServer({ sidecarUrl, pushEvent })
+        : null;
+
       for await (const message of query({
         prompt,
         options: {
@@ -757,12 +680,13 @@ async function main() {
           cwd: WORKSPACE,
           model: CLAUDE_MODEL,
           ...(CLAUDE_REASONING_EFFORT ? { effort: CLAUDE_REASONING_EFFORT } : {}),
-          maxTurns: MAX_TURNS,
+          ...(MAX_STEPS > 0 ? { maxTurns: MAX_STEPS } : {}),
           permissionMode: PERMISSION_MODE,
           env,
           mcpServers: customAskHumanMcp ? { human_input: customAskHumanMcp } : [],
           canUseTool: async (_toolName, _input, permission) => {
-            // Custom top-level MCP ask_human tool is optional (--with-custom-tool).
+            // Explicit MCP ask_human tool shares the same sidecar backend as the
+            // native AskUserQuestion path. Set WITH_CUSTOM_TOOL=0 to hide it.
             // Let it run directly; the tool handler itself routes to the same
             // ask-human backend and records structured events.
             if (isCustomAskHumanTool(_toolName)) {
@@ -777,23 +701,27 @@ async function main() {
             // Native AskUserQuestion: intercept and route through the ask_human simulator
             // (ask_human mode) or short-circuit with irrelevant answers (full_info mode).
             if (isAskUserQuestionTool(_toolName)) {
-              if (humanRouter) {
+              if (ASK_HUMAN_ENABLED) {
                 // ask_human mode: route to the LLM-backed human simulator.
                 const {
                   answerText, answers, questions: qs, hitJudgeAny,
                 } = await answerClaudeAskUserQuestion({
-                  router: humanRouter,
+                  sidecarUrl,
                   input: _input,
                   permission,
-                  askLimitTracker,
                   pushEvent,
                 });
                 // Emit a structured event so extractTrajectorySteps records the
                 // ask/answer pair in trajectory.json with a clean obs.
-                const q = _input?.question || _input?.questions?.[0]?.question || JSON.stringify(_input || {});
+                let q = "";
+                if (typeof _input?.question === "string") q = _input.question;
+                else if (typeof _input?.questions?.[0]?.question === "string") q = _input.questions[0].question;
+                else {
+                  try { q = JSON.stringify(_input || {}); } catch { q = ""; }
+                }
                 const qaPairs = (Array.isArray(qs) ? qs : []).map((qq) => {
-                  const prompt = qq?.question || "Clarification request";
-                  return { question: prompt, answer: answers[prompt] || UNKNOWN_RESOLUTION };
+                  const prompt = typeof qq?.question === "string" ? qq.question : "";
+                  return { question: prompt, answer: String(answers[prompt] ?? UNKNOWN_RESOLUTION) };
                 });
                 pushEvent({
                   type:        "claude_ask_question",
@@ -828,11 +756,16 @@ async function main() {
               const answers = {};
               const qaPairs = [];
               for (const qq of questions) {
-                const promptText = qq?.question || "Clarification request";
+                const promptText = typeof qq?.question === "string" ? qq.question : "";
                 answers[promptText] = UNKNOWN_RESOLUTION;
                 qaPairs.push({ question: promptText, answer: UNKNOWN_RESOLUTION });
               }
-              const q = _input?.question || questions[0]?.question || JSON.stringify(_input || {});
+              let q = "";
+              if (typeof _input?.question === "string") q = _input.question;
+              else if (typeof questions[0]?.question === "string") q = questions[0].question;
+              else {
+                try { q = JSON.stringify(_input || {}); } catch { q = ""; }
+              }
               pushEvent({
                 type:        "ask_question_full_info_mode",
                 timestamp:   new Date().toISOString(),
@@ -872,12 +805,9 @@ async function main() {
               });
               return { behavior: "deny", toolUseID: permission.toolUseID, message: `Denied: ${decision.reason}`, decisionClassification: "user_temporary" };
             }
-            for (const fp of extractReadPathsForSkill9(_toolName, _input)) {
-              askLimitTracker?.noteFileRead?.(fp);
-            }
             return { behavior: "allow", updatedInput: _input || {}, toolUseID: permission.toolUseID, decisionClassification: "user_temporary" };
           },
-          systemPrompt: MODE === "ask_human"
+          systemPrompt: ASK_HUMAN_ENABLED && ASK_HUMAN_GUIDANCE_ENABLED
             ? {
                 type: "preset",
                 preset: "claude_code",
@@ -893,10 +823,10 @@ async function main() {
       const maxTurnsReached = /Reached maximum number of turns/i.test(text);
       if (maxTurnsReached) {
         // Claude SDK surfaces maxTurns as an error result string. In this harness,
-        // reaching MAX_TURNS is an expected stop condition, not an infra failure.
+        // reaching MAX_STEPS is an expected stop condition, not an infra failure.
         sdkError = null;
-        stopReason = "max_turns";
-        pushEvent({ type: "max_turns_reached", timestamp: new Date().toISOString(), detail: text });
+        stopReason = "max_steps";
+        pushEvent({ type: "max_steps_reached", timestamp: new Date().toISOString(), detail: text });
       } else {
         sdkError = abortController.signal.aborted
           ? `Timed out after ${attemptTimeout}ms.\n\n${text}`
@@ -905,6 +835,7 @@ async function main() {
         pushEvent({ type: "sdk_error", timestamp: new Date().toISOString(), error: sdkError });
       }
     } finally {
+      stopSidecar(sidecarProc);
       clearTimeout(timeoutId);
     }
 
@@ -933,7 +864,10 @@ async function main() {
   });
   const trajectorySteps = extractTrajectorySteps(allEvents);
 
-  const stats = computeTrajectoryStats(allEvents, trajectorySteps, numBlockersTotal);
+  const stats = {
+    ...computeTrajectoryStats(allEvents, trajectorySteps, numBlockersTotal),
+    ...computeResourceStats(allEvents, trajectorySteps, runStartedAtMs),
+  };
   await writeJson(path.join(OUTPUT_DIR, "trajectory.json"), trajectorySteps);
   await writeJson(path.join(OUTPUT_DIR, "stats.json"), stats);
 

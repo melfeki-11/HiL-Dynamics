@@ -24,15 +24,26 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT / "src" / "hil_swe") not in sys.path:
     sys.path.insert(0, str(_ROOT / "src" / "hil_swe"))
 
+
+def _any_template_basename(ext: str) -> str:
+    template_dir = _ROOT / "src" / "hil_swe" / "templates"
+    matches = sorted(template_dir.glob(f"*.{ext}"))
+    if not matches:
+        raise RuntimeError(f"No .{ext} templates found in {template_dir}")
+    return matches[0].stem
+
+
 # Suppress ADK warning before import
 os.environ.setdefault("ADK_SUPPRESS_GEMINI_LITELLM_WARNINGS", "true")
 
+import run_adk as run_adk_module
 from run_adk import (
     AGENT_NAME,
     OBS_CAP,
     THOUGHT_CAP,
     UNKNOWN_BLOCKER_ID,
     UNKNOWN_RESOLUTION,
+    _adk_reasoning_effort_for_litellm,
     _build_agent_tools,
     _build_instruction,
     build_swe_prompt,
@@ -170,7 +181,7 @@ class TestExtractTrajectorySteps(unittest.TestCase):
         ]
         steps = extract_trajectory_steps(events)
         self.assertEqual(len(steps), 1)
-        self.assertTrue(steps[0]["act"].startswith("ask_human "))
+        self.assertTrue(steps[0]["act"].startswith("ask_human [custom_tool] "))
         self.assertIn("What is the expected output format?", steps[0]["act"])
         self.assertEqual(steps[0]["obs"], "JSON with a 'data' key")
 
@@ -399,11 +410,11 @@ class TestBuildSwePrompt(unittest.TestCase):
 
 class TestBuildInstruction(unittest.TestCase):
 
-    def test_ask_human_mode_contains_base_and_guidance(self):
+    def test_ask_human_mode_contains_only_base_by_default(self):
         instr = _build_instruction("ask_human")
         self.assertIn("helpful assistant", instr)
-        self.assertIn("asking tool", instr)
-        self.assertIn("human expert", instr)
+        self.assertNotIn("human expert", instr)
+        self.assertNotIn("irrelevant question", instr)
 
     def test_full_info_mode_contains_only_base(self):
         instr = _build_instruction("full_info")
@@ -411,13 +422,42 @@ class TestBuildInstruction(unittest.TestCase):
         self.assertNotIn("human expert", instr)   # no ask_human guidance
         self.assertNotIn("irrelevant question", instr)
 
-    def test_ask_human_guidance_references_tool_name(self):
-        instr = _build_instruction("ask_human")
-        # Guidance must direct the model to use the dedicated asking tool (name in code: ask_human).
-        self.assertIn("asking tool", instr)
+    def test_optional_guidance_references_tool_name_when_enabled(self):
+        old = run_adk_module.ASK_HUMAN_GUIDANCE_ENABLED
+        old_version = run_adk_module.ASK_HUMAN_GUIDANCE_TEMPLATE_VERSION
+        guidance_version = _any_template_basename("txt")
+        guidance_text = (
+            _ROOT / "src" / "hil_swe" / "templates" / f"{guidance_version}.txt"
+        ).read_text(encoding="utf-8")
+        expected_guidance = guidance_text.replace("{{TOOL_NAME}}", "ask_human").strip()
+        run_adk_module.ASK_HUMAN_GUIDANCE_ENABLED = True
+        run_adk_module.ASK_HUMAN_GUIDANCE_TEMPLATE_VERSION = guidance_version
+        try:
+            instr = _build_instruction("ask_human")
+        finally:
+            run_adk_module.ASK_HUMAN_GUIDANCE_ENABLED = old
+            run_adk_module.ASK_HUMAN_GUIDANCE_TEMPLATE_VERSION = old_version
+        self.assertIn(expected_guidance, instr)
 
 
-# ── 5. Sidecar integration tests ─────────────────────────────────────────────
+# ── 5. Reasoning routing ─────────────────────────────────────────────────────
+
+class TestReasoningRouting(unittest.TestCase):
+
+    def test_gemini_does_not_forward_openai_style_reasoning_effort(self):
+        self.assertEqual(
+            _adk_reasoning_effort_for_litellm("gemini/gemini-3.1-pro", "high"),
+            "",
+        )
+
+    def test_non_gemini_keeps_reasoning_effort(self):
+        self.assertEqual(
+            _adk_reasoning_effort_for_litellm("openai/gpt-5.5", "xhigh"),
+            "xhigh",
+        )
+
+
+# ── 6. Sidecar integration tests ─────────────────────────────────────────────
 
 import urllib.request as _urllib
 import threading as _threading
@@ -456,7 +496,7 @@ class TestBuildAgentTools(unittest.TestCase):
         self.assertIn(editor_tool, tools)
         self.assertNotIn(ask_human_tool, tools)
 
-    def test_ask_human_mode_includes_ask_human_tool_and_skills(self):
+    def test_ask_human_mode_includes_ask_human_tool_and_skills_when_enabled(self):
         def bash_tool():
             return None
 
@@ -467,7 +507,12 @@ class TestBuildAgentTools(unittest.TestCase):
             return None
 
         skill_toolset = object()
-        tools = _build_agent_tools("ask_human", bash_tool, editor_tool, ask_human_tool, [skill_toolset])
+        old = run_adk_module.SKILL_ENABLED
+        run_adk_module.SKILL_ENABLED = True
+        try:
+            tools = _build_agent_tools("ask_human", bash_tool, editor_tool, ask_human_tool, [skill_toolset])
+        finally:
+            run_adk_module.SKILL_ENABLED = old
         self.assertIn(bash_tool, tools)
         self.assertIn(editor_tool, tools)
         self.assertIn(ask_human_tool, tools)

@@ -7,22 +7,14 @@ computes aggregate metrics following the formulas from paper_pipeline.py:
 ACCURACY (pass@k):
   pass@k = (# attempts where any of passes 1..k resolved) / (# attempts with k valid passes)
 
-ASK METRICS — MACRO / paper (hil-bench paper_pipeline.py average-of-ratios):
+ASK METRICS — MICRO (global totals across all valid attempt × pass rows):
 
-  Per valid (attempt × pass), with num_blockers_resolved = unique blocker IDs answered:
-    precision_for_pass = min(1.0, num_blockers_resolved / num_questions)  (0 if num_questions == 0)
-    recall_for_pass    = min(1.0, num_blockers_resolved / num_blockers_total)  (0 if total == 0)
-    f1_for_pass        = harmonic mean of precision_for_pass and recall_for_pass
+  ask_precision = min(1.0, sum(num_blockers_resolved) / sum(num_questions))
+  ask_recall    = min(1.0, sum(num_blockers_resolved) / sum(num_blockers_total))
+  ask_f1        = harmonic mean of ask_precision and ask_recall
 
-  ask_precision = mean(precision_for_pass)
-  ask_recall    = mean(recall_for_pass)
-  ask_f1        = mean(f1_for_pass)
-
-  Diagnostic micro totals (event-sum style, NOT used for primary CSV fields):
-    ask_precision_event_micro, ask_recall_event_micro — sum(resolved)/sum(denominator)
-
-  "total" questions (judge + approval + permission): same macro per-pass with num_total_questions
-    as precision denominator; recall denominator unchanged.
+  "total" questions (judge + approval + permission): micro precision variant
+    using num_total_questions as the precision denominator.
 
 Output files written to runs/<run_id>/metrics/:
   pass_level.json       — per-(uid, mode, pass) raw numbers
@@ -44,6 +36,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+
+ASK_METRIC_MODES = {"ask_human"}
+
+
+def _template_state(
+    *,
+    explicit_value: Any,
+    enabled_value: Any,
+) -> str:
+    """Normalize template state for grouping keys."""
+    v = str(explicit_value or "").strip()
+    if v:
+        return v
+    enabled = bool(enabled_value)
+    return "__legacy_enabled__" if enabled else "__none__"
+
 ROOT = Path(__file__).resolve().parents[1]
 RUNS_DIR = ROOT / "runs"
 DATA_DIR = ROOT / "data" / "hil_bench_swe"
@@ -56,8 +64,34 @@ TRAJECTORY_TIMEOUT_OBS_RE = re.compile(r"Command '\[.*\]' timed out after \d+ se
 TRAJECTORY_HICCUP_OBS = "can't answer (perhaps transient hiccup)"
 TRAJECTORY_ENV_DIED_OBS = "Environment died unexpectedly"
 TRAJECTORY_UNKNOWN_ERROR = "Exit due to unknown error"
-# SQL-specific constants — included for completeness; won't fire for SWE tasks.
+# SQL-specific constants.
 KB_QUERY_ERROR = "Error querying knowledge base"
+SQL_QUOTING_BUG_MARKERS = (
+    ("get_database_info", "Error: database $"),
+    ("get_table_info", "Error: table $"),
+    ("get_column_info", "Error: column $"),
+    ("get_business_info", "No business information found matching '$"),
+)
+HEX_HASH_PAT = r"[0-9a-f]{7,40}"
+GIT_SHOW_HASH_ACT_RE = re.compile(rf"\bgit show\b[^\n]*(?<!/)\b{HEX_HASH_PAT}\b", re.IGNORECASE)
+GIT_SHOW_COLON_ACT_RE = re.compile(r"\bgit show\b[^\n]*\S:", re.IGNORECASE)
+GIT_SHOW_COLON_SAFE_REF_RE = re.compile(r"^(?:HEAD(?:[~^]\d*)?|master|main)$", re.IGNORECASE)
+GIT_DIFF_TWO_HASHES_ACT_RE = re.compile(
+    rf"\bgit diff\b[^\n]*(?<!/)\b({HEX_HASH_PAT})\b[^\n]*(?<!/)\b({HEX_HASH_PAT})\b",
+    re.IGNORECASE,
+)
+GIT_LOG_ALL_ACT_RE = re.compile(r"\bgit log\b[^\n]*--all(?![-\w])", re.IGNORECASE)
+GIT_FATAL_OBS_RE = re.compile(
+    r"fatal:|ambiguous argument|unknown revision or path|bad object"
+    r"|not in the working tree|invalid object name",
+    re.IGNORECASE,
+)
+GIT_DIFF_CONTENT_OBS_RE = re.compile(r"^diff --git |^\+\+\+ b/", re.IGNORECASE | re.MULTILINE)
+GIT_COMMIT_CONTENT_OBS_RE = re.compile(r"^Author:\s|^commit [0-9a-f]{40}", re.MULTILINE)
+GIT_LOG_ONELINE_SHA_RE = re.compile(r"^[*|/\\ ]*[0-9a-f]{7,40}\b", re.IGNORECASE | re.MULTILINE)
+GIT_LOG_FULL_COMMIT_RE = re.compile(r"^commit\s+[0-9a-f]{40}\b", re.MULTILINE)
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[mKHFJA-Za-z]")
+SWE_INITIAL_COMMIT_MSG = "Initial commit for SWE-agent"
 
 TRAJECTORY_RERUN_OCCURRENCE_THRESHOLD_STRICT = 1   # hiccup, kb_query_error, unknown_error
 TRAJECTORY_RERUN_OCCURRENCE_THRESHOLD_LENIENT = 3  # timeout
@@ -148,6 +182,29 @@ def _trajectory_has_hiccup_obs(steps: list[dict]) -> bool:
     return count >= TRAJECTORY_RERUN_OCCURRENCE_THRESHOLD_STRICT
 
 
+def _trajectory_has_empty_ask_obs(steps: list[dict]) -> bool:
+    """True if >= STRICT (1) ask_human actions have an empty observation.
+
+    Empty ask observations indicate malformed/incomplete ask logging and should be
+    treated as invalid for both rerun selection and metrics inclusion.
+    """
+    count = 0
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        act = step.get("act", "")
+        if not isinstance(act, str):
+            continue
+        if not act.strip().startswith("ask_human"):
+            continue
+        obs = step.get("obs", "")
+        if not isinstance(obs, str) or not obs.strip():
+            count += 1
+            if count >= TRAJECTORY_RERUN_OCCURRENCE_THRESHOLD_STRICT:
+                return True
+    return False
+
+
 def _trajectory_has_env_died_obs(steps: list[dict]) -> bool:
     """True if the LAST step's observation contains 'Environment died unexpectedly'.
 
@@ -193,6 +250,85 @@ def _trajectory_has_kb_query_error(steps: list[dict]) -> bool:
     return False
 
 
+def _trajectory_has_sql_quoting_bug_obs(steps: list[dict]) -> bool:
+    if not steps:
+        return False
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        act = step.get("act", "")
+        obs = step.get("obs", "")
+        if not isinstance(act, str) or not isinstance(obs, str):
+            continue
+        tool = act.split(None, 1)[0] if act.strip() else ""
+        for marker_tool, marker_obs in SQL_QUOTING_BUG_MARKERS:
+            if tool == marker_tool and obs.startswith(marker_obs):
+                return True
+    return False
+
+
+def _obs_has_git_fatal(obs: str) -> bool:
+    return bool(GIT_FATAL_OBS_RE.search(obs))
+
+
+def _obs_confirms_diff_leak(obs: str) -> bool:
+    return not _obs_has_git_fatal(obs) and bool(GIT_DIFF_CONTENT_OBS_RE.search(obs))
+
+
+def _obs_confirms_commit_show_leak(obs: str) -> bool:
+    if _obs_has_git_fatal(obs):
+        return False
+    if not GIT_COMMIT_CONTENT_OBS_RE.search(obs):
+        return False
+    if SWE_INITIAL_COMMIT_MSG in obs:
+        return False
+    return True
+
+
+def _obs_confirms_file_show_leak(obs: str) -> bool:
+    return not _obs_has_git_fatal(obs) and len(obs.strip()) > 20
+
+
+def _obs_confirms_git_log_history_leak(obs: str) -> bool:
+    obs = ANSI_ESCAPE_RE.sub("", obs)
+    for m in GIT_LOG_ONELINE_SHA_RE.finditer(obs):
+        nl = obs.find("\n", m.start())
+        full_line = obs[m.start() : nl if nl >= 0 else len(obs)]
+        if SWE_INITIAL_COMMIT_MSG not in full_line:
+            return True
+    if len(GIT_LOG_FULL_COMMIT_RE.findall(obs)) > 1:
+        return True
+    return False
+
+
+def _trajectory_has_swe_git_history_leak(steps: list[dict]) -> bool:
+    if not steps:
+        return False
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        act = step.get("act", "")
+        obs = step.get("obs", "") or ""
+        if not isinstance(act, str):
+            continue
+        if not isinstance(obs, str):
+            obs = str(obs) if obs else ""
+        obs = ANSI_ESCAPE_RE.sub("", obs)
+        if GIT_SHOW_HASH_ACT_RE.search(act) and _obs_confirms_commit_show_leak(obs):
+            return True
+        if GIT_SHOW_COLON_ACT_RE.search(act):
+            ref_m = re.search(r"(\w[\w/.-]{3,}):", act)
+            if ref_m and not GIT_SHOW_COLON_SAFE_REF_RE.match(ref_m.group(1)):
+                if _obs_confirms_file_show_leak(obs):
+                    return True
+        if GIT_LOG_ALL_ACT_RE.search(act) and _obs_confirms_git_log_history_leak(obs):
+            return True
+        m = GIT_DIFF_TWO_HASHES_ACT_RE.search(act)
+        if m and m.group(1).lower() != m.group(2).lower() and _obs_confirms_diff_leak(obs):
+            return True
+    return False
+
+
 def _trajectory_needs_rerun(pass_dir: str) -> bool:
     """Return True if this pass's trajectory indicates a transient failure requiring rerun.
 
@@ -201,6 +337,7 @@ def _trajectory_needs_rerun(pass_dir: str) -> bool:
 
       trajectory_has_timeout_obs(trajectory)      — LENIENT threshold (3)
       trajectory_has_hiccup_obs(trajectory)       — STRICT threshold (1)
+      trajectory_has_empty_ask_obs(trajectory)    — STRICT threshold (1)
       trajectory_has_env_died_obs(trajectory)     — last step obs substring
       trajectory_has_unknown_error(trajectory)    — last step response substring
       trajectory_has_kb_query_error(trajectory)   — STRICT threshold (1), SQL-specific
@@ -213,10 +350,55 @@ def _trajectory_needs_rerun(pass_dir: str) -> bool:
     return (
         _trajectory_has_timeout_obs(steps)
         or _trajectory_has_hiccup_obs(steps)
+        or _trajectory_has_empty_ask_obs(steps)
         or _trajectory_has_env_died_obs(steps)
         or _trajectory_has_unknown_error(steps)
         or _trajectory_has_kb_query_error(steps)
+        or _trajectory_has_sql_quoting_bug_obs(steps)
+        or _trajectory_has_swe_git_history_leak(steps)
     )
+
+
+def _load_json_dict(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _eval_result_is_infra_error(eval_data: dict[str, Any], result_data: dict[str, Any], result_exists: bool) -> bool:
+    if eval_data:
+        eval_status = eval_data.get("eval_status")
+        if eval_status is not None:
+            infra_error = eval_status == "infra_error"
+        else:
+            infra_error = (not result_exists) or bool(result_data.get("sdk_error")) or (not eval_data.get("test_ran", True))
+    else:
+        infra_error = True
+    return infra_error or _result_has_system_error(result_data)
+
+
+def pass_is_valid_for_scoring(pass_dir: str | Path) -> bool:
+    """Single source-of-truth validity check used by both reruns and metrics inclusion."""
+    p = Path(pass_dir)
+    result_data = _load_json_dict(p / "result.json")
+    result_exists = (p / "result.json").exists()
+    if not result_exists:
+        return False
+    eval_data = _load_json_dict(p / "eval_result.json")
+    if _eval_result_is_infra_error(eval_data, result_data, result_exists):
+        return False
+    if _trajectory_needs_rerun(str(p)):
+        return False
+    return True
+
+
+def pass_has_rerun_signal(pass_dir: str | Path) -> bool:
+    """True when trajectory content indicates this pass should be rerun."""
+    return _trajectory_needs_rerun(str(Path(pass_dir)))
 
 
 # ── Row loading ─────────────────────────────────────────────────────────────
@@ -281,8 +463,6 @@ def load_pass_rows(run_dir: Path) -> list[dict[str, Any]]:
                         result = json.loads(result_json.read_text())
                     except Exception:
                         pass
-                system_error_in_solve = _result_has_system_error(result)
-
                 has_eval = bool(eval_data)
                 resolved = eval_data.get("resolved") if has_eval else None
 
@@ -291,26 +471,26 @@ def load_pass_rows(run_dir: Path) -> list[dict[str, Any]]:
                 # pass@k).  Source of truth is the eval_status field written by
                 # eval_hil_swe.py.  For legacy eval_result.json files that predate the
                 # field, test_ran=False is treated as infra_error.
-                eval_status_field = eval_data.get("eval_status") if has_eval else None
-
-                if eval_status_field is not None:
-                    infra_error = eval_status_field == "infra_error"
-                else:
-                    # Legacy format: no eval_status field.
-                    infra_error = (
-                        not result_json.exists()          # never ran
-                        or bool(result.get("sdk_error"))  # SDK crashed
-                        or (has_eval and not eval_data.get("test_ran", True))  # test patch failed
-                    )
-                # Any solve-time system/harness error is rerun-worthy and excluded
-                # from metrics, even if an eval_result.json exists.
-                infra_error = infra_error or system_error_in_solve
+                infra_error = _eval_result_is_infra_error(
+                    eval_data=eval_data,
+                    result_data=result,
+                    result_exists=result_json.exists(),
+                )
 
                 row = {
                     "uid": uid,
                     "mode": mode,
                     "agent": agent,
                     "model": model,
+                    "with_custom_tool": bool(attempt.get("with_custom_tool", False)),
+                    "with_skill": _template_state(
+                        explicit_value=attempt.get("with_skill"),
+                        enabled_value=attempt.get("skill_enabled", False),
+                    ),
+                    "with_ask_guidance": _template_state(
+                        explicit_value=attempt.get("with_ask_guidance"),
+                        enabled_value=attempt.get("guidance_enabled", False),
+                    ),
                     "pass_index": pass_idx,
                     "status": "infra_error" if infra_error else ("resolved" if resolved else "unresolved"),
                     "resolved": resolved,
@@ -329,6 +509,16 @@ def load_pass_rows(run_dir: Path) -> list[dict[str, Any]]:
                     "num_ask_human_cooldown_denied": stats.get(
                         "num_ask_human_cooldown_denied"
                     ),
+                    "wall_clock_ms": stats.get("wall_clock_ms"),
+                    "num_llm_calls": stats.get("num_llm_calls"),
+                    "num_tool_calls": stats.get("num_tool_calls"),
+                    "num_turns_or_items": stats.get("num_turns_or_items"),
+                    "input_tokens": stats.get("input_tokens"),
+                    "output_tokens": stats.get("output_tokens"),
+                    "total_tokens": stats.get("total_tokens"),
+                    "llm_proxy_error_count": stats.get("llm_proxy_error_count"),
+                    "llm_proxy_status_counts": stats.get("llm_proxy_status_counts"),
+                    "llm_proxy_stripped_params": stats.get("llm_proxy_stripped_params"),
                     "patch_bytes": result.get("patch_bytes"),
                     "pass_dir": str(pass_dir),
                 }
@@ -348,7 +538,7 @@ def summarize(
     expected_passes: int,
     include_partial: bool = False,
 ) -> dict[str, Any]:
-    """Aggregate rows by (mode, agent, model) and compute pass@k + ask metrics.
+    """Aggregate rows by (mode, agent, model, customization flags) and compute pass@k + ask metrics.
 
     include_partial (default False, mirrors run_hil_bench.py default):
       False — only include attempts that have ALL expected_passes valid passes.
@@ -358,10 +548,24 @@ def summarize(
               pass@k denominators it qualifies for).  Useful for partial runs.
     """
 
-    # Group rows by (uid, mode, agent, model) → sorted list of pass rows
+    # Group rows by (uid, mode, agent, model, flags) → sorted list of pass rows
     grouped: dict[tuple, list[dict]] = defaultdict(list)
     for row in rows:
-        key = (row["uid"], row["mode"], row["agent"], row["model"])
+        key = (
+            row["uid"],
+            row["mode"],
+            row["agent"],
+            row["model"],
+            bool(row.get("with_custom_tool", False)),
+            _template_state(
+                explicit_value=row.get("with_skill"),
+                enabled_value=row.get("with_skill", False),
+            ),
+            _template_state(
+                explicit_value=row.get("with_ask_guidance"),
+                enabled_value=row.get("with_ask_guidance", False),
+            ),
+        )
         grouped[key].append(row)
 
     # For each group, sort passes, filter infra errors, and filter bad trajectories.
@@ -370,23 +574,28 @@ def summarize(
     #   - Skip passes whose trajectory needs rerun (hiccup obs → transient judge failure)
     #   - Apply include_partial: if False (canonical default), only include attempts
     #     that completed all expected_passes valid passes.
-    attempt_data: dict[tuple[str, str, str], list[list[dict]]] = defaultdict(list)
-    # key = (mode, agent, model)
-    for (uid, mode, agent, model), pass_rows in grouped.items():
+    attempt_data: dict[tuple[str, str, str, bool, str, str], list[list[dict]]] = defaultdict(list)
+    # key = (mode, agent, model, with_custom_tool, with_skill, with_ask_guidance)
+    for (uid, mode, agent, model, with_custom_tool, with_skill, with_ask_guidance), pass_rows in grouped.items():
         valid_passes = []
         for r in sorted(pass_rows, key=lambda r: r["pass_index"]):
-            if r["status"] == "infra_error":
-                continue
-            if _trajectory_needs_rerun(r.get("pass_dir", "")):
-                continue
+            pass_dir = str(r.get("pass_dir", "") or "")
+            if pass_dir and Path(pass_dir).exists():
+                if not pass_is_valid_for_scoring(pass_dir):
+                    continue
+            else:
+                if r["status"] == "infra_error":
+                    continue
+                if _trajectory_needs_rerun(pass_dir):
+                    continue
             valid_passes.append(r)
         num_valid = len(valid_passes)
         should_include = num_valid >= 1 if include_partial else num_valid >= expected_passes
         if should_include:
-            attempt_data[(mode, agent, model)].append(valid_passes)
+            attempt_data[(mode, agent, model, with_custom_tool, with_skill, with_ask_guidance)].append(valid_passes)
 
     result: dict[str, Any] = {}
-    for (mode, agent, model), attempts in sorted(attempt_data.items()):
+    for (mode, agent, model, with_custom_tool, with_skill, with_ask_guidance), attempts in sorted(attempt_data.items()):
         k_max = expected_passes
         num_attempts = len(attempts)
 
@@ -397,15 +606,7 @@ def summarize(
         # Strips out silent-pass lucky-passes that inflate raw pass@k.
         num_gated_solved_by_k = {k: 0 for k in range(1, k_max + 1)}
 
-        # Macro (paper) ask-metric accumulators
-        precision_sum = 0.0
-        recall_sum = 0.0
-        f1_sum = 0.0
-        precision_total_sum = 0.0
-        f1_total_sum = 0.0
-        ask_pass_count = 0
-
-        # Micro totals (diagnostics only)
+        # Micro ask-metric totals.
         total_blockers_resolved = 0.0
         # clarification + elicitation (LLM judge questions) — primary denominator
         total_questions = 0.0
@@ -417,6 +618,13 @@ def summarize(
         total_questions_full_info = 0.0
         total_ask_human_capped = 0.0
         total_ask_human_cooldown_denied = 0.0
+        total_wall_clock_ms = 0.0
+        total_llm_calls = 0.0
+        total_tool_calls = 0.0
+        total_turns_or_items = 0.0
+        total_input_tokens = 0.0
+        total_output_tokens = 0.0
+        total_tokens = 0.0
         total_attempts_and_passes = 0
 
         for valid_passes in attempts:
@@ -446,22 +654,17 @@ def summarize(
                 total_ask_human_cooldown_denied += float(
                     row.get("num_ask_human_cooldown_denied") or 0
                 )
+                total_wall_clock_ms += float(row.get("wall_clock_ms") or 0)
+                total_llm_calls += float(row.get("num_llm_calls") or 0)
+                total_tool_calls += float(row.get("num_tool_calls") or 0)
+                total_turns_or_items += float(row.get("num_turns_or_items") or 0)
+                total_input_tokens += float(row.get("input_tokens") or 0)
+                total_output_tokens += float(row.get("output_tokens") or 0)
+                total_tokens += float(row.get("total_tokens") or 0)
 
-                if mode == "ask_human":
+                if mode in ASK_METRIC_MODES:
                     n_res = float(row.get("num_blockers_resolved") or 0)
-                    n_q = float(row.get("num_questions") or 0)
-                    n_qt = float(row.get("num_total_questions") or row.get("num_questions") or 0)
                     n_tot = float(row.get("num_blockers_total") or 0)
-                    p_pass = min(1.0, n_res / n_q) if n_q > 0 else 0.0
-                    r_pass = min(1.0, n_res / n_tot) if n_tot > 0 else 0.0
-                    f1_pass = _f1(p_pass, r_pass)
-                    p_pass_total = min(1.0, n_res / n_qt) if n_qt > 0 else 0.0
-                    precision_sum += p_pass
-                    recall_sum += r_pass
-                    f1_sum += f1_pass
-                    precision_total_sum += p_pass_total
-                    f1_total_sum += _f1(p_pass_total, r_pass)
-                    ask_pass_count += 1
                     total_blockers_resolved += n_res
                     total_blockers_present += n_tot
 
@@ -469,6 +672,9 @@ def summarize(
             "mode": mode,
             "agent": agent,
             "model": model,
+            "with_custom_tool": with_custom_tool,
+            "with_skill": with_skill,
+            "with_ask_guidance": with_ask_guidance,
             "num_attempts": num_attempts,
             "num_passes": k_max,
             "total_attempts_and_passes": total_attempts_and_passes,
@@ -476,6 +682,13 @@ def summarize(
             "avg_questions_per_pass": total_questions / total_attempts_and_passes if total_attempts_and_passes else 0.0,
             # avg questions asked in full_info mode per pass (non-zero only in full_info mode)
             "avg_questions_full_info_per_pass": total_questions_full_info / total_attempts_and_passes if total_attempts_and_passes else 0.0,
+            "avg_wall_clock_ms_per_pass": total_wall_clock_ms / total_attempts_and_passes if total_attempts_and_passes else 0.0,
+            "avg_llm_calls_per_pass": total_llm_calls / total_attempts_and_passes if total_attempts_and_passes else 0.0,
+            "avg_tool_calls_per_pass": total_tool_calls / total_attempts_and_passes if total_attempts_and_passes else 0.0,
+            "avg_turns_or_items_per_pass": total_turns_or_items / total_attempts_and_passes if total_attempts_and_passes else 0.0,
+            "total_input_tokens": int(total_input_tokens),
+            "total_output_tokens": int(total_output_tokens),
+            "total_tokens": int(total_tokens),
         }
 
         for k in range(1, k_max + 1):
@@ -486,31 +699,25 @@ def summarize(
                 num_gated_solved_by_k[k] / denom if denom > 0 else 0.0
             )
 
-        if mode == "ask_human":
-            # ── Primary ask metrics (paper macro): judge questions denominator
-            if ask_pass_count > 0:
-                ask_precision = precision_sum / ask_pass_count
-                ask_recall = recall_sum / ask_pass_count
-                ask_f1 = f1_sum / ask_pass_count
-                ask_precision_total = precision_total_sum / ask_pass_count
-                ask_recall_total = recall_sum / ask_pass_count
-                ask_f1_total = f1_total_sum / ask_pass_count
-            else:
-                ask_precision = ask_recall = ask_f1 = 0.0
-                ask_precision_total = ask_recall_total = ask_f1_total = 0.0
+        if mode in ASK_METRIC_MODES:
+            # ── Primary ask metrics: MICRO over all valid (attempt × pass) rows
+            ask_precision = min(1.0, total_blockers_resolved / total_questions) if total_questions > 0 else 0.0
+            ask_recall = min(1.0, total_blockers_resolved / total_blockers_present) if total_blockers_present > 0 else 0.0
+            ask_f1 = _f1(ask_precision, ask_recall)
+            ask_precision_total = (
+                min(1.0, total_blockers_resolved / total_total_questions) if total_total_questions > 0 else 0.0
+            )
+            ask_recall_total = ask_recall
+            ask_f1_total = _f1(ask_precision_total, ask_recall_total)
             metrics["ask_precision"] = ask_precision
             metrics["ask_recall"] = ask_recall
             metrics["ask_f1"] = ask_f1
             metrics["ask_precision_total"] = ask_precision_total
             metrics["ask_recall_total"] = ask_recall_total
             metrics["ask_f1_total"] = ask_f1_total
-            # Diagnostic micro (legacy event-sum) — audit only
-            metrics["ask_precision_event_micro"] = (
-                total_blockers_resolved / total_questions if total_questions > 0 else 0.0
-            )
-            metrics["ask_recall_event_micro"] = (
-                total_blockers_resolved / total_blockers_present if total_blockers_present > 0 else 0.0
-            )
+            # Backward-compatible aliases kept for downstream dashboards.
+            metrics["ask_precision_event_micro"] = ask_precision
+            metrics["ask_recall_event_micro"] = ask_recall
             metrics["total_questions"] = int(total_questions)
             metrics["total_ask_human_capped"] = int(total_ask_human_capped)
             metrics["total_ask_human_cooldown_denied"] = int(total_ask_human_cooldown_denied)
@@ -523,7 +730,12 @@ def summarize(
             # how often agents asked despite having all info in their prompt.
             metrics["total_questions_full_info"] = int(total_questions_full_info)
 
-        key = f"{mode}/{agent}/{model}"
+        key = (
+            f"{mode}/{agent}/{model}"
+            f"/custom_tool={int(with_custom_tool)}"
+            f"/skill={with_skill}"
+            f"/ask_guidance={with_ask_guidance}"
+        )
         result[key] = metrics
 
     return result
@@ -578,7 +790,7 @@ def main() -> None:
             "num_passes": args.passes,
             "include_partial": args.include_partial,
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "formula": "macro/paper (mean of per-pass min(1, resolved/total)); resolved = unique blocker IDs",
+            "formula": "micro/global totals (resolved = unique blocker IDs per pass)",
         },
         "by_mode_agent_model": summarize(
             rows, expected_passes=args.passes, include_partial=args.include_partial

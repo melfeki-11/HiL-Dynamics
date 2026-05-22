@@ -1,11 +1,6 @@
 /**
  * End-to-end test: verify the ask_human LLM judge routing works against
- * the vLLM server (casperhansen/llama-3.3-70b-instruct-awq).
- *
- * Start the vLLM server first (separate tmux session):
- *   CUDA_VISIBLE_DEVICES=0,1,2,3 python3 models/research_evals/hil_bench/utils/serve_ask_human_vllm.py \
- *     --model casperhansen/llama-3.3-70b-instruct-awq --host 0.0.0.0 --port 8808 \
- *     --tmpdir /dev/shm --max-model-len 4096 --tp 4 --pp 1 --gpu-memory-utilization 0.7
+ * a LiteLLM-compatible Llama-3.3-70B route.
  *
  * Usage (from trust_horizon/):
  *   node tests/test_vllm_routing.mjs [--uid 69c6ba856585e74e8ba6e0bc]
@@ -57,14 +52,14 @@ const UID = uidFlag >= 0 ? process.argv[uidFlag + 1] : "69c6ba856585e74e8ba6e0bc
 
 if (!ASK_HUMAN_BASE_URL) {
   console.error("ERROR: ASK_HUMAN_BASE_URL is not set.");
-  console.error("  Set it to point at the running vLLM server, e.g.:");
-  console.error("  ASK_HUMAN_BASE_URL=http://localhost:8808/v1 node tests/test_vllm_routing.mjs");
+  console.error("  Set it to point at the LiteLLM judge route, e.g.:");
+  console.error("  ASK_HUMAN_BASE_URL=https://<your-litellm-endpoint>/v1 node tests/test_vllm_routing.mjs");
   process.exit(1);
 }
 if (!ASK_HUMAN_MODEL) {
   console.error("ERROR: ASK_HUMAN_MODEL is not set.");
-  console.error("  Set it to the model the vLLM server is serving, e.g.:");
-  console.error("  ASK_HUMAN_MODEL=casperhansen/llama-3.3-70b-instruct-awq node tests/test_vllm_routing.mjs");
+  console.error("  Set it to the model route the server is serving, e.g.:");
+  console.error("  ASK_HUMAN_MODEL=llmengine/llama-3-3-70b-instruct node tests/test_vllm_routing.mjs");
   process.exit(1);
 }
 
@@ -86,7 +81,7 @@ function check(label, condition, detail = "") {
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 const kbPath = path.join(DATA_ROOT, UID, "blocker_registry.json");
-console.log(`\n=== vLLM routing E2E test ===`);
+console.log(`\n=== LiteLLM judge routing E2E test ===`);
 console.log(`UID:           ${UID}`);
 console.log(`KB path:       ${kbPath}`);
 console.log(`Judge URL:     ${ASK_HUMAN_BASE_URL}`);

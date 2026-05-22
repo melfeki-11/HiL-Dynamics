@@ -321,7 +321,7 @@ async function runAttempt({ row, attemptIndex, args, runDir }) {
     attempt_index: attemptIndex,
     prefix: predictionPrefix,
     model: args.model,
-    max_turns: args.maxTurns,
+    max_steps: args.maxSteps,
     attempt_timeout_ms: args.attemptTimeoutMs,
     human_input_enabled: Boolean(args.humanKb),
     ask_human_cache_configured: Boolean(args.askHumanCache),

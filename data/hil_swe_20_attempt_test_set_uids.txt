@@ -1,7 +1,6 @@
-# HiL-SWE 20-attempt test set (canonical UIDs)
-# Protocol: 20 UIDs x 3 passes; claude-code + codex (ask_human mode)
-# Used by: scripts/run_skill9_full_scale.sh
-# Full-scale runs: runs/_swe_skill9_full_{claude,codex}/
+# HiL-SWE held-out test set (canonical UIDs)
+# Protocol: 20 UIDs x 3 passes; ask_human mode
+# HELD-OUT TEST SET — DO NOT USE FOR TRAINING OR FINE-TUNING
 69a7a4d1617c0b97d4d6aacd
 69a9e77602049c14d2793bb5
 69b1031f73a8f5979167a774

@@ -4,7 +4,7 @@ This is a rough coauthor-facing draft, not final prose. The goal is to capture t
 
 The original HIL-Bench paper established a selective-escalation failure mode under a controlled evaluation harness: agents can solve many tasks when missing information is supplied up front, but recover only a fraction of that performance when they must decide whether and when to ask for help.
 
-However, modern native harnesses such as Claude Code and Codex are much stronger than the SWE-agent setup we used before. Within each harness, policies can also vary: some encourage asking, some discourage it,S and some add task-specific skills. We therefore follow up on HIL-Bench with a different question: do models still fail with stronger harnesses and policies?
+However, modern native harnesses such as Claude Code and Codex are much stronger than the SWE-agent setup we used before. Within each harness, policies can also vary: some encourage asking, some discourage it, and some add task-specific skills. We therefore follow up on HIL-Bench with a different question: do models still fail with stronger harnesses and policies?
 
 We evaluate agents as a coupled `<model, harness, skills>` system, not the model alone. Stronger native harnesses and custom skills variants do change behavior. They change how often agents ask and when they ask. These variations, however, do not make the underlying selective-escalation gap completely vanish.
 
@@ -61,7 +61,7 @@ Native/current harnesses have high performance with all information supplied (Fu
 
 In the original paper, we introduced Ask-F1 to balance models' ability to ask relevant questions without over-asking. We break down the metric into Blocker Recall (how many blockers the agent resolved) and Ask Precision (how many of the questions it asked were relevant). This gives a sense of how trustworthy an agentic system is (if there is a blocker, can I trust it to clarify?) and how agentic it is (can it finish without pinging the user indiscriminately?). Harness variations can improve recall or precision substantially, but all agentic systems still struggle with Blocker Recall. Today's systems are not built to surface blockers. When the agents do ask, however, they do so with reasonable precision.
 
-[TODO fix] The addition of custom skills.md to guide the models are the clear outlier. These agent systems act both reliably (0.7 and 0.85 blocker recall for Claude Code and Codex) while still being agentic (0.7 and 0.71 ask-precision respectively). These results quantitively backs the anecdotes of custom skills unlocking incredible engineering skill in agnetic engineering.
+[TODO fix] The addition of custom skills.md to guide the models is the clear outlier. These agent systems act both reliably (0.7 and 0.85 blocker recall for Claude Code and Codex) while still being agentic (0.7 and 0.71 ask-precision respectively). These results quantitatively back the anecdotes of custom skills unlocking strong engineering performance in agentic engineering.
 
 ![Detection vs targeting](figures/02_detection_targeting.png)
 

@@ -31,7 +31,6 @@ Usage:
   python3 scripts/ingest_hil_swe.py --all --p-set public
   python3 scripts/ingest_hil_swe.py --all --p-set private
   python3 scripts/ingest_hil_swe.py --all --p-set both
-  python3 scripts/ingest_hil_swe.py --csv models/research_evals/hil_bench/utils/swe_delivered_tasks_and_attempts_PRIVATE.csv
 """
 
 from __future__ import annotations
@@ -62,8 +61,6 @@ SWEAP_LOG_PARSER = "sweap_json"
 
 HF_DATASET = "ScaleAI/hil-bench"
 HF_TOKEN_FILE = Path.home() / ".cache" / "huggingface" / "stored_tokens"
-# Canonical location for the research_evals HF token
-_RESEARCH_EVALS_ENV = Path("/mnt/efs/tutrinh/src/models/research_evals/hil_bench/.env")
 
 DOCKER_LOADED_IMAGE_RE = re.compile(r"Loaded image:\s*(\S+)")
 DOCKER_LOADED_IMAGE_ID_RE = re.compile(r"Loaded image ID:\s*(\S+)")
@@ -75,21 +72,16 @@ DATA_DIR = ROOT / "data" / "hil_bench_swe"
 TASKS_DIR = DATA_DIR / "tasks"
 IMAGES_CACHE_DIR = DATA_DIR / "image_archives"
 SRC_ROOT = ROOT.parent
-MODELS_ROOT = SRC_ROOT / "models"
-PUBLIC_UIDS_CSV = (
-    MODELS_ROOT
-    / "research_evals"
-    / "hil_bench"
-    / "utils"
-    / "swe_delivered_tasks_and_attempts_PUBLIC.csv"
-)
-PRIVATE_UIDS_CSV = (
-    MODELS_ROOT
-    / "research_evals"
-    / "hil_bench"
-    / "utils"
-    / "swe_delivered_tasks_and_attempts_PRIVATE.csv"
-)
+
+
+def _optional_env_path(name: str) -> Path | None:
+    raw = os.environ.get(name, "").strip()
+    return Path(raw).expanduser() if raw else None
+
+
+PUBLIC_UIDS_CSV = _optional_env_path("HIL_BENCH_PUBLIC_UIDS_CSV")
+PRIVATE_UIDS_CSV = _optional_env_path("HIL_BENCH_PRIVATE_UIDS_CSV")
+_EXTRA_ENV = _optional_env_path("LITELLM_CREDENTIALS_FILE")
 
 
 @dataclass(frozen=True)
@@ -124,8 +116,8 @@ def read_hf_token() -> str | None:
     token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN")
     if token:
         return token
-    # Try the research_evals .env first (primary source)
-    token = _parse_token_from_env_file(_RESEARCH_EVALS_ENV)
+    # Try the configured .env first (primary source)
+    token = _parse_token_from_env_file(_EXTRA_ENV)
     if token:
         return token
     # Fall back to HF CLI stored token
@@ -136,36 +128,12 @@ def read_hf_token() -> str | None:
 
 
 def _ensure_models_import_paths() -> None:
-    for path in (
-        MODELS_ROOT,
-        MODELS_ROOT / "genai",
-        MODELS_ROOT / "research_evals" / "hil_bench",
-        SRC_ROOT
-        / "scaleapi"
-        / "packages"
-        / "customer-data-service"
-        / "clients"
-        / "customer_data_service_python_helper",
-        SRC_ROOT
-        / "scaleapi"
-        / "packages"
-        / "customer-data-service"
-        / "clients"
-        / "python",
-        SRC_ROOT
-        / "scaleapi"
-        / "packages"
-        / "s2sauth-helper-client"
-        / "s2sauth_python_helper",
-        SRC_ROOT
-        / "scaleapi"
-        / "packages"
-        / "s2sauth"
-        / "clients"
-        / "python",
-    ):
-        s = str(path)
-        if path.exists() and s not in sys.path:
+    """Add any extra import paths needed for optional private-ingest helpers."""
+    extra = os.environ.get("HIL_BENCH_EXTRA_PYTHONPATH", "")
+    for entry in extra.split(os.pathsep) if extra else []:
+        p = Path(entry)
+        s = str(p)
+        if p.exists() and s not in sys.path:
             sys.path.insert(0, s)
 
 
@@ -190,18 +158,35 @@ def _ensure_botocore_vendored_requests_shim() -> None:
 def _load_paper_pipeline_helpers():
     _ensure_models_import_paths()
     _ensure_botocore_vendored_requests_shim()
-    try:
-        from research_evals.hil_bench.utils.paper_pipeline import (  # type: ignore
-            create_data_object,
-            setup_task_environment,
-            validate_swe_runtime_task,
+    pipeline_module = os.environ.get("HIL_BENCH_PIPELINE_MODULE", "")
+    if not pipeline_module:
+        raise RuntimeError(
+            "Set HIL_BENCH_PIPELINE_MODULE to the dotted module path for "
+            "the paper_pipeline SWE helpers (required for private ingest). "
+            "Also set HIL_BENCH_EXTRA_PYTHONPATH to include the package root."
         )
+    try:
+        import importlib
+        module = importlib.import_module(pipeline_module)
+        missing = [
+            name for name in (
+                "create_data_object",
+                "setup_task_environment",
+                "validate_swe_runtime_task",
+            )
+            if not callable(getattr(module, name, None))
+        ]
+        if missing:
+            raise RuntimeError(
+                f"Configured module {pipeline_module!r} is missing required callable(s): "
+                f"{', '.join(missing)}"
+            )
+        return module.create_data_object, module.setup_task_environment, module.validate_swe_runtime_task
     except Exception as e:  # pragma: no cover - import errors are environment-dependent
         raise RuntimeError(
-            "Failed importing paper_pipeline SWE helpers required for private ingest. "
-            f"Expected repo path under {MODELS_ROOT}. Original error: {e}"
+            f"Failed importing {pipeline_module!r}. "
+            f"Set HIL_BENCH_EXTRA_PYTHONPATH to include the package root. Original error: {e}"
         ) from e
-    return create_data_object, setup_task_environment, validate_swe_runtime_task
 
 
 def _normalize_blocker_entry(entry: dict) -> dict:
@@ -636,7 +621,7 @@ def main() -> None:
         help=(
             "Partition set used by --all. "
             "'public' uses swe_delivered_tasks_and_attempts_PUBLIC.csv, "
-            "'private' uses swe_delivered_tasks_and_attempts_PRIVATE.csv."
+            "'private' requires HIL_BENCH_PRIVATE_UIDS_CSV to be set."
         ),
     )
     parser.add_argument("--skip-if-exists", action="store_true", default=True,
@@ -653,13 +638,26 @@ def main() -> None:
     if not token:
         print("Warning: No HF token found. Set HF_TOKEN env var or run `huggingface-cli login`.")
 
-    public_csv_rows = load_csv_rows_by_uid(PUBLIC_UIDS_CSV) if PUBLIC_UIDS_CSV.exists() else {}
-    private_csv_rows = load_csv_rows_by_uid(PRIVATE_UIDS_CSV) if PRIVATE_UIDS_CSV.exists() else {}
+    public_csv_rows = (
+        load_csv_rows_by_uid(PUBLIC_UIDS_CSV)
+        if PUBLIC_UIDS_CSV is not None and PUBLIC_UIDS_CSV.exists()
+        else {}
+    )
+    private_csv_rows = (
+        load_csv_rows_by_uid(PRIVATE_UIDS_CSV)
+        if PRIVATE_UIDS_CSV is not None and PRIVATE_UIDS_CSV.exists()
+        else {}
+    )
 
+    preloaded_hf_rows: list[dict[str, Any]] | None = None
     if args.all:
         target_uids: list[str] = []
         if args.p_set in {"public", "both"}:
-            target_uids.extend(public_csv_rows.keys())
+            if public_csv_rows:
+                target_uids.extend(public_csv_rows.keys())
+            else:
+                preloaded_hf_rows = load_hf_dataset(token)
+                target_uids.extend(str(row["uid"]) for row in preloaded_hf_rows)
         if args.p_set in {"private", "both"}:
             target_uids.extend(private_csv_rows.keys())
     elif args.csv:
@@ -696,7 +694,7 @@ def main() -> None:
     need_hf = any(h in {"hf", "unknown"} for h in hints.values())
     rows_by_uid: dict[str, dict[str, Any]] = {}
     if need_hf:
-        swe_rows = load_hf_dataset(token)
+        swe_rows = preloaded_hf_rows if preloaded_hf_rows is not None else load_hf_dataset(token)
         rows_by_uid = {str(r["uid"]): r for r in swe_rows}
 
     work_items: list[WorkItem] = []

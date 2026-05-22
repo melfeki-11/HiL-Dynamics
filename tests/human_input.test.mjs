@@ -64,7 +64,25 @@ test("ask_human selects a blocker id and returns the exact registry resolution",
 });
 
 test("ask_human defaults to the local LiteLLM selector model", () => {
-  assert.equal(DEFAULT_ASK_HUMAN_MODEL, "bedrock/qwen.qwen3-32b-v1:0");
+  assert.equal(DEFAULT_ASK_HUMAN_MODEL, "llmengine/llama-3-3-70b-instruct");
+});
+
+test("createAskHumanRequest preserves raw question and hashes exact text", () => {
+  const withSpace = createAskHumanRequest({
+    instanceId: "smoke_prefix_format",
+    requestType: "clarification",
+    nativeEventType: "codex.item.tool.requestUserInput",
+    question: "  exact question  ",
+  });
+  const trimmed = createAskHumanRequest({
+    instanceId: "smoke_prefix_format",
+    requestType: "clarification",
+    nativeEventType: "codex.item.tool.requestUserInput",
+    question: "exact question",
+  });
+  assert.equal(withSpace.raw_question, "  exact question  ");
+  assert.equal(trimmed.raw_question, "exact question");
+  assert.notEqual(withSpace.request_id, trimmed.request_id);
 });
 
 test("unknown clarification returns exactly irrelevant question", async () => {
@@ -163,8 +181,8 @@ test("cache key changes when model id changes", async () => {
     },
   ]);
 
-  await askHuman({ request: request(), registry: kb, cachePath, modelId: "bedrock/qwen.qwen3-32b-v1:0", modelClient: async () => JSON.stringify({ blocker_id: "prefix-before-name" }) });
-  await askHuman({ request: request(), registry: kb, cachePath, modelId: "bedrock/qwen.qwen3-32b-v1:0#pinned2", modelClient: async () => JSON.stringify({ blocker_id: "prefix-before-name" }) });
+  await askHuman({ request: request(), registry: kb, cachePath, modelId: "llmengine/llama-3-3-70b-instruct", modelClient: async () => JSON.stringify({ blocker_id: "prefix-before-name" }) });
+  await askHuman({ request: request(), registry: kb, cachePath, modelId: "llmengine/llama-3-3-70b-instruct#pinned2", modelClient: async () => JSON.stringify({ blocker_id: "prefix-before-name" }) });
   const cache = JSON.parse(await fs.readFile(cachePath, "utf8"));
   assert.equal(Object.keys(cache).length, 2);
 });
@@ -858,9 +876,9 @@ test("full_info prompts do not advertise ask_human surfaces", () => {
 });
 
 test("redactString removes secret-looking values from raw stderr text", () => {
-  const text = "CODEX_API_KEY=sk-QOdummysecretvalueBe6g OPENAI_API_KEY=plain_secret_value";
+  const text = "CODEX_API_KEY=my-test-value OPENAI_API_KEY=plain_secret_value";
   const redacted = redactString(text);
-  assert.equal(redacted.includes("sk-QOdummysecretvalueBe6g"), false);
+  assert.equal(redacted.includes("my-test-value"), false);
   assert.equal(redacted.includes("plain_secret_value"), false);
   assert.equal(redacted.includes("CODEX_API_KEY=[REDACTED]"), true);
   assert.equal(redacted.includes("OPENAI_API_KEY=[REDACTED]"), true);

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -12,6 +13,133 @@ import { appendJsonl, readJsonl } from "../src/shared/io.mjs";
 
 async function tempDir() {
   return fs.mkdtemp(path.join(os.tmpdir(), "opencode-test-"));
+}
+
+const CANT_ANSWER = "can't answer (perhaps transient hiccup)";
+const OBS_CAP = 8000;
+
+function cap(s, limit) {
+  const str = String(s || "");
+  return str.length > limit ? `${str.slice(0, limit)}… [truncated]` : str;
+}
+
+function askResolutionQueueFromEvents(events) {
+  const queue = [];
+  for (const ev of Array.isArray(events) ? events : []) {
+    if (ev?.type !== "human_input_result") continue;
+    const resolution = String(ev?.result?.resolution ?? "");
+    if (!resolution.trim()) continue;
+    queue.push(resolution);
+  }
+  return queue;
+}
+
+function canonicalAskObservation(obs) {
+  const text = String(obs ?? "").trim();
+  if (!text) return CANT_ANSWER;
+  if (text.startsWith("[no observation")) return CANT_ANSWER;
+  if (text.startsWith("[error]")) return CANT_ANSWER;
+  return text;
+}
+
+function isAskHumanToolName(toolName) {
+  const normalized = String(toolName || "").trim().toLowerCase();
+  if (!normalized) return false;
+  if (normalized === "ask_human" || normalized.endsWith(".ask_human")) return true;
+  return normalized.includes("ask_human");
+}
+
+function extractAskQuestion({ input, state, part }) {
+  const candidates = [
+    input?.question,
+    input?.ask_human?.question,
+    input?.arguments?.question,
+    input?.input?.question,
+    state?.input?.question,
+    part?.input?.question,
+    part?.args?.question,
+    part?.tool?.input?.question,
+    part?.tool?.arguments?.question,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string") return candidate;
+  }
+  return "";
+}
+
+function extractTrajectory(serverEvents) {
+  const steps = [];
+  for (const ev of serverEvents) {
+    if (ev?.type !== "message.part.updated") continue;
+    const part = ev?.properties?.part || {};
+    const partType = String(part.type || "").toLowerCase();
+    if (partType !== "tool") continue;
+    const toolName = String(part.tool?.name || part.tool || part.name || "");
+    const state = part.state || {};
+    const input = state.input || part.input || part.args || {};
+    const output = state.output || part.output || part.result || "";
+    const hasInputObject = input && typeof input === "object" && Object.keys(input).length > 0;
+    const hasOutputText = String(output ?? "").trim().length > 0;
+    if (!toolName.trim() && !hasInputObject && !hasOutputText) continue;
+    if (isAskHumanToolName(toolName)) {
+      const q = extractAskQuestion({ input, state, part });
+      steps.push({ thought: "", act: cap(`ask_human [custom_tool] ${q}`, 4000), obs: cap(String(output), OBS_CAP) });
+      continue;
+    }
+    if (toolName === "shell" || toolName === "bash") {
+      const cmd = String(input.command || input.cmd || "");
+      steps.push({ thought: "", act: cap(cmd || "shell: [missing command]", 4000), obs: String(output) });
+      continue;
+    }
+    const renderedName = toolName.trim() || "unknown_tool";
+    steps.push({ thought: "", act: `${renderedName}: ${JSON.stringify(input)}`, obs: String(output) });
+  }
+  return steps;
+}
+
+function askQuestionQueueFromEvents(events) {
+  const queue = [];
+  const rawByRequestId = new Map();
+  for (const ev of Array.isArray(events) ? events : []) {
+    if (ev?.type !== "human_input_raw_event") continue;
+    const requestType = String(ev?.request_type || "");
+    if (requestType !== "clarification" && requestType !== "elicitation") continue;
+    const requestId = String(ev?.request_id ?? "").trim();
+    if (!requestId) continue;
+    rawByRequestId.set(requestId, String(ev?.question ?? ""));
+  }
+  for (const ev of Array.isArray(events) ? events : []) {
+    if (ev?.type !== "human_input_result") continue;
+    const requestId = String(ev?.request_id ?? "").trim();
+    if (!requestId) continue;
+    if (!rawByRequestId.has(requestId)) continue;
+    queue.push(rawByRequestId.get(requestId) ?? "");
+  }
+  return queue;
+}
+
+function normalizeAskObservations(trajectorySteps, events) {
+  const askResolutionQueue = askResolutionQueueFromEvents(events);
+  const askQuestionQueue = askQuestionQueueFromEvents(events);
+  return (Array.isArray(trajectorySteps) ? trajectorySteps : []).map((step) => {
+    if (!step || typeof step !== "object") return step;
+    const act = String(step.act || "");
+    if (!act.trim().startsWith("ask_human")) return step;
+    let normalizedAct = act;
+    if (/^ask_human\s+\[custom_tool\]\s*$/.test(act.trim()) && askQuestionQueue.length > 0) {
+      const matchedQuestion = String(askQuestionQueue.shift() ?? "");
+      if (matchedQuestion.length > 0) {
+        normalizedAct = `ask_human [custom_tool] ${matchedQuestion}`;
+      }
+    }
+    let obs = step.obs;
+    if (askResolutionQueue.length > 0) obs = askResolutionQueue.shift();
+    return {
+      ...step,
+      act: cap(normalizedAct, 4000),
+      obs: cap(canonicalAskObservation(obs), OBS_CAP),
+    };
+  });
 }
 
 test("resolveHarnesses includes OpenCode in all harness runs", () => {
@@ -26,9 +154,9 @@ test("OpenCode LiteLLM config uses the default provider/model shape without leak
   process.env.LITELLM_BASE_URL = "http://127.0.0.1:4000";
   try {
     const defaultConfig = await opencodeConfig();
-    assert.equal(defaultConfig.model, "litellm/bedrock/qwen.qwen3-32b-v1:0");
+    assert.equal(defaultConfig.model, "litellm/fireworks_ai/glm-5p1");
     assert.equal(defaultConfig.provider.litellm.options.apiKey, "{env:LITELLM_API_KEY}");
-    assert.equal(defaultConfig.provider.litellm.models["bedrock/qwen.qwen3-32b-v1:0"].tool_call, true);
+    assert.equal(defaultConfig.provider.litellm.models["fireworks_ai/glm-5p1"].tool_call, true);
 
     const config = await opencodeConfig({ model: "gemini/gemini-3.1-pro-preview-customtools" });
     assert.equal(config.model, "litellm/gemini/gemini-3.1-pro-preview-customtools");
@@ -37,6 +165,7 @@ test("OpenCode LiteLLM config uses the default provider/model shape without leak
     assert.equal(config.provider.litellm.options.apiKey, "{env:LITELLM_API_KEY}");
     assert.equal(JSON.stringify(config).includes("unit-test-litellm-key"), false);
     assert.equal(config.provider.litellm.models["gemini/gemini-3.1-pro-preview-customtools"].tool_call, true);
+    assert.equal(config.provider.litellm.models["gemini/gemini-3.1-pro-preview-customtools"].reasoning, false);
   } finally {
     if (oldKey === undefined) delete process.env.LITELLM_API_KEY;
     else process.env.LITELLM_API_KEY = oldKey;
@@ -177,4 +306,198 @@ test("OpenCode native events normalize into shared trajectory fields", async () 
   assert.equal(events[0].tool_args.permission_id, "perm-1");
   assert.equal(events[1].event_type, "file_edit");
   assert.deepEqual(events[1].files_changed, ["src/labeler.py"]);
+});
+
+test("OpenCode LiteLLM proxy strips Gemini-unsupported params and reports usage", async () => {
+  const receivedBodies = [];
+  const upstream = http.createServer((req, res) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      receivedBodies.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        id: "chatcmpl-test",
+        choices: [],
+        usage: { prompt_tokens: 3, completion_tokens: 5, total_tokens: 8 },
+      }));
+    });
+  });
+  await new Promise((resolve, reject) => {
+    upstream.once("error", reject);
+    upstream.listen(0, "127.0.0.1", resolve);
+  });
+
+  const upstreamPort = upstream.address().port;
+  const proxy = spawn(process.execPath, ["src/hil_swe/litellm_drop_params_proxy.mjs"], {
+    env: {
+      ...process.env,
+      REAL_LITELLM_URL: `http://127.0.0.1:${upstreamPort}`,
+      LITELLM_API_KEY: "unit-test-key",
+      LITELLM_PROXY_TARGET_MODEL: "gemini/gemini-3.1-pro",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  let stderr = "";
+  proxy.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+  try {
+    const portLine = await new Promise((resolve, reject) => {
+      let stdout = "";
+      proxy.stdout.on("data", (chunk) => {
+        stdout += chunk.toString();
+        const nl = stdout.indexOf("\n");
+        if (nl !== -1) resolve(stdout.slice(0, nl).trim());
+      });
+      proxy.on("exit", (code) => reject(new Error(`proxy exited early ${code}: ${stderr}`)));
+      proxy.on("error", reject);
+    });
+    assert.match(portLine, /^PROXY_PORT=\d+$/);
+    const proxyPort = Number(portLine.split("=")[1]);
+
+    const response = await fetch(`http://127.0.0.1:${proxyPort}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gemini/gemini-3.1-pro",
+        messages: [{ role: "user", content: "ping" }],
+        tool_choice: "auto",
+        reasoning_effort: "high",
+        reasoning: { effort: "high" },
+      }),
+    });
+    assert.equal(response.status, 200);
+    await response.json();
+
+    assert.equal(receivedBodies.length, 1);
+    assert.equal(receivedBodies[0].tool_choice, undefined);
+    assert.equal(receivedBodies[0].reasoning_effort, undefined);
+    assert.equal(receivedBodies[0].reasoning, undefined);
+    assert.equal(receivedBodies[0].drop_params, true);
+
+    const stats = await (await fetch(`http://127.0.0.1:${proxyPort}/__stats`)).json();
+    assert.equal(stats.llm_call_count, 1);
+    assert.equal(stats.input_tokens, 3);
+    assert.equal(stats.output_tokens, 5);
+    assert.equal(stats.total_tokens, 8);
+    assert.equal(stats.stripped_params.tool_choice, 1);
+    assert.equal(stats.stripped_params.reasoning_effort, 1);
+    assert.equal(stats.stripped_params.reasoning, 1);
+  } finally {
+    proxy.kill("SIGTERM");
+    await new Promise((resolve) => upstream.close(resolve));
+  }
+});
+
+test("normalizeAskObservations uses sidecar result when ask obs is empty", () => {
+  const trajectory = [{ thought: "", act: "ask_human what is X?", obs: "" }];
+  const events = [
+    { type: "human_input_result", result: { resolution: "Use foo=bar." } },
+  ];
+  const out = normalizeAskObservations(trajectory, events);
+  assert.equal(out[0].obs, "Use foo=bar.");
+});
+
+test("normalizeAskObservations preserves canonical irrelevant/cant-answer resolutions", () => {
+  const trajectory = [
+    { thought: "", act: "ask_human q1", obs: "" },
+    { thought: "", act: "ask_human q2", obs: "" },
+  ];
+  const events = [
+    { type: "human_input_result", result: { resolution: "irrelevant question" } },
+    { type: "human_input_result", result: { resolution: "can't answer (perhaps transient hiccup)" } },
+  ];
+  const out = normalizeAskObservations(trajectory, events);
+  assert.equal(out[0].obs, "irrelevant question");
+  assert.equal(out[1].obs, "can't answer (perhaps transient hiccup)");
+});
+
+test("normalizeAskObservations falls back to can't-answer for malformed ask obs", () => {
+  const trajectory = [
+    { thought: "", act: "ask_human q1", obs: "[error] tool failed" },
+    { thought: "", act: "ask_human q2", obs: "[no observation — tool call was interrupted]" },
+    { thought: "", act: "ask_human q3", obs: "" },
+  ];
+  const out = normalizeAskObservations(trajectory, []);
+  assert.equal(out[0].obs, CANT_ANSWER);
+  assert.equal(out[1].obs, CANT_ANSWER);
+  assert.equal(out[2].obs, CANT_ANSWER);
+});
+
+test("normalizeAskObservations does not touch non-ask steps", () => {
+  const trajectory = [
+    { thought: "", act: "bash: ls -la", obs: "ok" },
+    { thought: "", act: "Edit: a.py", obs: "" },
+  ];
+  const out = normalizeAskObservations(trajectory, [
+    { type: "human_input_result", result: { resolution: "Use foo=bar." } },
+  ]);
+  assert.equal(out[0].obs, "ok");
+  assert.equal(out[1].obs, "");
+});
+
+test("extractTrajectory canonicalizes custom ask tool act format", () => {
+  const events = [{
+    type: "message.part.updated",
+    properties: {
+      part: {
+        type: "tool",
+        tool: "ask_human",
+        state: {
+          input: { question: "What should happen on timeout?" },
+          output: "Return 504.",
+        },
+      },
+    },
+  }];
+  const steps = extractTrajectory(events);
+  assert.equal(steps[0].act, "ask_human [custom_tool] What should happen on timeout?");
+});
+
+test("extractTrajectory handles namespaced ask tool names and nested args", () => {
+  const events = [{
+    type: "message.part.updated",
+    properties: {
+      part: {
+        type: "tool",
+        tool: "ask_human_ask_human",
+        args: { ask_human: { question: "Which module owns parsing?" } },
+        result: "parser.mjs",
+      },
+    },
+  }];
+  const steps = extractTrajectory(events);
+  assert.equal(steps[0].act, "ask_human [custom_tool] Which module owns parsing?");
+  assert.equal(steps[0].obs, "parser.mjs");
+});
+
+test("normalizeAskObservations fills empty ask question text from sidecar raw events", () => {
+  const trajectory = [{ thought: "", act: "ask_human [custom_tool] ", obs: "" }];
+  const events = [
+    { type: "human_input_raw_event", request_id: "r1", request_type: "clarification", question: "What timeout value should be used?" },
+    { type: "human_input_result", request_id: "r1", result: { resolution: "Use 30 seconds." } },
+  ];
+  const out = normalizeAskObservations(trajectory, events);
+  assert.equal(out[0].act, "ask_human [custom_tool] What timeout value should be used?");
+  assert.equal(out[0].obs, "Use 30 seconds.");
+});
+
+test("normalizeAskObservations does not contaminate from different request text", () => {
+  const trajectory = [{ thought: "", act: "ask_human [custom_tool] ", obs: "" }];
+  const events = [
+    { type: "human_input_raw_event", request_id: "r_old", request_type: "clarification", question: "Previous unrelated question" },
+    { type: "human_input_raw_event", request_id: "r_now", request_type: "clarification", question: "" },
+    { type: "human_input_result", request_id: "r_now", result: { resolution: "Resolved." } },
+  ];
+  const out = normalizeAskObservations(trajectory, events);
+  assert.equal(out[0].act, "ask_human [custom_tool] ");
+  assert.equal(out[0].obs, "Resolved.");
+});
+
+test("extractTrajectory drops malformed blank tool events", () => {
+  const steps = extractTrajectory([{
+    type: "message.part.updated",
+    properties: { part: { type: "tool", tool: "", state: { input: {}, output: "" } } },
+  }]);
+  assert.deepEqual(steps, []);
 });
