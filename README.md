@@ -1,4 +1,4 @@
-# Escalation Lens: Diagnosing Ask Behavior Across Agent Harnesses
+# Hil-Dynamics: Productionizing Tool For Hil-Bench
 
 Escalation Lens is a HiL-Bench diagnostic: it measures how `<model, harness>` pairs behave on under-specified coding tasks — when they ask for clarification, when they silently guess, and whether their questions actually resolve the blockers that block progress.
 
