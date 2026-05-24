@@ -28,14 +28,23 @@ FROM ${BASE_IMAGE}
 
 # SDK selector — propagated from build-time --build-arg SDK=<value>.
 # Used to conditionally install SDK-specific Python packages.
-# Supported values: claude | codex | adk
+# Supported values: claude | codex | adk | opencode | antigravity
 ARG SDK=claude
+ARG TH_PIP_INDEX_URL=""
+ARG TH_PIP_EXTRA_INDEX_URL=""
 
 # ── Node.js runtime bootstrap ────────────────────────────────────────────────
 # Most base images are Debian-like; some have very little writable apt cache.
 # Instead of forcing apt upgrades, keep a pre-bundled Node 20 toolchain from
 # node_runtime and only install via apk on Alpine/musl images.
 COPY --from=node_runtime /usr/local/ /opt/node20/
+COPY --from=node_runtime /lib/x86_64-linux-gnu/libc.so.6 /opt/antigravity-glibc/
+COPY --from=node_runtime /lib/x86_64-linux-gnu/libm.so.6 /opt/antigravity-glibc/
+COPY --from=node_runtime /lib/x86_64-linux-gnu/libpthread.so.0 /opt/antigravity-glibc/
+COPY --from=node_runtime /lib/x86_64-linux-gnu/libdl.so.2 /opt/antigravity-glibc/
+COPY --from=node_runtime /lib/x86_64-linux-gnu/librt.so.1 /opt/antigravity-glibc/
+COPY --from=node_runtime /lib/x86_64-linux-gnu/libresolv.so.2 /opt/antigravity-glibc/
+COPY --from=node_runtime /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 /opt/antigravity-glibc/
 
 # ── Node.js 20 ───────────────────────────────────────────────────────────────
 # Reuse existing Node/NPM if already compatible (>=18). Otherwise:
@@ -174,6 +183,86 @@ RUN set -e; if [ "${SDK}" = "adk" ]; then \
         echo "ADK: python3.adk wrapper -> ${ADK_VENV}/bin/python  ($(${ADK_VENV}/bin/python --version 2>&1))"; \
     fi
 
+# ── Google Antigravity (Python) — Antigravity SDK only ──────────────────────
+# The google-antigravity package ships a compiled localharness runtime and is
+# safest on Python >= 3.11 in this environment.
+RUN set -e; if [ "${SDK}" = "antigravity" ]; then \
+        AG_BASE_PY="$(command -v python3)"; \
+        if [ -z "${AG_BASE_PY}" ]; then \
+            echo "ERROR: python3 not found in base image"; \
+            exit 1; \
+        fi; \
+        AG_MINOR=$("${AG_BASE_PY}" -c "import sys; print(sys.version_info.minor)" 2>/dev/null || echo 0); \
+        AG_MAJOR=$("${AG_BASE_PY}" -c "import sys; print(sys.version_info.major)" 2>/dev/null || echo 0); \
+        if [ "$AG_MAJOR" -ne 3 ] || [ "$AG_MINOR" -ne 11 ]; then \
+            echo "Antigravity: system Python ${AG_MAJOR}.${AG_MINOR} != 3.11 — installing Python 3.11"; \
+            if command -v apt-get >/dev/null 2>&1; then \
+                if apt-get update -qq && \
+                   (apt-get install -y --no-install-recommends python3.11 python3.11-venv python3.11-distutils || \
+                    apt-get install -y --no-install-recommends python3.11 python3.11-venv); then \
+                    AG_BASE_PY="$(command -v python3.11)"; \
+                fi; \
+            fi; \
+            AG_MINOR_NEW=$("${AG_BASE_PY}" -c "import sys; print(sys.version_info.minor)" 2>/dev/null || echo 0); \
+            AG_MAJOR_NEW=$("${AG_BASE_PY}" -c "import sys; print(sys.version_info.major)" 2>/dev/null || echo 0); \
+            if [ "${AG_MAJOR_NEW}" -ne 3 ] || [ "${AG_MINOR_NEW}" -ne 11 ]; then \
+                "${AG_BASE_PY}" -m pip install --no-cache-dir --break-system-packages uv 2>&1 || \
+                "${AG_BASE_PY}" -m pip install --no-cache-dir uv 2>&1; \
+                UV_BIN="$(command -v uv)"; \
+                "$UV_BIN" python install 3.11 2>&1; \
+                AG_BASE_PY=$("$UV_BIN" python find cpython-3.11 2>/dev/null || "$UV_BIN" python find 3.11); \
+            fi; \
+            echo "Antigravity: using python at ${AG_BASE_PY}"; \
+        fi; \
+        AG_VENV="/opt/trust_horizon/.venv-antigravity"; \
+        if ! "${AG_BASE_PY}" -m venv "${AG_VENV}"; then \
+            if command -v apt-get >/dev/null 2>&1; then \
+                apt-get update -qq && apt-get install -y --no-install-recommends python3-venv || true; \
+                "${AG_BASE_PY}" -m venv "${AG_VENV}" || true; \
+            fi; \
+            if [ ! -x "${AG_VENV}/bin/python" ]; then \
+                "${AG_BASE_PY}" -m pip install --no-cache-dir --break-system-packages uv 2>&1 || \
+                "${AG_BASE_PY}" -m pip install --no-cache-dir uv 2>&1; \
+                UV_BIN="$(command -v uv)"; \
+                "$UV_BIN" venv --seed --python "${AG_BASE_PY}" "${AG_VENV}"; \
+            fi; \
+        fi; \
+        if [ -n "${TH_PIP_INDEX_URL}" ]; then \
+            export PIP_INDEX_URL="${TH_PIP_INDEX_URL}"; \
+        fi; \
+        if [ -n "${TH_PIP_EXTRA_INDEX_URL}" ]; then \
+            export PIP_EXTRA_INDEX_URL="${TH_PIP_EXTRA_INDEX_URL}"; \
+        fi; \
+        "${AG_VENV}/bin/python" -m pip install --no-cache-dir --upgrade pip setuptools wheel 2>&1; \
+        if ! "${AG_VENV}/bin/python" -m pip install --no-cache-dir "google-antigravity==0.1.0" "litellm" "typing_extensions" 2>&1; then \
+            echo "Antigravity: direct pip install failed; trying manylinux wheel fallback"; \
+            "${AG_VENV}/bin/python" -m pip install --no-cache-dir "litellm" "typing_extensions" "absl-py" "google-genai" "mcp" "protobuf" "pydantic" "uvicorn" "websockets" 2>&1; \
+            AG_WHEEL_DIR="/tmp/antigravity-wheel"; \
+            mkdir -p "${AG_WHEEL_DIR}"; \
+            "${AG_VENV}/bin/python" -m pip download --no-deps --dest "${AG_WHEEL_DIR}" --platform manylinux_2_17_x86_64 --implementation py --python-version 3.11 "google-antigravity==0.1.0" 2>&1; \
+            "${AG_VENV}/bin/python" -c "import glob,zipfile,sysconfig; site=sysconfig.get_paths()['purelib']; wheel=glob.glob('${AG_WHEEL_DIR}/google_antigravity-0.1.0-*.whl')[0]; z=zipfile.ZipFile(wheel); z.extractall(site); z.close(); print('Antigravity: extracted wheel to ' + site)"; \
+        fi; \
+        AG_SITE_PKGS="$("${AG_VENV}/bin/python" -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")"; \
+        AG_LOCALHARNESS="${AG_SITE_PKGS}/google/antigravity/bin/localharness"; \
+        AG_LOCALHARNESS_REAL="${AG_LOCALHARNESS}.real"; \
+        AG_GLIBC_DIR="/opt/antigravity-glibc"; \
+        if [ ! -e "${AG_LOCALHARNESS}" ]; then \
+            echo "ERROR: localharness not found at ${AG_LOCALHARNESS}"; \
+            exit 1; \
+        fi; \
+        chmod +x "${AG_LOCALHARNESS}" || true; \
+        if [ -x "${AG_LOCALHARNESS}" ] && [ ! -e "${AG_LOCALHARNESS_REAL}" ]; then \
+            mv "${AG_LOCALHARNESS}" "${AG_LOCALHARNESS_REAL}"; \
+            printf '#!/bin/sh\n' > "${AG_LOCALHARNESS}"; \
+            printf 'exec %s/ld-linux-x86-64.so.2 --library-path %s %s "$@"\n' "${AG_GLIBC_DIR}" "${AG_GLIBC_DIR}" "${AG_LOCALHARNESS_REAL}" >> "${AG_LOCALHARNESS}"; \
+            chmod +x "${AG_LOCALHARNESS}"; \
+        fi; \
+        printf '#!/bin/sh\n' > /usr/local/bin/python3.antigravity; \
+        printf 'exec %s/bin/python "$@"\n' "${AG_VENV}" >> /usr/local/bin/python3.antigravity; \
+        chmod +x /usr/local/bin/python3.antigravity; \
+        echo "Antigravity: python3.antigravity wrapper -> ${AG_VENV}/bin/python  ($(${AG_VENV}/bin/python --version 2>&1))"; \
+    fi
+
 # ── Sanity check ─────────────────────────────────────────────────────────────
 # Both claude-agent-sdk and codex-sdk are ESM-only, so use dynamic import()
 # with --input-type=module rather than require().
@@ -186,6 +275,11 @@ RUN node --version && \
     (opencode --version 2>/dev/null || echo 'opencode cli version check skipped') && \
     if [ "${SDK}" = "adk" ]; then \
         python3.adk -c "from google.adk.models.lite_llm import LiteLlm; import litellm; from google.adk.skills import load_skill_from_dir; from google.adk.tools import skill_toolset; print('google-adk+skills+litellm ok  python3.adk=' + __import__('sys').version.split()[0])"; \
+    fi && \
+    if [ "${SDK}" = "antigravity" ]; then \
+        python3.antigravity -c "import google.antigravity; print('google-antigravity ok  python3.antigravity=' + __import__('sys').version.split()[0])"; \
+        AG_LOCALHARNESS="$(/opt/trust_horizon/.venv-antigravity/bin/python -c "import sysconfig; print(sysconfig.get_paths()['purelib'] + '/google/antigravity/bin/localharness')")"; \
+        "${AG_LOCALHARNESS}" --help >/dev/null; \
     fi
 
 # SWE-agent base images set ENTRYPOINT ["sleep", "infinity"] so containers can be

@@ -227,6 +227,7 @@ def check_docker_images(sdk: str, uids: list[str]) -> bool:
         "codex":    "hilbench-swe-harness-codex",
         "adk":      "hilbench-swe-harness-adk",
         "opencode": "hilbench-swe-harness-opencode",
+        "antigravity": "hilbench-swe-harness-antigravity",
     }
     prefix = prefix_map.get(sdk, f"hilbench-swe-harness-{sdk}")
     all_ok = True
@@ -252,7 +253,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--sdk",
-        choices=["claude", "codex", "adk", "opencode"],
+        choices=["claude", "codex", "adk", "opencode", "antigravity"],
         default=None,
         help="Agent SDK to validate images for.",
     )

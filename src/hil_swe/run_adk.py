@@ -149,6 +149,71 @@ def _cap(s: Any, limit: int) -> str:
     return f"{text[:limit]}… [truncated]" if len(text) > limit else text
 
 
+def _is_token_limit_error(text: Any) -> bool:
+    s = str(text or "").strip().lower()
+    if not s:
+        return False
+    return (
+        "contextwindowexceeded" in s
+        or "max_output_tokens" in s
+        or "max output token" in s
+        or "max_tokens" in s
+        or "token limit" in s
+        or "generation exceeded max tokens" in s
+        or "context window" in s
+        or "context length" in s
+    )
+
+
+_TOKEN_LIMIT_CODES = {
+    "contextwindowexceeded",
+    "max_output_tokens",
+    "max_tokens",
+    "token_limit",
+    "context_length_exceeded",
+    "length",
+}
+
+
+def _normalize_code(value: Any) -> str:
+    return re.sub(r"[^a-z0-9_]+", "_", str(value or "").strip().lower())
+
+
+def _is_token_limit_structured(value: Any, depth: int = 0) -> bool:
+    if depth > 7 or value is None:
+        return False
+    if isinstance(value, str):
+        return _normalize_code(value) in _TOKEN_LIMIT_CODES
+    if isinstance(value, (list, tuple, set)):
+        return any(_is_token_limit_structured(v, depth + 1) for v in value)
+    if isinstance(value, dict):
+        for k, v in value.items():
+            key = str(k or "").lower()
+            if key in {"codexerrorinfo", "error", "details", "additionaldetails", "cause", "data"}:
+                if _is_token_limit_structured(v, depth + 1):
+                    return True
+            if key in {
+                "code", "type", "subtype", "reason", "stop_reason", "stopreason",
+                "finish_reason", "finishreason", "errorcode", "error_code",
+            }:
+                if _normalize_code(v) in _TOKEN_LIMIT_CODES:
+                    return True
+            if _is_token_limit_structured(v, depth + 1):
+                return True
+        return False
+    if hasattr(value, "__dict__"):
+        return _is_token_limit_structured(vars(value), depth + 1)
+    return False
+
+
+def _is_token_limit_exception(exc: BaseException) -> bool:
+    if _is_token_limit_structured(exc):
+        return True
+    if _is_token_limit_structured(getattr(exc, "args", ())):
+        return True
+    return _is_token_limit_error(exc)
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -440,7 +505,12 @@ def _sidecar_ask_sync(url: str, payload: dict) -> dict:
 
 # ── Trajectory extraction ─────────────────────────────────────────────────────
 
-def extract_trajectory_steps(adk_events: list) -> list[dict]:
+def extract_trajectory_steps(
+    adk_events: list,
+    *,
+    stop_reason: str = "",
+    sdk_error_msg: str = "",
+) -> list[dict]:
     """
     Convert ADK event stream into [{thought, act, obs}, ...] trajectory steps.
 
@@ -586,10 +656,17 @@ def extract_trajectory_steps(adk_events: list) -> list[dict]:
     for call_id in pending_order:
         p = pending.pop(call_id, None)
         if p:
+            interrupted_obs = "[no observation — tool call was interrupted]"
+            if stop_reason:
+                interrupted_obs += f" (stop_reason={stop_reason})"
+            if sdk_error_msg:
+                first_line = str(sdk_error_msg).strip().splitlines()[0]
+                if first_line:
+                    interrupted_obs += f" ({_cap(first_line, 300)})"
             steps.append({
                 "thought": p["thought"],
                 "act":     p["act"],
-                "obs":     "[no observation — tool call was interrupted]",
+                "obs":     interrupted_obs,
                 "skill_used": bool(p.get("skill_used", False)),
             })
 
@@ -1129,8 +1206,13 @@ async def main() -> None:
                 stop_reason = "timeout"
                 raise
             except Exception as exc:
-                sdk_error_msg = str(exc)
-                stop_reason   = "sdk_error"
+                err_text = str(exc)
+                if _is_token_limit_exception(exc):
+                    sdk_error_msg = None
+                    stop_reason = "token_limit"
+                else:
+                    sdk_error_msg = err_text
+                    stop_reason   = "sdk_error"
 
         # Each attempt is individually capped at the per-call timeout budget.
         # min() with remaining wall-clock ensures we never overshoot ATTEMPT_TIMEOUT_MS.
@@ -1161,7 +1243,11 @@ async def main() -> None:
     # ── 9. Collect final patch and build outputs ──────────────────────────────
     patch_content = await _git_diff(WORKSPACE)
 
-    trajectory_steps = extract_trajectory_steps(adk_events)
+    trajectory_steps = extract_trajectory_steps(
+        adk_events,
+        stop_reason=stop_reason,
+        sdk_error_msg=str(sdk_error_msg or ""),
+    )
     stats            = {
         **compute_stats(all_events, trajectory_steps, num_blockers_total),
         **compute_resource_stats([*adk_events, *all_events], trajectory_steps, run_started_at),

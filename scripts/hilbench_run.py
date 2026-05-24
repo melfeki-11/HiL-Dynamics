@@ -40,6 +40,7 @@ _SDK_MODEL_ENV: dict[str, str] = {
     "codex":    "CODEX_MODEL",
     "adk":      "ADK_MODEL",
     "opencode": "OPENCODE_MODEL",
+    "antigravity": "ANTIGRAVITY_MODEL",
 }
 
 

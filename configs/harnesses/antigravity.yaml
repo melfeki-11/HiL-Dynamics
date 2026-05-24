@@ -1,0 +1,3 @@
+sdk: antigravity
+model: gemini/gemini-3.5-flash
+reasoning_effort: high
