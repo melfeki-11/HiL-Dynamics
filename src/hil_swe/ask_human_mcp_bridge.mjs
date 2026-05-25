@@ -25,6 +25,7 @@ import { sidecarAsk } from "./ask_human_sidecar_client.mjs";
 import { richAskHumanToolDescriptionForHarness } from "./constants.mjs";
 
 const SIDECAR_URL = process.env.SIDECAR_URL;
+const NATIVE_EVENT_TYPE = String(process.env.NATIVE_EVENT_TYPE || "codex.mcp.ask_human");
 if (!SIDECAR_URL) {
   process.stderr.write("[mcp-bridge] ERROR: SIDECAR_URL env var is required\n");
   process.exit(1);
@@ -149,9 +150,9 @@ rl.on("line", async (line) => {
     const sidecarResult = await sidecarAsk({
       sidecarUrl: SIDECAR_URL,
       question,
-      nativeEventType: "codex.mcp.ask_human",
+      nativeEventType: NATIVE_EVENT_TYPE,
       rawEvent: { question },
-      fallbackSource: "codex_mcp_bridge_error_fallback",
+      fallbackSource: `${NATIVE_EVENT_TYPE.replace(/[^a-zA-Z0-9_.-]+/g, "_")}_bridge_error_fallback`,
     });
 
     success(id, {

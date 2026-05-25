@@ -110,6 +110,67 @@ function claudeApiEnv() {
   };
 }
 
+const TOKEN_LIMIT_CODES = new Set([
+  "contextwindowexceeded",
+  "max_output_tokens",
+  "max_tokens",
+  "token_limit",
+  "context_length_exceeded",
+  "length",
+]);
+
+function _normalizeCode(value) {
+  return String(value || "").trim().toLowerCase().replace(/[^a-z0-9_]+/g, "_");
+}
+
+function isTokenLimitStructured(value, depth = 0) {
+  if (depth > 6 || value == null) return false;
+  if (typeof value === "string") return TOKEN_LIMIT_CODES.has(_normalizeCode(value));
+  if (Array.isArray(value)) return value.some((item) => isTokenLimitStructured(item, depth + 1));
+  if (typeof value !== "object") return false;
+  for (const [k, v] of Object.entries(value)) {
+    const key = String(k || "").toLowerCase();
+    if (
+      key === "codexerrorinfo" ||
+      key === "error" ||
+      key === "details" ||
+      key === "additionaldetails"
+    ) {
+      if (isTokenLimitStructured(v, depth + 1)) return true;
+    }
+    if (
+      key === "code" ||
+      key === "type" ||
+      key === "subtype" ||
+      key === "reason" ||
+      key === "stop_reason" ||
+      key === "stopreason" ||
+      key === "finish_reason" ||
+      key === "finishreason" ||
+      key === "errorcode" ||
+      key === "error_code"
+    ) {
+      if (TOKEN_LIMIT_CODES.has(_normalizeCode(v))) return true;
+    }
+  }
+  return false;
+}
+
+function isTokenLimitError(text) {
+  const s = String(text || "").toLowerCase();
+  if (!s) return false;
+  return (
+    s.includes("max_output_tokens") ||
+    s.includes("max output token") ||
+    s.includes("max_tokens") ||
+    s.includes("token limit") ||
+    s.includes("generation exceeded max tokens") ||
+    s.includes("generation exceeded the maximum output token limit") ||
+    s.includes("context window") ||
+    s.includes("context length")
+  );
+}
+
 // ── Claude SDK helpers (mirrors claude-code/index.mjs) ───────────────────────
 
 function permissionQuestion(toolName, input, permission) {
@@ -323,7 +384,7 @@ function formatObs(content, isError) {
  *   - For each user turn with tool_result blocks, match by tool_use_id → emit step.
  *   - At the end, flush any unmatched pending calls (e.g. interrupted before result arrived).
  */
-function extractTrajectorySteps(events) {
+function extractTrajectorySteps(events, { stopReason = "", sdkErrorMsg = "" } = {}) {
   const steps = [];
   const pending    = new Map(); // toolUseId → { act, thought }
   // tool_use_ids that were already emitted via a claude_ask_question event;
@@ -438,7 +499,15 @@ function extractTrajectorySteps(events) {
 
   // Flush tool calls that never got a result (e.g. interrupted mid-run).
   for (const [, p] of pending) {
-    steps.push({ thought: p.thought, act: p.act, obs: "[no observation — tool call was denied or interrupted]" });
+    let interruptedObs = "[no observation — tool call was denied or interrupted]";
+    if (String(stopReason || "").trim()) {
+      interruptedObs += ` (stop_reason=${String(stopReason).trim()})`;
+    }
+    const firstLine = String(sdkErrorMsg || "").trim().split("\n")[0] || "";
+    if (firstLine) {
+      interruptedObs += ` (${cap(firstLine, 300)})`;
+    }
+    steps.push({ thought: p.thought, act: p.act, obs: interruptedObs });
   }
   pending.clear();
 
@@ -827,6 +896,11 @@ async function main() {
         sdkError = null;
         stopReason = "max_steps";
         pushEvent({ type: "max_steps_reached", timestamp: new Date().toISOString(), detail: text });
+      } else if (isTokenLimitStructured(error) || isTokenLimitError(text)) {
+        // Token-limit exhaustion is an agent-behavior stop condition, not infra.
+        sdkError = null;
+        stopReason = "token_limit";
+        pushEvent({ type: "token_limit_reached", timestamp: new Date().toISOString(), detail: text });
       } else {
         sdkError = abortController.signal.aborted
           ? `Timed out after ${attemptTimeout}ms.\n\n${text}`
@@ -862,7 +936,10 @@ async function main() {
     sdk_error: sdkError || null,
     stop_reason: stopReason,
   });
-  const trajectorySteps = extractTrajectorySteps(allEvents);
+  const trajectorySteps = extractTrajectorySteps(allEvents, {
+    stopReason,
+    sdkErrorMsg: sdkError || "",
+  });
 
   const stats = {
     ...computeTrajectoryStats(allEvents, trajectorySteps, numBlockersTotal),

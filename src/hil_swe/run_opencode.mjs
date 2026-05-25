@@ -436,10 +436,20 @@ function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
 //   • tool            → {thought, act, obs}
 //   • patch / command → treated as actions so steps remain informative even if
 //                       OpenCode emits non-tool action parts for edits/commands.
-function extractTrajectory(serverEvents) {
+function extractTrajectory(serverEvents, { stopReason = "", sdkErrorMsg = "" } = {}) {
   const steps = [];
   const seenPartIds = new Set();
+  const pendingByPartId = new Map();
   let pendingThought = "";
+
+  const interruptedObs = () => {
+    let obs = "[no observation — tool call was interrupted]";
+    const sr = String(stopReason || "").trim();
+    if (sr) obs += ` (stop_reason=${sr})`;
+    const firstLine = String(sdkErrorMsg || "").trim().split("\n")[0] || "";
+    if (firstLine) obs += ` (${cap(firstLine, 300)})`;
+    return obs;
+  };
 
   for (const ev of serverEvents) {
     if (ev?.type !== "message.part.updated") continue;
@@ -458,6 +468,7 @@ function extractTrajectory(serverEvents) {
     if (partType === "tool") {
       const toolName = String(part.tool?.name || part.tool || part.name || "");
       const state    = part.state || {};
+      const status   = String(state.status || part.status || "").toLowerCase();
       const input    = state.input || part.input || part.args || {};
       const isError  = state.status === "error" || part.status === "error";
       const output   = isError
@@ -483,7 +494,14 @@ function extractTrajectory(serverEvents) {
         act = cap(`${renderedName}: ${inputStr}`, ACT_CAP);
       }
 
+      if (partId && (status === "running" || status === "in_progress" || status === "started")) {
+        pendingByPartId.set(partId, { thought: pendingThought, act });
+        pendingThought = "";
+        continue;
+      }
+
       steps.push({ thought: pendingThought, act, obs: cap(String(output), OBS_CAP) });
+      if (partId) pendingByPartId.delete(partId);
       pendingThought = "";
       continue;
     }
@@ -503,6 +521,14 @@ function extractTrajectory(serverEvents) {
       pendingThought = "";
       continue;
     }
+  }
+
+  for (const pending of pendingByPartId.values()) {
+    steps.push({
+      thought: pending.thought || "",
+      act: pending.act || "",
+      obs: interruptedObs(),
+    });
   }
 
   if (pendingThought) steps.push({ thought: pendingThought, act: "", obs: "" });
@@ -637,6 +663,69 @@ function summarizeOpenCodeEventError(properties) {
   } catch {
     return "opencode session error";
   }
+}
+
+const TOKEN_LIMIT_CODES = new Set([
+  "contextwindowexceeded",
+  "max_output_tokens",
+  "max_tokens",
+  "token_limit",
+  "context_length_exceeded",
+  "length",
+]);
+
+function _normalizeCode(value) {
+  return String(value || "").trim().toLowerCase().replace(/[^a-z0-9_]+/g, "_");
+}
+
+function isTokenLimitStructured(value, depth = 0) {
+  if (depth > 7 || value == null) return false;
+  if (typeof value === "string") return TOKEN_LIMIT_CODES.has(_normalizeCode(value));
+  if (Array.isArray(value)) return value.some((item) => isTokenLimitStructured(item, depth + 1));
+  if (typeof value !== "object") return false;
+  for (const [k, v] of Object.entries(value)) {
+    const key = String(k || "").toLowerCase();
+    if (
+      key === "codexerrorinfo" ||
+      key === "error" ||
+      key === "details" ||
+      key === "additionaldetails" ||
+      key === "cause" ||
+      key === "data"
+    ) {
+      if (isTokenLimitStructured(v, depth + 1)) return true;
+    }
+    if (
+      key === "code" ||
+      key === "type" ||
+      key === "subtype" ||
+      key === "reason" ||
+      key === "stop_reason" ||
+      key === "stopreason" ||
+      key === "finish_reason" ||
+      key === "finishreason" ||
+      key === "errorcode" ||
+      key === "error_code"
+    ) {
+      if (TOKEN_LIMIT_CODES.has(_normalizeCode(v))) return true;
+    }
+  }
+  return false;
+}
+
+function isTokenLimitError(text) {
+  const s = String(text || "").toLowerCase();
+  if (!s) return false;
+  return (
+    s.includes("contextwindowexceeded") ||
+    s.includes("max_output_tokens") ||
+    s.includes("max output token") ||
+    s.includes("max_tokens") ||
+    s.includes("token limit") ||
+    s.includes("generation exceeded max tokens") ||
+    s.includes("context window") ||
+    s.includes("context length")
+  );
 }
 
 async function allocateLoopbackPort() {
@@ -983,6 +1072,11 @@ async function main() {
           // Capture explicit session error events early.
           if (type === "session.error") {
             const message = summarizeOpenCodeEventError(properties);
+            if (isTokenLimitStructured(properties)) {
+              if (!sdkError) sdkError = message;
+              resolveRunDone("token_limit");
+              continue;
+            }
             if (!sdkError) sdkError = message;
             rejectRunDone(new Error(message));
             continue;
@@ -1002,6 +1096,11 @@ async function main() {
             }
             if (status === "error" || status === "failed" || status === "aborted") {
               const message = summarizeOpenCodeEventError(properties) || `session status ${status}`;
+              if (isTokenLimitStructured(properties)) {
+                if (!sdkError) sdkError = message;
+                resolveRunDone("token_limit");
+                continue;
+              }
               if (!sdkError) sdkError = message;
               rejectRunDone(new Error(message));
               continue;
@@ -1031,10 +1130,16 @@ async function main() {
       });
 
       await runPromise;
-      await Promise.race([runDonePromise, timeoutPromise]);
+      const runOutcome = await Promise.race([runDonePromise, timeoutPromise]);
 
       // Treat session.error (captured via stream) as sdk_error even if prompt resolved.
-      if (sdkError) stopReason = "sdk_error";
+      if (runOutcome === "token_limit") {
+        sdkError = null;
+        stopReason = "token_limit";
+      } else if (sdkError && isTokenLimitError(sdkError)) {
+        sdkError = null;
+        stopReason = "token_limit";
+      } else if (sdkError) stopReason = "sdk_error";
       else stopReason = "complete";
     } catch (err) {
       const cause = err && typeof err === "object" ? err.cause : null;
@@ -1048,6 +1153,9 @@ async function main() {
       if (/timed out/i.test(msg)) {
         timedOut = true;
         stopReason = "timeout";
+      } else if (isTokenLimitStructured(err) || isTokenLimitError(msg)) {
+        sdkError = null;
+        stopReason = "token_limit";
       } else {
         stopReason = "sdk_error";
       }
@@ -1106,7 +1214,10 @@ async function main() {
 
   const patch = await gitDiff(WORKSPACE);
   const trajectorySteps = normalizeAskObservations(
-    extractTrajectory(opencodeEvents),
+    extractTrajectory(opencodeEvents, {
+      stopReason,
+      sdkErrorMsg: String(sdkError || ""),
+    }),
     allEvents,
   );
   const stats = {

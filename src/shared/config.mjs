@@ -11,10 +11,18 @@ export const autonomyCalibrationRoot = process.env.AUTONOMY_CALIBRATION_ROOT || 
 
 // Find the credentials .env file.  Check locations in priority order:
 //   1. LITELLM_CREDENTIALS_FILE env var (explicit override)
-//   2. <repo-root>/.env  (default location)
+//   2. trust_horizon/.env  (conventional location in this repo)
+//   3. ../litellm/LOCAL_LITELLM_CREDENTIALS.env for the local dev checkout
 function _findCredentialsFile() {
   if (process.env.LITELLM_CREDENTIALS_FILE) return process.env.LITELLM_CREDENTIALS_FILE;
-  return path.join(rootDir, ".env");
+  const candidates = [
+    path.join(rootDir, ".env"),
+    path.join(path.dirname(rootDir), "litellm", "LOCAL_LITELLM_CREDENTIALS.env"),
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
+  }
+  return candidates[0]; // return trust_horizon/.env as the "intended" path even if missing
 }
 export const DEFAULT_LITELLM_CREDENTIALS_FILE = _findCredentialsFile();
 export const dataDir = path.join(rootDir, "data");

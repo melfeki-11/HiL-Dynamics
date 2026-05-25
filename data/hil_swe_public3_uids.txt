@@ -1,0 +1,4 @@
+# 3 public HiL-Bench SWE UIDs drawn from the local public12 slice for base matrix tests.
+698139c7dc5e90df07566a6c
+69bc1094b455a91fa20fb868
+69bcc6360c872b9773cce01d

@@ -68,10 +68,12 @@ Environment variables (read from host env, forwarded into each container):
     CODEX_MODEL                 model slug for the agent when --sdk codex  (default: gpt-5.5)
     ADK_MODEL                   model slug for the agent when --sdk adk    (default: gemini/gemini-3.1-pro)
     OPENCODE_MODEL              model slug for the agent when --sdk opencode (default: fireworks_ai/glm-5p1)
+    ANTIGRAVITY_MODEL           model slug for the agent when --sdk antigravity (default: gemini/gemini-3.5-flash)
     CLAUDE_REASONING_EFFORT     reasoning effort for Claude SDK query options (low|medium|high|xhigh)
     CODEX_REASONING_EFFORT      reasoning effort for Codex app-server (none|minimal|low|medium|high|xhigh)
     ADK_REASONING_EFFORT        best-effort reasoning effort forwarded to LiteLLM (low|medium|high)
     OPENCODE_REASONING_EFFORT   reasoning effort for OpenCode provider config (low|medium|high|xhigh|max)
+    ANTIGRAVITY_REASONING_EFFORT reasoning effort for Antigravity model config (low|medium|high)
     OPENCODE_STARTUP_TIMEOUT_MS startup watchdog before first OpenCode stdout event (default: 300000)
     LITELLM_CALL_TIMEOUT_MS     per-LiteLLM-call timeout in ms (default: 1200000 / 20 min)
     STEP_LITELLM_TRIES          retries per agent step/call budget (default: 3)
@@ -170,6 +172,8 @@ def find_env_file(explicit: str | None = None) -> Path | None:
         Path(explicit) if explicit else None,
         Path(os.environ["LITELLM_CREDENTIALS_FILE"]) if os.environ.get("LITELLM_CREDENTIALS_FILE") else None,
         ROOT / ".env",
+        ROOT.parent / "litellm" / "LOCAL_LITELLM_CREDENTIALS.env",
+        ROOT.parent / "research_evals" / "hil_bench" / ".env",
     ]
     for p in candidates:
         if p and p.exists():
@@ -265,6 +269,14 @@ SDK_CONFIGS = {
         "executable_env":       "OPENCODE_NO_UPDATE=1",
         # runtime defaults to "node" when absent
     },
+    "antigravity": {
+        "harness_image_prefix": "hilbench-swe-harness-antigravity",
+        "entrypoint":           "/opt/hil_dynamics/src/hil_swe/run_antigravity.py",
+        "model_env_key":        "ANTIGRAVITY_MODEL",
+        "default_model":        "gemini/gemini-3.5-flash",
+        "executable_env":       "ANTIGRAVITY_AGENT_ENV=container",
+        "runtime":              "python3.antigravity",
+    },
 }
 DEFAULT_SDK = "claude"
 
@@ -300,6 +312,8 @@ FORWARDED_ENV_KEYS = [
     "OPENCODE_MODEL",
     "OPENCODE_REASONING_EFFORT",
     "OPENCODE_REASONING",  # backward-compat alias
+    "ANTIGRAVITY_MODEL",
+    "ANTIGRAVITY_REASONING_EFFORT",
     "OPENCODE_STARTUP_TIMEOUT_MS",
     "LITELLM_CALL_TIMEOUT_MS",
     "STEP_LITELLM_TRIES",
@@ -331,6 +345,7 @@ MODEL_REASONING_DEFAULTS = [
     ("gpt-5.5", {"CODEX_REASONING_EFFORT": "xhigh"}),
     # ADK model (routed through LiteLLM)
     ("gemini/gemini-3.1-pro", {"ADK_REASONING_EFFORT": "high"}),
+    # Antigravity model (routed through LiteLLM by harness shim)
     # OpenCode model
     ("fireworks_ai/glm-5p1", {"OPENCODE_REASONING_EFFORT": "xhigh"}),
 ]
@@ -363,6 +378,8 @@ def reasoning_env_for_sdk(sdk: str, effort: str) -> dict[str, str]:
         return {"ADK_REASONING_EFFORT": eff}
     if sdk == "opencode":
         return {"OPENCODE_REASONING_EFFORT": eff}
+    if sdk == "antigravity":
+        return {"ANTIGRAVITY_REASONING_EFFORT": eff}
     return {}
 
 
@@ -965,8 +982,8 @@ def main() -> None:
         default=False,
         help=(
             "Enable the additional (non-replacing) custom ask_human MCP tool for "
-            "claude/codex SDK runs. Without this flag, claude/codex expose only their "
-            "native question-asking surface."
+            "claude/codex/antigravity SDK runs. Without this flag, those SDKs expose "
+            "only their native question-asking surface."
         ),
     )
     parser.add_argument(
@@ -1042,11 +1059,11 @@ def main() -> None:
     if not effective_env.get(model_env_key):
         effective_env[model_env_key] = sdk_cfg_for_model["default_model"]
 
-    # 4b. Custom ask_human MCP tool exposure (claude/codex only).
+    # 4b. Custom ask_human MCP tool exposure (claude/codex/antigravity only).
     # Default is OFF unless --with-custom-tool is explicitly passed.
-    if args.with_custom_tool and args.sdk not in {"claude", "codex"}:
+    if args.with_custom_tool and args.sdk not in {"claude", "codex", "antigravity"}:
         print(
-            "ERROR: --with-custom-tool is only supported with --sdk claude or --sdk codex.",
+            "ERROR: --with-custom-tool is only supported with --sdk claude, --sdk codex, or --sdk antigravity.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -1075,7 +1092,7 @@ def main() -> None:
             file=sys.stderr,
         )
         sys.exit(1)
-    if args.sdk in {"claude", "codex"}:
+    if args.sdk in {"claude", "codex", "antigravity"}:
         effective_env["WITH_CUSTOM_TOOL"] = "1" if args.with_custom_tool else "0"
     effective_env["WITH_SKILL"] = skill_version or ""
     effective_env["WITH_ASK_GUIDANCE"] = guidance_version or ""
@@ -1122,14 +1139,14 @@ def main() -> None:
 
     if not api_key:
         print(
-            "ERROR: No API key found.  Set LITELLM_API_KEY in HiL-Dynamics/.env "
+            "ERROR: No API key found.  Set LITELLM_API_KEY in trust_horizon/.env "
             "(or ANTHROPIC_AUTH_TOKEN / LITELLM_AWS_SECRET_ID+LITELLM_AWS_SECRET_KEY).",
             file=sys.stderr,
         )
         sys.exit(1)
     if not base_url:
         print(
-            "ERROR: No base URL found.  Set LITELLM_BASE_URL in HiL-Dynamics/.env "
+            "ERROR: No base URL found.  Set LITELLM_BASE_URL in trust_horizon/.env "
             "(e.g. https://<your-litellm-endpoint>).",
             file=sys.stderr,
         )
@@ -1144,6 +1161,7 @@ def main() -> None:
         "codex": effective_env.get("CODEX_REASONING_EFFORT", "(default)"),
         "adk": effective_env.get("ADK_REASONING_EFFORT", "(default)"),
         "opencode": effective_env.get("OPENCODE_REASONING_EFFORT", "(default)"),
+        "antigravity": effective_env.get("ANTIGRAVITY_REASONING_EFFORT", "(default)"),
     }
     log(f"Reasoning config [{args.sdk}]: {reasoning_cfg.get(args.sdk, '(default)')}")
 
@@ -1289,8 +1307,9 @@ def main() -> None:
             # Also submit evals for any already-solved passes from a previous run
             # that weren't just solved now (e.g. --force was not set and they had
             # result.json already).  These passes were NOT re-solved in this run so
-            # we respect skip_if_complete (force_eval=False) — if their eval is
-            # already good, no reason to re-run it.
+            # we usually respect skip_if_complete. However, if a pass is currently
+            # invalid for scoring (e.g. stale eval infra_error) and has no rerun
+            # trajectory signal, force a fresh eval so it can recover.
             if eval_exec is not None:
                 for uid, mode, pass_idx in sorted(pending_pass_keys - submitted_eval_keys):
                     pass_dir = run_dir / uid / mode / f"pass_{pass_idx}"
@@ -1298,8 +1317,14 @@ def main() -> None:
                     # Timeout solves write result.json with sdk_error and no patch;
                     # those must be rerun in solve, not fed to eval.
                     if result_is_complete(pass_dir):
+                        if pass_has_rerun_signal(pass_dir):
+                            # Rerun-signal passes should be repaired in solve.
+                            continue
+                        needs_fresh_eval = args.force or (
+                            (not args.skip_eval) and (not pass_is_valid_for_scoring(pass_dir))
+                        )
                         eval_job = {"uid": uid, "mode": mode, "pass_index": pass_idx}
-                        ef = eval_exec.submit(eval_one, eval_job, False)
+                        ef = eval_exec.submit(eval_one, eval_job, needs_fresh_eval)
                         eval_futures[ef] = eval_job
                         submitted_eval_keys.add((uid, mode, pass_idx))
 
@@ -1356,7 +1381,7 @@ def main() -> None:
                     "mode": mode,
                     "agent": args.sdk,
                     "model": model,
-                    "with_custom_tool": bool(args.with_custom_tool if args.sdk in {"claude", "codex"} else False),
+                    "with_custom_tool": bool(args.with_custom_tool if args.sdk in {"claude", "codex", "antigravity"} else False),
                     "with_skill": (args.with_skill or "__none__"),
                     "with_ask_guidance": (args.with_ask_guidance or "__none__"),
                     "pass_index": pass_idx,

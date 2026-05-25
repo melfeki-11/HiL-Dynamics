@@ -34,7 +34,6 @@ Usage:
   python3 scripts/build_harness_images.py --p-set private             # 50 private tasks only
   python3 scripts/build_harness_images.py --sdk claude                # explicit claude
   python3 scripts/build_harness_images.py --sdk codex --p-set public  # codex, public only
-  python3 scripts/build_harness_images.py --sdk all --p-set private   # all 4 SDKs, private only
   python3 scripts/build_harness_images.py --uids 69bc1094... 69a9... 69c6...
   python3 scripts/build_harness_images.py --workers 4                 # parallel builds
   python3 scripts/build_harness_images.py --force                     # rebuild even if present
@@ -75,6 +74,10 @@ SDK_REGISTRY: dict[str, tuple[str, Path]] = {
     "opencode": (
         "hilbench-swe-harness-opencode",
         ROOT / "docker" / "Dockerfile.harness",   # shared; opencode CLI already in npm package.json
+    ),
+    "antigravity": (
+        "hilbench-swe-harness-antigravity",
+        ROOT / "docker" / "Dockerfile.harness",   # shared; google-antigravity conditional on SDK=antigravity
     ),
 }
 DEFAULT_SDK = "claude"
@@ -128,9 +131,39 @@ def ensure_node_runtime_platform() -> None:
         sys.exit(f"ERROR: failed to pull {NODE_RUNTIME_PLATFORM} {NODE_RUNTIME_IMAGE}")
 
 
+def _read_pip_config_value(key: str) -> str:
+    """Best-effort read of host pip config value (empty string on failure)."""
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "config", "get", key],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def _resolve_build_pip_indexes() -> tuple[str, str]:
+    """Resolve index URLs for docker build pip installs.
+
+    Priority:
+      1) Environment variables (PIP_INDEX_URL / PIP_EXTRA_INDEX_URL)
+      2) Host pip config (global.index-url / global.extra-index-url)
+    """
+    index_url = os.environ.get("PIP_INDEX_URL", "").strip()
+    extra_index_url = os.environ.get("PIP_EXTRA_INDEX_URL", "").strip()
+    if not index_url:
+        index_url = _read_pip_config_value("global.index-url")
+    if not extra_index_url:
+        extra_index_url = _read_pip_config_value("global.extra-index-url")
+    return index_url, extra_index_url
+
+
 def build_harness_image(
     uid: str, base_image: str, force: bool,
     image_prefix: str, dockerfile: Path, sdk: str,
+    pip_index_url: str = "", pip_extra_index_url: str = "",
 ) -> tuple[str, bool, str]:
     """Build a harness image for a single task.  Returns (uid, success, message)."""
     harness_image = f"{image_prefix}:{uid}"
@@ -153,11 +186,16 @@ def build_harness_image(
         "-f", str(dockerfile),
         ".",
     ]
+    if pip_index_url:
+        cmd[2:2] = ["--build-arg", f"TH_PIP_INDEX_URL={pip_index_url}"]
+    if pip_extra_index_url:
+        cmd[2:2] = ["--build-arg", f"TH_PIP_EXTRA_INDEX_URL={pip_extra_index_url}"]
     build_env = os.environ.copy()
     build_env.setdefault("DOCKER_BUILDKIT", "0")
     result = subprocess.run(cmd, cwd=str(ROOT), env=build_env, capture_output=True, text=True)
     if result.returncode != 0:
-        msg = f"docker build failed:\n{result.stderr[-2000:]}"
+        combined_tail = (result.stdout or "") + ("\n" if result.stdout else "") + (result.stderr or "")
+        msg = f"docker build failed:\n{combined_tail[-4000:]}"
         print(f"  [{uid}] ERROR: {msg}", flush=True)
         return uid, False, msg
 
@@ -207,7 +245,7 @@ def main() -> None:
     parser.add_argument(
         "--sdk", choices=[*list(SDK_REGISTRY), "all"], default=DEFAULT_SDK,
         help=f"Agent SDK to build harness for (default: {DEFAULT_SDK}). "
-             "Use 'all' to build all SDK harnesses (claude/codex/adk/opencode). "
+             "Use 'all' to build all SDK harnesses (claude/codex/adk/opencode/antigravity). "
              f"Supported: {', '.join(SDK_REGISTRY)}.",
     )
     parser.add_argument("--uids", nargs="+", metavar="UID",
@@ -250,6 +288,11 @@ def main() -> None:
 
     workers = args.workers if args.workers is not None else min(len(target_tasks), 2)
     total_jobs = len(target_tasks) * len(selected_sdks)
+    pip_index_url, pip_extra_index_url = _resolve_build_pip_indexes()
+    if pip_index_url:
+        print("Build pip index: configured (from env/pip config)")
+    else:
+        print("Build pip index: default (image/runtime pip config)")
     ensure_node_runtime_platform()
     print(
         f"Building harness images for {len(target_tasks)} task(s) across "
@@ -272,6 +315,8 @@ def main() -> None:
                 image_prefix=image_prefix,
                 dockerfile=dockerfile,
                 sdk=sdk_name,
+                pip_index_url=pip_index_url,
+                pip_extra_index_url=pip_extra_index_url,
             )
             return uid, ok, f"[sdk={sdk_name}] {msg}"
 

@@ -21,11 +21,9 @@ Supported harness configs:
 |---|---|---|
 | `claude` | `claude-opus-4-7` | `xhigh` |
 | `codex` | `gpt-5.5` | `xhigh` |
-| `adk` | `gemini/gemini-3.1-pro` | `high` |
+| `adk` | `gemini/gemini-3.1-pro-preview-customtools` | `high` |
 | `opencode` | `fireworks_ai/glm-5p1` | `high` |
-| `opencode_claude` | `claude-opus-4-7` | `xhigh` |
-| `opencode_codex` | `gpt-5.5` | `xhigh` |
-| `opencode_gemini` | `gemini/gemini-3.1-pro` | `high` |
+| `antigravity` | `gemini/gemini-3.5-flash` | `high` |
 
 Gemini uses `high` because that is the highest supported reasoning-effort setting for the configured Gemini 3.1 Pro route.
 
@@ -102,6 +100,8 @@ Optional overrides (defaults shown):
 # CLAUDE_MODEL="claude-opus-4-7"
 # ASK_HUMAN_BASE_URL="<defaults to LITELLM_BASE_URL/v1>"
 ```
+
+The local credentials file under `../litellm/LOCAL_LITELLM_CREDENTIALS.env` is supported by the runner for private local use, but it must stay gitignored and must never be committed.
 
 **2. Ingest benchmark tasks**
 

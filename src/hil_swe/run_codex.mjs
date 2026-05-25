@@ -178,6 +178,66 @@ function codexApiEnv({ sidecarUrl = "" } = {}) {
   };
 }
 
+const TOKEN_LIMIT_CODES = new Set([
+  "contextwindowexceeded",
+  "max_output_tokens",
+  "max_tokens",
+  "token_limit",
+  "context_length_exceeded",
+  "length",
+]);
+
+function _normalizeCode(value) {
+  return String(value || "").trim().toLowerCase().replace(/[^a-z0-9_]+/g, "_");
+}
+
+function isTokenLimitStructured(value, depth = 0) {
+  if (depth > 7 || value == null) return false;
+  if (typeof value === "string") return TOKEN_LIMIT_CODES.has(_normalizeCode(value));
+  if (Array.isArray(value)) return value.some((item) => isTokenLimitStructured(item, depth + 1));
+  if (typeof value !== "object") return false;
+  for (const [k, v] of Object.entries(value)) {
+    const key = String(k || "").toLowerCase();
+    if (
+      key === "codexerrorinfo" ||
+      key === "error" ||
+      key === "details" ||
+      key === "additionaldetails"
+    ) {
+      if (isTokenLimitStructured(v, depth + 1)) return true;
+    }
+    if (
+      key === "code" ||
+      key === "type" ||
+      key === "subtype" ||
+      key === "reason" ||
+      key === "stop_reason" ||
+      key === "stopreason" ||
+      key === "finish_reason" ||
+      key === "finishreason" ||
+      key === "errorcode" ||
+      key === "error_code"
+    ) {
+      if (TOKEN_LIMIT_CODES.has(_normalizeCode(v))) return true;
+    }
+  }
+  return false;
+}
+
+function isTokenLimitError(text) {
+  const s = String(text || "").toLowerCase();
+  if (!s) return false;
+  return (
+    s.includes("contextwindowexceeded") ||
+    s.includes("max_output_tokens") ||
+    s.includes("max output token") ||
+    s.includes("max_tokens") ||
+    s.includes("token limit") ||
+    s.includes("context window") ||
+    s.includes("context length")
+  );
+}
+
 
 // ── JsonRpcProcess ────────────────────────────────────────────────────────────
 //
@@ -457,10 +517,20 @@ function extractMcpResultEvents(result) {
  *
  * Item IDs are tracked to avoid emitting duplicate steps from update notifications.
  */
-function extractCodexTrajectorySteps(events) {
+function extractCodexTrajectorySteps(events, { stopReason = "", sdkErrorMsg = "" } = {}) {
   const steps = [];
   const emittedItemIds = new Set();
+  const pendingByItemId = new Map();
   let currentThought = "";
+
+  const interruptedObs = () => {
+    let obs = "[no observation — tool call was interrupted]";
+    const sr = String(stopReason || "").trim();
+    if (sr) obs += ` (stop_reason=${sr})`;
+    const firstLine = String(sdkErrorMsg || "").trim().split("\n")[0] || "";
+    if (firstLine) obs += ` (${cap(firstLine, 300)})`;
+    return obs;
+  };
 
   for (const ev of events) {
     // ── Ask/answer pairs from requestUserInput handling ───────────────────────
@@ -558,9 +628,19 @@ function extractCodexTrajectorySteps(events) {
     if (itemType === "command_execution") {
       // eslint-disable-next-line eqeqeq
       const done = item.exitCode != null || item.exit_code != null;
-      if (!done) continue;
+      if (!done) {
+        if (itemId && !pendingByItemId.has(itemId)) {
+          pendingByItemId.set(itemId, {
+            thought: currentThought,
+            act: cap(item.command || "", ACT_CAP),
+          });
+          currentThought = "";
+        }
+        continue;
+      }
       if (itemId && emittedItemIds.has(itemId)) continue;
       if (itemId) emittedItemIds.add(itemId);
+      if (itemId) pendingByItemId.delete(itemId);
 
       const output = item.aggregatedOutput ?? item.aggregated_output ?? "";
       steps.push({
@@ -593,9 +673,22 @@ function extractCodexTrajectorySteps(events) {
     // MCP tool call — emit when completed or failed
     if (itemType === "mcp_tool_call") {
       const done = item.status === "completed" || item.status === "failed";
-      if (!done) continue;
+      if (!done) {
+        if (itemId && !pendingByItemId.has(itemId)) {
+          const toolName = mcpToolName(item);
+          let act = `${toolName}: ${safeJson(item.arguments || {})}`;
+          if (toolName === "human_input.ask_human") {
+            const q = readAskQuestionFromValue(item?.arguments);
+            act = `ask_human [custom_tool] ${q}`;
+          }
+          pendingByItemId.set(itemId, { thought: currentThought, act: cap(act, ACT_CAP) });
+          currentThought = "";
+        }
+        continue;
+      }
       if (itemId && emittedItemIds.has(itemId)) continue;
       if (itemId) emittedItemIds.add(itemId);
+      if (itemId) pendingByItemId.delete(itemId);
 
       const toolName = mcpToolName(item);
       let act = `${toolName}: ${safeJson(item.arguments || {})}`;
@@ -611,6 +704,14 @@ function extractCodexTrajectorySteps(events) {
       currentThought = "";
       continue;
     }
+  }
+
+  for (const pending of pendingByItemId.values()) {
+    steps.push({
+      thought: pending.thought || "",
+      act: pending.act || "",
+      obs: interruptedObs(),
+    });
   }
 
   return steps.map((step) => {
@@ -906,7 +1007,9 @@ async function runCodexAppServer({ prompt, env, uid, sidecarUrl, pushEvent, abor
 
         if ((msg.method === "error" || msg.method === "turn/error") &&
             !msg.params?.willRetry) {
-          settle(new Error(`Codex app-server error: ${JSON.stringify(msg.params)}`));
+          const err = new Error(`Codex app-server error: ${JSON.stringify(msg.params)}`);
+          if (isTokenLimitStructured(msg.params)) err.__tokenLimit = true;
+          settle(err);
         }
       },
     });
@@ -1072,11 +1175,13 @@ async function main() {
   // attempt gets its own sidecar so native requestUserInput and explicit MCP
   // ask_human calls share the same backend path without stale event leakage.
   let sdkError = null;
+  let stopReason = "complete";
   const MAX_RETRIES = STEP_LITELLM_TRIES;
   const _runStart = Date.now();
 
   for (let _attempt = 1; _attempt <= MAX_RETRIES; _attempt++) {
     sdkError = null;
+    stopReason = "complete";
     allEvents.length = 0;   // clear in-place so pushEvent closure remains valid
 
     const PER_ATTEMPT_TIMEOUT_MS = LITELLM_CALL_TIMEOUT_MS;
@@ -1084,6 +1189,7 @@ async function main() {
     const attemptTimeout = Math.min(remainingMs, PER_ATTEMPT_TIMEOUT_MS);
     if (attemptTimeout <= 0) {
       sdkError = `Timed out after ${TIMEOUT_MS}ms`;
+      stopReason = "timeout";
       pushEvent({ type: "sdk_error", timestamp: new Date().toISOString(), error: sdkError });
       break;
     }
@@ -1111,10 +1217,19 @@ async function main() {
       await runCodexAppServer({ prompt, env, uid, sidecarUrl, pushEvent, abortController });
     } catch (err) {
       const text = redactString(String(err?.stack || err));
-      sdkError = abortController.signal.aborted
-        ? `Timed out after ${PER_ATTEMPT_TIMEOUT_MS}ms.\n\n${text}`
-        : text;
-      pushEvent({ type: "sdk_error", timestamp: new Date().toISOString(), error: sdkError });
+      if (abortController.signal.aborted) {
+        sdkError = `Timed out after ${PER_ATTEMPT_TIMEOUT_MS}ms.\n\n${text}`;
+        stopReason = "timeout";
+        pushEvent({ type: "sdk_error", timestamp: new Date().toISOString(), error: sdkError });
+      } else if (err?.__tokenLimit || isTokenLimitStructured(err) || isTokenLimitError(text)) {
+        sdkError = null;
+        stopReason = "token_limit";
+        pushEvent({ type: "token_limit_reached", timestamp: new Date().toISOString(), detail: text });
+      } else {
+        sdkError = text;
+        stopReason = "sdk_error";
+        pushEvent({ type: "sdk_error", timestamp: new Date().toISOString(), error: sdkError });
+      }
     } finally {
       // Collect custom-tool ask_human events from the sidecar so stats/trajectory
       // use the same human_input_* event stream as other harnesses.
@@ -1148,7 +1263,10 @@ async function main() {
 
   // 7. Post-process: extract trajectory + compute stats
   pushEvent({ type: "attempt_end", timestamp: new Date().toISOString(), uid, patch_bytes: Buffer.byteLength(patch), sdk_error: sdkError || null });
-  const trajectorySteps = extractCodexTrajectorySteps(allEvents);
+  const trajectorySteps = extractCodexTrajectorySteps(allEvents, {
+    stopReason,
+    sdkErrorMsg: sdkError || "",
+  });
 
   let numBlockersTotal = 0;
   try {
@@ -1171,6 +1289,7 @@ async function main() {
     pass_index:  PASS_INDEX,
     harness:     "codex",
     model:       CODEX_MODEL,
+    stop_reason: stopReason,
     sdk_error:   sdkError || null,
     patch_bytes: Buffer.byteLength(patch),
     ended_at:    new Date().toISOString(),
