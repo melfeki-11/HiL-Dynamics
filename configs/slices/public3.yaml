@@ -1,5 +1,8 @@
-# 3 public HiL-Bench SWE tasks drawn from public12 for base matrix validation.
-uids_file: data/hil_swe_public3_uids.txt
+# 3 public HiL-Bench SWE tasks for quick validation runs.
+uids:
+  - 698139c7dc5e90df07566a6c
+  - 69bc1094b455a91fa20fb868
+  - 69bcc6360c872b9773cce01d
 modes:
   - full_info
   - neutral

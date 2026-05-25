@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Build trust_horizon harness Docker images on top of each hilbench-swe task image.
+Build HiL-Dynamics harness Docker images on top of each hilbench-swe task image.
 
 For each ingested task (read from data/hil_bench_swe/tasks_index.json), this script:
   1. Checks whether the harness image already exists (skips if so)
   2. Runs: docker build --build-arg BASE_IMAGE=<image_name> \\
                         -t <harness_image_prefix>:<uid> \\
                         -f docker/<Dockerfile> .
-  from the trust_horizon root directory.
+  from the HiL-Dynamics root directory.
 
 SDK-specific harness images
 ---------------------------
@@ -241,7 +241,7 @@ def filter_tasks_by_pset(tasks: list[dict], p_set: str) -> list[dict]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Build trust_horizon harness Docker images for ingested HiL-bench SWE tasks."
+        description="Build HiL-Dynamics harness Docker images for ingested HiL-bench SWE tasks."
     )
     parser.add_argument(
         "--sdk", choices=[*list(SDK_REGISTRY), "all"], default=DEFAULT_SDK,

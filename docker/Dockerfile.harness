@@ -1,8 +1,8 @@
-# Trust Horizon Harness Image
+# HiL-Dynamics Harness Image
 #
 # Extends any hilbench-swe:<uid> task image with:
 #   - Node.js 20 runtime
-#   - All trust_horizon npm dependencies (agent SDKs + CLIs) pre-installed
+#   - All HiL-Dynamics npm dependencies (agent SDKs + CLIs) pre-installed
 #   - google-adk[extensions] Python package (ADK SDK only, via --build-arg SDK=adk)
 #
 # At build time:
@@ -13,12 +13,12 @@
 #
 # At run time, bind-mount the harness source (so code changes don't need rebuilds):
 #   docker run --rm --network host \
-#     -v /path/to/trust_horizon/src:/opt/trust_horizon/src:ro \
-#     -v /path/to/trust_horizon/scripts:/opt/trust_horizon/scripts:ro \
+#     -v /path/to/HiL-Dynamics/src:/opt/hil_dynamics/src:ro \
+#     -v /path/to/HiL-Dynamics/scripts:/opt/hil_dynamics/scripts:ro \
 #     -v <output_dir>:/output \
 #     -e TASK_UID=<uid> -e MODE=ask_human -e ... \
 #     hilbench-swe-harness-<sdk>:<uid> \
-#     node /opt/trust_horizon/src/hil_swe/run_claude.mjs
+#     node /opt/hil_dynamics/src/hil_swe/run_claude.mjs
 
 ARG BASE_IMAGE
 FROM --platform=linux/amd64 node:20-bookworm-slim AS node_runtime
@@ -93,7 +93,7 @@ RUN if [ "${SDK}" = "codex" ]; then \
 
 # ── OpenCode musl/glibc compatibility (OpenCode SDK only) ────────────────────
 # OpenCode's bundled runtime binary is glibc-linked. On Alpine/musl task images,
-# install compatibility shims so /opt/trust_horizon/node_modules/opencode-ai/bin/.opencode
+# install compatibility shims so /opt/hil_dynamics/node_modules/opencode-ai/bin/.opencode
 # can execute instead of failing with ENOENT from missing loader/symbols.
 RUN if [ "${SDK}" = "opencode" ]; then \
         if command -v apk >/dev/null 2>&1; then \
@@ -101,17 +101,17 @@ RUN if [ "${SDK}" = "opencode" ]; then \
         fi; \
     fi
 
-# ── Trust Horizon npm deps ────────────────────────────────────────────────────
+# ── HiL-Dynamics npm deps ────────────────────────────────────────────────────
 # Copy only package manifests first for layer caching.
 # Source files are bind-mounted at runtime — rebuilds are only needed when
 # package.json / package-lock.json change (i.e. SDK version bumps).
-WORKDIR /opt/trust_horizon
+WORKDIR /opt/hil_dynamics
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev 2>&1
 
 # Expose node_modules/.bin on PATH so harness subprocesses can call
 # `codex`, `opencode`, etc. by name without full paths.
-ENV PATH="/opt/trust_horizon/node_modules/.bin:${PATH}"
+ENV PATH="/opt/hil_dynamics/node_modules/.bin:${PATH}"
 
 # ── Claude Code CLI ───────────────────────────────────────────────────────────
 # The agent SDK spawns the `claude` binary as a subprocess.  Install it
@@ -126,7 +126,7 @@ RUN npm install -g @anthropic-ai/claude-code@2.1.139 2>&1 || \
 # Python 3 is already present in SWE-agent task images.
 #
 # Install strategy:
-#   • Always build a dedicated ADK virtualenv at /opt/trust_horizon/.venv-adk.
+#   • Always build a dedicated ADK virtualenv at /opt/hil_dynamics/.venv-adk.
 #     This guarantees a stable ADK runtime (including skills APIs) without
 #     mutating the task image's system python environment.
 #   • Keep task python untouched so agent bash commands like "python3 -m pytest"
@@ -161,7 +161,7 @@ RUN set -e; if [ "${SDK}" = "adk" ]; then \
             fi; \
             echo "ADK: using python at ${ADK_BASE_PY}"; \
         fi; \
-        ADK_VENV="/opt/trust_horizon/.venv-adk"; \
+        ADK_VENV="/opt/hil_dynamics/.venv-adk"; \
         if ! "${ADK_BASE_PY}" -m venv "${ADK_VENV}"; then \
             if command -v apt-get >/dev/null 2>&1; then \
                 apt-get update -qq && apt-get install -y --no-install-recommends python3-venv || true; \

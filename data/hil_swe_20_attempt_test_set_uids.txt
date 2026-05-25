@@ -1,10 +1,6 @@
-# HiL-SWE 20-attempt test set (canonical UIDs)
+# HiL-SWE held-out test set (canonical UIDs)
 # Protocol: 20 UIDs x 3 passes; ask_human mode
-#
 # HELD-OUT TEST SET — DO NOT USE FOR TRAINING OR FINE-TUNING
-# These 20 UIDs are drawn from the public HiL-Bench SWE task pool.
-# They must be excluded from any model training, fine-tuning, or prompt
-# development workflow. Contamination will invalidate reported pass@k metrics.
 69a7a4d1617c0b97d4d6aacd
 69a9e77602049c14d2793bb5
 69b1031f73a8f5979167a774

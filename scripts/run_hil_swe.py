@@ -1,5 +1,5 @@
 """
-Host-side orchestrator for trust_horizon HiL-SWE runs.
+Host-side orchestrator for HiL-Dynamics HiL-SWE runs.
 
 Runs the full pipeline in one shot:
   Phase 1 — Solve:    spin up harness containers in parallel; each produces patch.diff + trajectory
@@ -233,7 +233,7 @@ TEMPLATES_DIR = SRC_DIR / "hil_swe" / "templates"
 SDK_CONFIGS = {
     "claude": {
         "harness_image_prefix": "hilbench-swe-harness-claude",
-        "entrypoint":           "/opt/trust_horizon/src/hil_swe/run_claude.mjs",
+        "entrypoint":           "/opt/hil_dynamics/src/hil_swe/run_claude.mjs",
         "model_env_key":        "CLAUDE_MODEL",
         "default_model":        "claude-opus-4-7",
         "executable_env":       "CLAUDE_CODE_EXECUTABLE=claude",
@@ -241,14 +241,14 @@ SDK_CONFIGS = {
     },
     "codex": {
         "harness_image_prefix": "hilbench-swe-harness-codex",
-        "entrypoint":           "/opt/trust_horizon/src/hil_swe/run_codex.mjs",
+        "entrypoint":           "/opt/hil_dynamics/src/hil_swe/run_codex.mjs",
         "model_env_key":        "CODEX_MODEL",
         "default_model":        "gpt-5.5",
         "executable_env":       "CODEX_CODE_EXECUTABLE=codex",
     },
     "adk": {
         "harness_image_prefix": "hilbench-swe-harness-adk",
-        "entrypoint":           "/opt/trust_horizon/src/hil_swe/run_adk.py",
+        "entrypoint":           "/opt/hil_dynamics/src/hil_swe/run_adk.py",
         "model_env_key":        "ADK_MODEL",
         "default_model":        "gemini/gemini-3.1-pro",
         "executable_env":       "ADK_SUPPRESS_GEMINI_LITELLM_WARNINGS=true",
@@ -262,7 +262,7 @@ SDK_CONFIGS = {
     },
     "opencode": {
         "harness_image_prefix": "hilbench-swe-harness-opencode",
-        "entrypoint":           "/opt/trust_horizon/src/hil_swe/run_opencode.mjs",
+        "entrypoint":           "/opt/hil_dynamics/src/hil_swe/run_opencode.mjs",
         "model_env_key":        "OPENCODE_MODEL",
         "default_model":        "fireworks_ai/glm-5p1",
         # Suppress auto-update banner; belt-and-suspenders with autoupdate:false in config
@@ -271,7 +271,7 @@ SDK_CONFIGS = {
     },
     "antigravity": {
         "harness_image_prefix": "hilbench-swe-harness-antigravity",
-        "entrypoint":           "/opt/trust_horizon/src/hil_swe/run_antigravity.py",
+        "entrypoint":           "/opt/hil_dynamics/src/hil_swe/run_antigravity.py",
         "model_env_key":        "ANTIGRAVITY_MODEL",
         "default_model":        "gemini/gemini-3.5-flash",
         "executable_env":       "ANTIGRAVITY_AGENT_ENV=container",
@@ -748,7 +748,7 @@ def _run_attempt_inner(
         # task data (read-only)
         "-v", f"{task_dir.resolve()}:/task:ro",
         # harness source (read-only) — changes don't need image rebuilds
-        "-v", f"{SRC_DIR.resolve()}:/opt/trust_horizon/src:ro",
+        "-v", f"{SRC_DIR.resolve()}:/opt/hil_dynamics/src:ro",
         # output (read-write)
         "-v", f"{out_dir.resolve()}:/output",
         *env_args,
@@ -874,7 +874,7 @@ def build_job_list(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Run trust_horizon HiL-SWE attempts via Docker containers."
+        description="Run HiL-Dynamics HiL-SWE attempts via Docker containers."
     )
     parser.add_argument("--run-id", required=True, help="Unique run identifier (used as output directory name).")
     uid_group = parser.add_mutually_exclusive_group(required=True)
@@ -913,7 +913,7 @@ def main() -> None:
         "--env-file", metavar="PATH",
         help=(
             "Path to a .env file with LiteLLM credentials "
-            "(default: auto-discovers trust_horizon/.env or hil_bench/.env)."
+            "(default: auto-discovers HiL-Dynamics/.env or hil_bench/.env)."
         ),
     )
     parser.add_argument(

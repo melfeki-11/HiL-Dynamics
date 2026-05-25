@@ -9,8 +9,7 @@ const execFileAsync = promisify(execFile);
 export const rootDir = path.resolve(new URL("../..", import.meta.url).pathname);
 export const autonomyCalibrationRoot = process.env.AUTONOMY_CALIBRATION_ROOT || "";
 
-// Find the credentials .env file.  Check locations in priority order so the
-// right file is picked up on any developer's machine or in CI without extra setup:
+// Find the credentials .env file.  Check locations in priority order:
 //   1. LITELLM_CREDENTIALS_FILE env var (explicit override)
 //   2. trust_horizon/.env  (conventional location in this repo)
 //   3. ../litellm/LOCAL_LITELLM_CREDENTIALS.env for the local dev checkout
@@ -36,7 +35,7 @@ export const DEFAULT_CODEX_MODEL = "gpt-5.5";
 export const DEFAULT_CODEX_REASONING_EFFORT = "xhigh";
 export const DEFAULT_OPENCODE_MODEL = "fireworks_ai/glm-5p1";
 export const DEFAULT_OPENCODE_PROVIDER = "litellm";
-export const DEFAULT_ASK_HUMAN_MODEL = "llmengine/llama-3-3-70b-instruct";
+export const DEFAULT_ASK_HUMAN_MODEL = "";
 export const DEFAULT_ASK_HUMAN_SEED = 20260501;
 export const AWS_SECRET_ID = process.env.LITELLM_AWS_SECRET_ID || process.env.AWS_SECRET_ID || "";
 export const AWS_REGION = process.env.AWS_REGION || "";

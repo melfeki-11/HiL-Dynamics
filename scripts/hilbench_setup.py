@@ -1,5 +1,5 @@
 """
-hilbench setup — pre-flight checker for Escalation Lens / HiL-Bench runs.
+hilbench setup — pre-flight checker for HiL-Dynamics / HiL-Bench runs.
 
 Verifies that all required tools, credentials, data, and Docker images are in
 place before launching a benchmark run.
@@ -174,7 +174,8 @@ def check_ask_human_judge(env: dict[str, str], env_path: Path | None) -> bool:
     run_env.update(env)
     if env_path:
         run_env.setdefault("LITELLM_CREDENTIALS_FILE", str(env_path))
-    run_env.setdefault("ASK_HUMAN_MODEL", "llmengine/llama-3-3-70b-instruct")
+    if not run_env.get("ASK_HUMAN_MODEL"):
+        raise RuntimeError("ASK_HUMAN_MODEL is not set. Configure it in .env (see .env.example).")
     cmd = ["node", "tests/judge_calibration/run.mjs", "--quick"]
     result = subprocess.run(cmd, cwd=ROOT, env=run_env, capture_output=True, text=True, timeout=180)
     if result.returncode == 0:
@@ -271,7 +272,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    print(f"\n{_BOLD}Escalation Lens — setup check{_RESET}\n")
+    print(f"\n{_BOLD}HiL-Dynamics — setup check{_RESET}\n")
 
     results: list[bool] = []
 

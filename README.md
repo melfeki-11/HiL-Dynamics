@@ -1,6 +1,6 @@
-# Escalation Lens: Diagnosing Ask Behavior Across Agent Harnesses
+# HiL-Dynamics
 
-Escalation Lens is a HiL-Bench diagnostic: it measures how `<model, harness>` pairs behave on under-specified coding tasks — when they ask for clarification, when they silently guess, and whether their questions actually resolve the blockers that block progress.
+HiL-Dynamics is a HiL-Bench diagnostic: it measures how `<model, harness>` pairs behave on under-specified coding tasks — when they ask for clarification, when they silently guess, and whether their questions actually resolve the blockers that block progress.
 
 The tool runs a prepared benchmark task through pluggable harnesses, collects structured trajectories, and computes ask precision/recall/F1 alongside pass@k. The output shows how far each `<agent, harness>` pair is from the *selective escalation* ideal: asking exactly when needed, with questions that resolve actual blockers.
 
@@ -21,11 +21,9 @@ Supported harness configs:
 |---|---|---|
 | `claude` | `claude-opus-4-7` | `xhigh` |
 | `codex` | `gpt-5.5` | `xhigh` |
-| `adk` | `gemini/gemini-3.1-pro` | `high` |
+| `adk` | `gemini/gemini-3.1-pro-preview-customtools` | `high` |
 | `opencode` | `fireworks_ai/glm-5p1` | `high` |
-| `opencode_claude` | `claude-opus-4-7` | `xhigh` |
-| `opencode_codex` | `gpt-5.5` | `xhigh` |
-| `opencode_gemini` | `gemini/gemini-3.1-pro` | `high` |
+| `antigravity` | `gemini/gemini-3.5-flash` | `high` |
 
 Gemini uses `high` because that is the highest supported reasoning-effort setting for the configured Gemini 3.1 Pro route.
 
@@ -52,22 +50,6 @@ result.json       solve outcome
 eval_result.json  test pass/fail
 ```
 
-## Quickstart
-
-```bash
-# 1. Check your setup on the small public subset
-./bin/hilbench setup --sdk claude --slice public3
-
-# 2. Preview the generated Docker/run command
-./bin/hilbench run --harness claude --slice public3 --arm neutral --dry-run
-
-# 3. Run a smoke only when the setup gate is green
-./bin/hilbench run --harness claude --slice public3 --arm neutral
-
-# 4. Generate a report
-./bin/hilbench analyze --run-id <run-id printed in step 3>
-```
-
 ## Prerequisites
 
 - Docker (running)
@@ -87,20 +69,36 @@ pip install litellm boto3 pandas pytest tqdm pyyaml
 cp .env.example .env
 ```
 
-Open `.env` and fill in:
+Open `.env` and fill in the required fields:
 
 ```bash
+# LiteLLM proxy — recommended when running multiple harnesses
 LITELLM_BASE_URL="https://<your-litellm-endpoint>"
 LITELLM_API_KEY="sk-..."
+
+# HuggingFace token — needed to pull task Docker base images
 HF_TOKEN="hf_..."
+
+# Judge model — required for neutral and skill arms
+# Any instruction-tuned model your LiteLLM proxy serves works.
+# Paper results used: meta-llama/Llama-3.3-70B-Instruct
+ASK_HUMAN_MODEL="<your-judge-model>"
 ```
+
+If you have a direct API key rather than a LiteLLM proxy, you can omit `LITELLM_BASE_URL` and use provider-specific variables instead:
+
+| Provider | Variables |
+|---|---|
+| Anthropic | `ANTHROPIC_AUTH_TOKEN=sk-ant-...` and `ANTHROPIC_BASE_URL=https://api.anthropic.com` |
+| OpenAI | `OPENAI_API_KEY=sk-...` and `OPENAI_BASE_URL=https://api.openai.com/v1` |
+
+The tool resolves credentials in this priority order: `LITELLM_API_KEY` → `ANTHROPIC_AUTH_TOKEN` → `OPENAI_API_KEY`. A LiteLLM proxy is recommended when running multiple harnesses (claude + codex + gemini) from a single endpoint.
 
 Optional overrides (defaults shown):
 
 ```bash
 # CLAUDE_MODEL="claude-opus-4-7"
 # ASK_HUMAN_BASE_URL="<defaults to LITELLM_BASE_URL/v1>"
-# ASK_HUMAN_MODEL="llmengine/llama-3-3-70b-instruct"
 ```
 
 The local credentials file under `../litellm/LOCAL_LITELLM_CREDENTIALS.env` is supported by the runner for private local use, but it must stay gitignored and must never be committed.
@@ -108,7 +106,15 @@ The local credentials file under `../litellm/LOCAL_LITELLM_CREDENTIALS.env` is s
 **2. Ingest benchmark tasks**
 
 ```bash
-python3 scripts/ingest_hil_swe.py --uid-file data/hil_swe_public12_uids.txt
+# Ingest the local 12-task validation subset (~2–5 min)
+python3 scripts/ingest_hil_swe.py --uids $(python3 -c "
+import yaml
+c = yaml.safe_load(open('configs/slices/public12.yaml'))
+print(' '.join(c['uids']))
+")
+
+# Or ingest all 100 public tasks at once
+python3 scripts/ingest_hil_swe.py --p-set public
 ```
 
 This branch starts with 12 public HiL-Bench SWE tasks for local testing. `public3` is the fast smoke slice; `public12` is the local validation slice. Avoid running `test20` while iterating on prompts/skills.
@@ -116,8 +122,19 @@ This branch starts with 12 public HiL-Bench SWE tasks for local testing. `public
 **3. Build Docker harness images**
 
 ```bash
-# Build images for all harnesses on the local 12-task subset
-python3 scripts/build_harness_images.py --sdk all --uids $(grep -v '^#' data/hil_swe_public12_uids.txt) --workers 2
+# Build the claude harness for the 3-task smoke subset (~3–5 min)
+python3 scripts/build_harness_images.py --sdk claude --uids $(python3 -c "
+import yaml
+c = yaml.safe_load(open('configs/slices/public3.yaml'))
+print(' '.join(c['uids']))
+") --workers 3
+
+# Or build all harnesses for the local 12-task validation subset (~20–40 min)
+python3 scripts/build_harness_images.py --sdk all --uids $(python3 -c "
+import yaml
+c = yaml.safe_load(open('configs/slices/public12.yaml'))
+print(' '.join(c['uids']))
+") --workers 2
 ```
 
 **4. Verify setup**
@@ -142,6 +159,24 @@ Expected output when everything is ready:
 All checks passed. Ready to run.
 ```
 
+## Quickstart
+
+After completing First-Time Setup, run a smoke check in 4 commands (~30–60 min total):
+
+```bash
+# 1. Check your setup on the small public subset
+./bin/hilbench setup --sdk claude --slice public3
+
+# 2. Preview the generated Docker/run command
+./bin/hilbench run --harness claude --slice public3 --arm neutral --dry-run
+
+# 3. Run the smoke (~30–60 min)
+./bin/hilbench run --harness claude --slice public3 --arm neutral
+
+# 4. Generate a report
+./bin/hilbench analyze --run-id <run-id printed in step 3>
+```
+
 ## Running a Benchmark
 
 ### Smoke test — 3 tasks, 1 pass (~30–60 min per harness)
@@ -150,19 +185,19 @@ All checks passed. Ready to run.
 ./bin/hilbench run --harness claude --slice public3
 ```
 
-### Held-out 20-task test set — 3 passes
+### Held-out 20-task test set — 3 passes (~3–6 hr per harness)
 
 ```bash
 ./bin/hilbench run --harness claude --slice test20 --allow-test-set
 ```
 
-### Train split — 80 public tasks, 3 passes
+### Train split — 80 public tasks, 3 passes (~12–24 hr per harness)
 
 ```bash
 ./bin/hilbench run --harness claude --slice train80
 ```
 
-### Full public set — 100 tasks, 3 passes
+### Full public set — 100 tasks, 3 passes (~15–30 hr per harness)
 
 ```bash
 ./bin/hilbench run --harness claude --slice full_public
@@ -190,6 +225,37 @@ For same-model OpenCode comparisons:
 ./bin/hilbench run --harness claude --slice public3 --dry-run
 ```
 
+## Reproducing Paper Results
+
+The paper evaluates four harnesses on the 20-task held-out test set, 3 passes each, across the `neutral`, `skill`, and `full_info` arms. The judge model must be `meta-llama/Llama-3.3-70B-Instruct` to match the published ask-F1 numbers.
+
+**Step 1 — Ingest all public tasks:**
+
+```bash
+python3 scripts/ingest_hil_swe.py --p-set public
+```
+
+**Step 2 — Build harness images for all 100 public UIDs (~2–4 hr at workers=4):**
+
+```bash
+python3 scripts/build_harness_images.py --sdk all --p-set public --workers 4
+```
+
+**Step 3 — Run each harness on the held-out test set (~3–6 hr per harness):**
+
+```bash
+# Run harnesses in parallel if you have enough resources
+for harness in claude codex adk opencode; do
+  ./bin/hilbench run --harness $harness --slice test20 --allow-test-set
+done
+```
+
+**Step 4 — Generate a report for each run:**
+
+```bash
+./bin/hilbench analyze --run-id <run-id>
+```
+
 ## Configuration Files
 
 Harness and slice configs live in `configs/`:
@@ -207,7 +273,7 @@ configs/
   slices/
     public3.yaml     3 UIDs,  1 pass  (quick validation)
     public12.yaml    12 UIDs, 1 pass  (local validation subset)
-    smoke.yaml       3 UIDs,  1 pass  (legacy alias/smoke slice)
+    smoke.yaml       3 UIDs,  1 pass  (smoke slice)
     train80.yaml     80 UIDs, 3 passes (skill-development split)
     test20.yaml      20 UIDs, 3 passes (held-out; requires --allow-test-set)
     full_public.yaml 100 UIDs, 3 passes (full public partition)
@@ -250,14 +316,23 @@ Writes two files to `runs/<run-id>/`:
 
 ## Ask-Human Judge
 
-The `neutral` and `skill` arms route the agent's clarification questions through an LLM judge that matches them against the task's blocker registry. The default judge is the paper-compatible Llama route exposed through LiteLLM:
+The `neutral` and `skill` arms route the agent's clarification questions through an LLM judge that matches them against the task's blocker registry. **`ASK_HUMAN_MODEL` is required for these arms** — there is no built-in default.
+
+Set it in your `.env`:
 
 ```bash
-ASK_HUMAN_BASE_URL="<defaults to LITELLM_BASE_URL/v1>"
-ASK_HUMAN_MODEL="llmengine/llama-3-3-70b-instruct"
+ASK_HUMAN_MODEL="meta-llama/Llama-3.3-70B-Instruct"
+# Any instruction-tuned model your LiteLLM proxy serves works.
+# To use a separate endpoint: also set ASK_HUMAN_BASE_URL="https://<endpoint>/v1"
 ```
 
+The paper results were produced with `meta-llama/Llama-3.3-70B-Instruct` served via LiteLLM. Any instruction-tuned model that can follow a structured JSON output schema will work, but reproducing the paper numbers requires the same judge model.
+
+If you use a hosted provider (Together AI, Fireworks, Groq, etc.) that exposes an OpenAI-compatible endpoint, set both `ASK_HUMAN_BASE_URL` and `ASK_HUMAN_MODEL` to that provider's values.
+
 `./bin/hilbench setup --strict` runs a live judge calibration probe and fails if the judge is unreachable or does not return the expected canonical responses.
+
+`ASK_HUMAN_MODEL` is not required for `full_info`-only runs (the judge is not invoked in that arm).
 
 ## Clarification Routing
 
@@ -363,8 +438,10 @@ python3 scripts/run_hil_swe.py \
 # Solve only (skip eval and metrics)
 python3 scripts/run_hil_swe.py --run-id pilot --uids ... --skip-eval --skip-metrics
 
-# Train split for skill iteration
+# Train split for skill iteration (80 public UIDs)
 python3 scripts/run_hil_swe.py --run-id train80-neutral --uids $(grep -v '^#' data/hil_swe_80_remaining_public_uids.txt) --modes neutral --passes 3
+# Or equivalently via the hilbench CLI:
+# ./bin/hilbench run --harness claude --slice train80 --arm neutral
 
 # All 100 public tasks
 python3 scripts/run_hil_swe.py --run-id pub100 --p-set public --modes neutral skill full_info --passes 3

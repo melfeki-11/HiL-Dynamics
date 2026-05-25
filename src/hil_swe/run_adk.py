@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Google ADK harness for trust_horizon HiL-SWE runs.
+Google ADK harness for HiL-Dynamics HiL-SWE runs.
 
 Runs a Google ADK (LlmAgent + LiteLlm) agent against a SWE-bench task and
-writes the standard trust_horizon output files to OUTPUT_DIR:
+writes the standard HiL-Dynamics output files to OUTPUT_DIR:
 
   attempt.json     — run metadata and prompt
   trajectory.json  — [{thought, act, obs}, ...]  (SWE-agent compatible)
@@ -416,7 +416,7 @@ def _build_instruction(mode: str) -> str:
 
 # ── Sidecar management ────────────────────────────────────────────────────────
 
-# Sidecar script path: the canonical in-container path is /opt/trust_horizon/src/hil_swe/
+# Sidecar script path: the canonical in-container path is /opt/hil_dynamics/src/hil_swe/
 # ask_human_sidecar.mjs.  At test-time we resolve relative to this file so tests
 # run without a container.
 _SIDECAR_SCRIPT = str(
@@ -1175,11 +1175,11 @@ async def main() -> None:
         session_service = InMemorySessionService()
         runner          = Runner(
             agent=agent,
-            app_name="trust_horizon_swe",
+            app_name="hil_dynamics_swe",
             session_service=session_service,
         )
         session = await session_service.create_session(
-            app_name="trust_horizon_swe",
+            app_name="hil_dynamics_swe",
             user_id="swe_user",
         )
         run_config = RunConfig(max_llm_calls=MAX_STEPS) if MAX_STEPS > 0 else RunConfig()
