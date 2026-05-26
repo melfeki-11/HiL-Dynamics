@@ -7,12 +7,12 @@ The tool runs a prepared benchmark task through pluggable harnesses, collects st
 ```mermaid
 quadrantChart
     title Agent Ask Behavior on Under-Specified Tasks
-    x-axis Silent --> Over-asks
-    y-axis Wrong outcomes --> Correct outcomes
-    quadrant-1 Asks too much
-    quadrant-2 Selective escalation
-    quadrant-3 Silently wrong
-    quadrant-4 Lucky guesser
+    x-axis Fails --> Succeeds
+    y-axis Doesn't ask --> Asks when needed
+    quadrant-1 Good Agent — Selective escalation
+    quadrant-2 Over-Asks — Noisy, slower than manual
+    quadrant-3 Confident Hallucination — The dangerous quadrant
+    quadrant-4 Lucky Guess — Fragile, not reliable
 ```
 
 Supported harness configs:
