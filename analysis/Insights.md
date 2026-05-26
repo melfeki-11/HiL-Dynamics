@@ -1,6 +1,4 @@
-# HiL-Dynamics Narrative Working Draft: Understanding Agents That Don't Know What They Don't Know
-
-This is a rough coauthor-facing draft, not final prose. The goal is to merge the current figure-backed analysis with the newer tool/skill-in-the-loop framing quickly enough that others can revise, correct labels, and decide which figures to keep. Structure follows the public blog's three-finding backbone; supporting detail beyond what the blog has space for is preserved here.
+# HiL-Dynamics Narrative
 
 ## Introducing HiL-Dynamics
 
