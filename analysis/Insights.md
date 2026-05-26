@@ -110,39 +110,17 @@ The custom-skill sweep surfaced six non-leaking dimensions that independently st
 
 ### Harnesses respond to skills differently
 
-There is no universal best template. Different harnesses start from different priors. **Claude-Code is structurally conservative** — its default behavior is silence, its failure mode is under-asking, and across all our experiments its natural questions-per-pass sits between `0.21` and `2.45`. **Codex is more permissive** — its default behavior is spray, its failure mode is over-asking, and across the same experiments its natural questions-per-pass sits between `0.50` (`example1_`) and `4.66` (`example4_`).
+Beyond just better performance, we uncovered interesting responses to different skill techniques. Providing guidance about when to ask for help intuitively bettered performance, but surprisingly, not providing guidance about how to formulate a relevant question that would get answered. Emotionally leveraging the agents’ trained desire to fulfill requests with strong language that they would fail to do so if they don’t ask also yielded some performance boost.
 
-That baseline divergence propagates through every lever. As a simple case study: with a given set of skill modifications — a stronger ask mandate (escalating to "MUST use skill multiple times"), removal of the per-pass question cap, and a bad/good question filter (i.e. ruling out "how to implement X?" in favor of "what is the return type of X?") — Claude-Code increased its questions-per-pass by **147%**, while Codex's improvement was a mere **16%**. On the other hand, what really triggered Codex's improvement was providing it the custom `ask_human()` tool *in addition to* its native tool; skill modifications had less influence.
+However, as tunable as skills are, one important note is that no one skill yielded the maximal improvement from the default harness baseline for all agents. A skill that excels on one harness can even degrade performance on another. For example, Claude-Code and Codex have almost opposite asking priors, with the former being more open to asking questions. 
 
-Comparing `example9_` against `example7_`, the same template changes moved Claude's questions per pass far more than Codex's. Skill engineering is per-harness, not one-size-fits-all prompting.
+One skill variant we tried was removing the codebase escape hatch, — replacing the gate's permission to self-resolve ("cannot resolve it from the codebase") with a strict no-inference clause ("even implicit answers are not good enough"); this gave Claude-Code an +22% improvement in pass@3 due to it clarifying more blockers., However,but for Codex, it had zero effect since pass@3 held flat at 0.533, confirming the escape hatch never governed Codex's asking behavior. 
 
-Draft design rules:
+Another variant was strengthening the asking mandate and gate (example 4), which drastically improved Codex's pass@3 by +630% (0.073→0.533) with a near-10x increase in avg questions/pass (0.5→4.7), whilebut for Claude-Code produced a far more modest response; — avg questions/pass rose only +0.9 (vs Codex's +4.2), and pass@3 reached only 0.120, confirming that Claude modulates even strong mandate text against its inference priors. 
 
-- Diagnose the harness prior by measuring questions/pass on a vanilla template.
-- For conservative harnesses, push procedurally: wider gate, stronger mandate, enumerate-first pre-ask sequence.
-- For permissive harnesses, use precision levers: question-quality examples, COMBINE, clearer artifact anchors.
-- Don't stack every "ask more" rule into permissive harnesses — it inflates noise.
-- Treat COMBINE as a broadly useful precision lever.
-- Optimize the skill for the harness you care about, and expect different harnesses to need different skills.
+It would seem that Codex is much more responsive to mandate and gate volume settings, while Claude-Code relies a lot more on controlling its inference escape hatch. Our findings suggest that skill engineering should be calibrated per harness rather than applied uniformly. 
 
-### Skill evolution notes
-
-> **Working notes for coauthors; candidate for appendix or removal before any external draft.** `Alina` refers to a reference prompt-skill template used as a comparison baseline (TODO: gloss or rename before any external version). The `smoke*` shards (e.g., `smoke10`, `smoke40`, `smoke50b`, `smoke50c`) are internal task-set names and also need glossing.
-
-These ablation notes are merged from the latest skill-in-the-loop draft. Validate against final experiment tables before public use.
-
-**Full-run path, examples 1 → 4 → 7 → 9:**
-
-- `example1_ → example4_` — Moved every lever toward "ask more, ask better": wider Gate, stronger Mandate, enumerate-first Pre-Ask Sequence, COMBINE, explicit artifact anchors, tighter Search Budget, plus a quantity floor and ceiling. Biggest metric jump, but methodologically tainted — quantity hints leak the benchmark blocker distribution.
-- `example4_ → example7_` — Removed the floor with other levers held constant. Claude questions/pass and recall dropped; Codex barely moved. The floor was doing real recall work for Claude, and counts as leakage.
-- `example7_ → example9_` — Removed the ceiling and adopted Alina's most aggressive non-leaking settings: wide Gate, strong Mandate, bad/good question quality scaffolding, five-step Search Budget, plus our Pre-Ask Sequence and COMBINE. Recall recovered, precision dropped, F1 landed close to Alina's.
-- `example9_` vs Alina — Our additions appear to improve operational solve rate (especially for Codex) at some F1 cost. Under-tapped levers — Pre-Ask Sequence, COMBINE, artifact-anchor scaffolding — can lift pass@k even when they don't maximize F1.
-
-**Smoke-test path, examples 1 – 10:**
-
-- `example1_` — Diagnoses what kills recall: narrow Gate plus search-first behavior gives high precision but very low recall.
-- `example2_` – `example6_` — Find what wins F1 but cheats: the best headline template uses quantity hints that leak blocker distribution.
-- `example7_` – `example10_` — De-leak. `example9_` is the current full-run non-leaking template. `example10_` strengthens COMBINE with a worked canonical-decision example and is the first smoke result noted as beating Alina on Codex F1.
+Overall, even with the best performance we could achieve with careful enhancements, all agents still showcase a great performance gap compared to when they are provided all information upfront.
 
 ## Finding 3: Agents Show Different Problem-Solving Patterns
 
