@@ -25,7 +25,7 @@ We compare four conditions — see the Conditions table below. The headline figu
 | `Full_Info` | Missing context supplied up front; agents do not need to ask. | Finding 1 (upper-bound control) |
 | `native` | Native ask affordance only — `AskUserQuestion` (Claude-Code), `requestUserInput` (Codex/Antigravity), or the custom `ask_human()` MCP for ADK/OpenCode. No skill or escalation guidance beyond harness defaults. | Findings 1, 2, 3 |
 | `tool/guidance` | Native plus the shared escalation guidance package in the system prompt; Claude-Code and Codex additionally get a custom `ask_human()` MCP tool. | Findings 2, 3 |
-| `custom skill` | Tuned `skill9` template (Claude-Code and Codex only), layered on top of `tool/guidance`. | Findings 2, 3 |
+| `custom skill` | Tuned `skill` template (Claude-Code and Codex only), layered on top of `tool/guidance`. | Findings 2, 3 |
 
 TODO: confirm whether `baseline` is strictly the default system prompt or already includes minimal escalation framing — this determines whether Finding 1's gap is reported as native-harness behavior or a partially-instructed baseline.
 
