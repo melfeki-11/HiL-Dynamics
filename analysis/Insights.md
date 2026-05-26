@@ -78,8 +78,6 @@ The constructive punchline: HiL-Bench is useful not only as a benchmark, but as 
 
 We provided Claude-Code and Codex with thorough, well-written skill and escalation guidance in the system prompt, plus a custom `ask_human()` MCP tool — hypothesizing that the custom tool would be free from the bounds of their native training or prompting restrictions. The results are much better, with all SDKs showing significant improvement. All agents ask much more frequently, and Claude-Code and Codex utilize the custom tool more effectively than they do their native tool.
 
-Our current custom-skill runs are the first concrete intervention. They use four `example9` shards (`skill_smoke10`, `smoke40`, `smoke50b`, `smoke50c`). The latest regeneration evaluates all three passes cleanly for all 150 custom-skill tasks on both Codex and Claude. The only remaining infra errors in ingested native runs are four OpenCode baseline pass rows.
-
 ![Customization effects on pass@3](figures/16_custom_skill_metric_lift.png)
 
 | system | clean tasks | pass@1 | pass@3 | Ask Precision | Blocker Recall | ask-F1 | avg questions |
