@@ -10,6 +10,7 @@ This project compares real native harness behavior, so the adapters are intentio
 | `codex.yaml` | `gpt-5.5` | `xhigh` |
 | `adk.yaml` | `gemini/gemini-3.1-pro` | `high` |
 | `opencode.yaml` | `fireworks_ai/glm-5p1` | `high` |
+| `antigravity.yaml` | `gemini/gemini-3.5-flash` | `high` |
 | `opencode_claude.yaml` | `claude-opus-4-7` | `xhigh` |
 | `opencode_codex.yaml` | `gpt-5.5` | `xhigh` |
 | `opencode_gemini.yaml` | `gemini/gemini-3.1-pro` | `high` |
@@ -34,12 +35,13 @@ The user-facing question surfaces differ by harness, but they now converge on th
 
 | Harness | Question surface(s) | Backend |
 |---|---|---|
-| Claude Code | Native `AskUserQuestion` plus explicit `human_input.ask_human` MCP in `neutral`/`skill` | `ask_human_sidecar.mjs` |
-| Codex | Native `requestUserInput` plus explicit `human_input.ask_human` MCP in `neutral`/`skill` | `ask_human_sidecar.mjs` |
+| Claude Code | Native `AskUserQuestion`; optional explicit `human_input.ask_human` custom tool | `ask_human_sidecar.mjs` |
+| Codex | Native `requestUserInput`; optional explicit `human_input.ask_human` custom tool | `ask_human_sidecar.mjs` |
 | ADK | Python `ask_human` function tool | `ask_human_sidecar.mjs` |
 | OpenCode | MCP `human_input.ask_human` | `ask_human_sidecar.mjs` |
+| Antigravity | Native ask surface; optional explicit `human_input.ask_human` custom tool | `ask_human_sidecar.mjs` |
 
-For Claude/Codex, `WITH_CUSTOM_TOOL=0` can hide the explicit MCP tool while preserving native question interception. Reports should still distinguish native vs. MCP calls in trajectory `act` strings (`[native]` vs. `[custom_mcp]`), but both count as clarification attempts when they reach the sidecar.
+For Claude/Codex/Antigravity, `WITH_CUSTOM_TOOL=0` hides the explicit custom tool while preserving native question interception. Reports distinguish surfaces in trajectory `act` strings (`[native]` vs. `[custom_tool]`), but both count as clarification attempts when they reach the sidecar.
 
 ## ADK
 
@@ -51,6 +53,8 @@ OpenCode is evaluated both with its configured open model (`fireworks_ai/glm-5p1
 
 The OpenCode LiteLLM shim exposes per-run proxy diagnostics, including upstream status counts, stripped parameter counts, recent upstream errors, LLM request count, and token usage when the upstream response includes `usage`.
 
-## Skill Arm
+## Arm Presets
 
-The `skill` arm differs from `neutral` only by installing the domain-general clarification skill. The system/developer prompt does not include the old `ask_human_guidance.txt` text unless `ASK_HUMAN_GUIDANCE=1` is explicitly set for a diagnostic run.
+- `default`: `ask_human` mode only.
+- `enhanced`: `ask_human` mode plus skill + guidance templates (+ custom tool where supported).
+- `full_info`: `full_info` mode; sidecar ask path disabled.

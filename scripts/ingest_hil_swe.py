@@ -79,7 +79,6 @@ def _optional_env_path(name: str) -> Path | None:
     return Path(raw).expanduser() if raw else None
 
 
-PUBLIC_UIDS_CSV = _optional_env_path("HIL_BENCH_PUBLIC_UIDS_CSV")
 PRIVATE_UIDS_CSV = _optional_env_path("HIL_BENCH_PRIVATE_UIDS_CSV")
 _EXTRA_ENV = _optional_env_path("LITELLM_CREDENTIALS_FILE")
 
@@ -610,6 +609,8 @@ def main() -> None:
                        help="CSV file with attempt_id column.")
     group.add_argument(
         "--uid-file",
+        "--uid_file",
+        dest="uid_file",
         type=Path,
         metavar="PATH",
         help="Text file with one attempt UID per line (# comments allowed).",
@@ -620,8 +621,8 @@ def main() -> None:
         default="public",
         help=(
             "Partition set used by --all. "
-            "'public' uses swe_delivered_tasks_and_attempts_PUBLIC.csv, "
-            "'private' requires HIL_BENCH_PRIVATE_UIDS_CSV to be set."
+            "'public' is sourced from the HF dataset, "
+            "'private' uses HIL_BENCH_PRIVATE_UIDS_CSV when available."
         ),
     )
     parser.add_argument("--skip-if-exists", action="store_true", default=True,
@@ -638,11 +639,6 @@ def main() -> None:
     if not token:
         print("Warning: No HF token found. Set HF_TOKEN env var or run `huggingface-cli login`.")
 
-    public_csv_rows = (
-        load_csv_rows_by_uid(PUBLIC_UIDS_CSV)
-        if PUBLIC_UIDS_CSV is not None and PUBLIC_UIDS_CSV.exists()
-        else {}
-    )
     private_csv_rows = (
         load_csv_rows_by_uid(PRIVATE_UIDS_CSV)
         if PRIVATE_UIDS_CSV is not None and PRIVATE_UIDS_CSV.exists()
@@ -653,11 +649,8 @@ def main() -> None:
     if args.all:
         target_uids: list[str] = []
         if args.p_set in {"public", "both"}:
-            if public_csv_rows:
-                target_uids.extend(public_csv_rows.keys())
-            else:
-                preloaded_hf_rows = load_hf_dataset(token)
-                target_uids.extend(str(row["uid"]) for row in preloaded_hf_rows)
+            preloaded_hf_rows = load_hf_dataset(token)
+            target_uids.extend(str(row["uid"]) for row in preloaded_hf_rows)
         if args.p_set in {"private", "both"}:
             target_uids.extend(private_csv_rows.keys())
     elif args.csv:
@@ -677,8 +670,9 @@ def main() -> None:
 
     # Determine whether we need HF rows at all.
     # Private-only runs can avoid loading HF entirely.
+    rows_by_uid = {}
     def _source_hint(uid: str) -> str:
-        in_public = uid in public_csv_rows
+        in_public = uid in rows_by_uid
         in_private = uid in private_csv_rows
         if in_public and not in_private:
             return "hf"
@@ -692,10 +686,11 @@ def main() -> None:
 
     hints = {uid: _source_hint(uid) for uid in target_uids}
     need_hf = any(h in {"hf", "unknown"} for h in hints.values())
-    rows_by_uid: dict[str, dict[str, Any]] = {}
     if need_hf:
         swe_rows = preloaded_hf_rows if preloaded_hf_rows is not None else load_hf_dataset(token)
         rows_by_uid = {str(r["uid"]): r for r in swe_rows}
+        # Source hints depend on HF membership, so recompute after rows are loaded.
+        hints = {uid: _source_hint(uid) for uid in target_uids}
 
     work_items: list[WorkItem] = []
     unresolved: list[str] = []

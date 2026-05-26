@@ -1,20 +1,16 @@
 """
-hilbench run — launch a HiL-Bench benchmark run from YAML config files.
+hilbench run — launch a HiL-Bench benchmark run.
 
-Reads a harness config and a slice config, translates them into run_hil_swe.py
-arguments, and calls the orchestrator via subprocess (keeping logging isolation).
+Primary interface:
+  - choose a harness config (`--harness`)
+  - choose a target set directly (`--p-set`, `--uids`, or `--uid-file`)
+  - choose an arm preset (`--arm`)
 
 Usage:
-  python3 scripts/hilbench_run.py --harness claude --slice smoke
-  python3 scripts/hilbench_run.py --harness claude --slice test20 --dry-run
-  python3 scripts/hilbench_run.py \\
-      --harness configs/harnesses/claude.yaml \\
-      --slice configs/slices/smoke.yaml \\
-      --run-id my-first-run
-
-The --harness and --slice arguments accept either:
-  - a short name (e.g. "claude", "smoke") resolved relative to configs/
-  - a path to a .yaml file (absolute or relative to repo root)
+  python3 scripts/hilbench_run.py --harness claude --p-set public --arm default
+  python3 scripts/hilbench_run.py --harness codex --uids UID1 UID2 --arm full_info
+  python3 scripts/hilbench_run.py --harness claude --uid-file data/hil_swe_20_attempt_test_set_uids.txt --arm default
+  python3 scripts/hilbench_run.py --harness claude --p-set both --arm enhanced
 """
 
 from __future__ import annotations
@@ -68,6 +64,49 @@ def _load_yaml(path: Path) -> dict:
     return data
 
 
+def _build_arm_settings(
+    arm: str,
+    *,
+    sdk: str,
+    skill_template: str | None,
+    guidance_template: str | None,
+) -> dict[str, object]:
+    """Map user-facing arm presets to run_hil_swe.py arguments/env behavior."""
+    if arm == "default":
+        return {
+            "modes": ["ask_human"],
+            "with_custom_tool": False,
+            "with_skill": None,
+            "with_ask_guidance": None,
+        }
+    if arm == "full_info":
+        return {
+            "modes": ["full_info"],
+            "with_custom_tool": False,
+            "with_skill": None,
+            "with_ask_guidance": None,
+        }
+
+    # arm == "enhanced"
+    if not skill_template or not guidance_template:
+        raise ValueError(
+            "--arm enhanced requires both --skill-template and --guidance-template."
+        )
+    return {
+        "modes": ["ask_human"],
+        # custom tool only exists as a distinct toggle on these SDKs
+        "with_custom_tool": sdk in {"claude", "codex", "antigravity"},
+        "with_skill": skill_template,
+        "with_ask_guidance": guidance_template,
+    }
+
+
+def _auto_run_id(sdk: str, target_name: str) -> str:
+    ts = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
+    stem = Path(target_name).stem
+    return f"{sdk}_{stem}_{ts}"
+
+
 def _load_uids_file(path_value: str) -> list[str]:
     path = Path(path_value)
     if not path.is_absolute():
@@ -83,22 +122,14 @@ def _load_uids_file(path_value: str) -> list[str]:
     return uids
 
 
-def _auto_run_id(sdk: str, slice_name: str) -> str:
-    ts = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
-    stem = Path(slice_name).stem  # handles both "smoke" and "configs/slices/smoke.yaml"
-    return f"{sdk}_{stem}_{ts}"
-
-
 def build_argv(
     harness: dict,
-    slice_cfg: dict,
+    run_spec: dict,
     run_id: str,
     *,
-    allow_test_set: bool = False,
     model_override: str | None = None,
-    arm_override: str | None = None,
 ) -> list[str]:
-    """Translate harness + slice YAML dicts into run_hil_swe.py argv."""
+    """Translate harness + run-spec dicts into run_hil_swe.py argv."""
     sdk = harness.get("sdk", "claude")
     argv: list[str] = [
         sys.executable,
@@ -119,9 +150,9 @@ def build_argv(
         argv += ["--reasoning-effort", str(effort)]
 
     # UIDs or p_set (mutually exclusive in run_hil_swe.py)
-    uids = slice_cfg.get("uids")
-    uids_file = slice_cfg.get("uids_file")
-    p_set = slice_cfg.get("p_set")
+    uids = run_spec.get("uids")
+    uids_file = run_spec.get("uids_file")
+    p_set = run_spec.get("p_set")
     if uids_file:
         argv += ["--uids"] + _load_uids_file(str(uids_file))
     elif uids:
@@ -129,34 +160,43 @@ def build_argv(
     elif p_set:
         argv += ["--p-set", str(p_set)]
     else:
-        raise ValueError("Slice config must specify either 'uids' or 'p_set'")
+        raise ValueError("Run target must specify one of: uids, uid-file, or p-set.")
 
-    # Modes
-    modes = [arm_override] if arm_override else slice_cfg.get("modes", ["ask_human"])
-    argv += ["--modes"] + [str(m) for m in modes]
+    # Arm preset -> modes + enhancement flags
+    arm_name = str(run_spec.get("arm") or "default")
+    arm_settings = _build_arm_settings(
+        arm_name,
+        sdk=sdk,
+        skill_template=run_spec.get("skill_template"),
+        guidance_template=run_spec.get("guidance_template"),
+    )
+    argv += ["--modes"] + [str(m) for m in arm_settings["modes"]]
+    if arm_settings["with_custom_tool"]:
+        argv.append("--with-custom-tool")
+    if arm_settings["with_skill"]:
+        argv += ["--with-skill", str(arm_settings["with_skill"])]
+    if arm_settings["with_ask_guidance"]:
+        argv += ["--with-ask-guidance", str(arm_settings["with_ask_guidance"])]
 
     # Passes
-    passes = slice_cfg.get("passes")
+    passes = run_spec.get("passes")
     if passes is not None:
         argv += ["--passes", str(passes)]
 
     # Workers
-    workers = slice_cfg.get("workers")
+    workers = run_spec.get("workers")
     if workers is not None:
         argv += ["--workers", str(workers)]
 
     # Max steps
-    max_steps = slice_cfg.get("max_steps")
+    max_steps = run_spec.get("max_steps")
     if max_steps is not None:
         argv += ["--max-steps", str(max_steps)]
 
-    if slice_cfg.get("held_out") and not allow_test_set:
-        raise ValueError("Slice is marked held_out; pass --allow-test-set to run it.")
-
     # Phase skips
-    if slice_cfg.get("skip_eval"):
+    if run_spec.get("skip_eval"):
         argv.append("--skip-eval")
-    if slice_cfg.get("skip_metrics"):
+    if run_spec.get("skip_metrics"):
         argv.append("--skip-metrics")
 
     return argv
@@ -164,7 +204,7 @@ def build_argv(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Launch a HiL-Bench run from YAML config files.",
+        description="Launch a HiL-Bench run from harness config + run target flags.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -174,16 +214,29 @@ def main() -> int:
         metavar="NAME_OR_PATH",
         help="Harness config name (e.g. claude) or path to a .yaml file.",
     )
-    parser.add_argument(
-        "--slice",
-        required=True,
-        metavar="NAME_OR_PATH",
-        help="Slice config name (e.g. smoke, test20) or path to a .yaml file.",
+    target_group = parser.add_mutually_exclusive_group(required=True)
+    target_group.add_argument(
+        "--p-set",
+        choices=["public", "private", "both"],
+        help="Run all ingested tasks from a partition.",
+    )
+    target_group.add_argument(
+        "--uids",
+        nargs="+",
+        metavar="UID",
+        help="Run a specific list of task UIDs.",
+    )
+    target_group.add_argument(
+        "--uid-file",
+        "--uid_file",
+        dest="uid_file",
+        metavar="PATH",
+        help="Text file with one UID per line (# comments allowed).",
     )
     parser.add_argument(
         "--run-id",
         default=None,
-        help="Override the auto-generated run-id (default: <sdk>_<slice>_<timestamp>).",
+        help="Override the auto-generated run-id.",
     )
     parser.add_argument(
         "--model",
@@ -192,14 +245,36 @@ def main() -> int:
     )
     parser.add_argument(
         "--arm",
-        choices=["ask_human", "full_info"],
-        default=None,
-        help="Run a single experimental arm, overriding slice modes.",
+        choices=["default", "enhanced", "full_info"],
+        default="default",
+        help=(
+            "Preset arm: "
+            "default=ask_human, "
+            "enhanced=ask_human + skill + guidance (+ custom tool where supported), "
+            "full_info=full_info mode."
+        ),
     )
     parser.add_argument(
-        "--allow-test-set",
-        action="store_true",
-        help="Allow running a slice marked held_out: true.",
+        "--skill-template",
+        default="examples_ask_human_skill",
+        help="Template basename for --arm enhanced (expects src/hil_swe/templates/<name>.md).",
+    )
+    parser.add_argument(
+        "--guidance-template",
+        default="examples_ask_human_guidance",
+        help="Template basename for --arm enhanced (expects src/hil_swe/templates/<name>.txt).",
+    )
+    parser.add_argument(
+        "--passes",
+        type=int,
+        default=3,
+        help="Number of passes per task (default: 3).",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="Max concurrent solve workers.",
     )
     parser.add_argument(
         "--dry-run",
@@ -209,21 +284,32 @@ def main() -> int:
     args = parser.parse_args()
 
     harness_path = _resolve_config(args.harness, "harnesses")
-    slice_path   = _resolve_config(args.slice,   "slices")
-
     harness_cfg = _load_yaml(harness_path)
-    slice_cfg   = _load_yaml(slice_path)
-
     sdk = harness_cfg.get("sdk", "claude")
-    run_id = args.run_id or _auto_run_id(sdk, args.slice)
+    run_target_name = args.p_set or "uids"
+    run_id = args.run_id or _auto_run_id(sdk, str(run_target_name))
+
+    run_spec: dict[str, object] = {}
+    if args.p_set:
+        run_spec["p_set"] = args.p_set
+    elif args.uid_file:
+        run_spec["uids_file"] = args.uid_file
+    else:
+        run_spec["uids"] = args.uids or []
+
+    # CLI choices define run behavior.
+    run_spec["arm"] = args.arm
+    run_spec["skill_template"] = args.skill_template
+    run_spec["guidance_template"] = args.guidance_template
+    run_spec["passes"] = args.passes
+    if args.workers is not None:
+        run_spec["workers"] = args.workers
 
     argv = build_argv(
         harness_cfg,
-        slice_cfg,
+        run_spec,
         run_id,
-        allow_test_set=args.allow_test_set,
         model_override=args.model,
-        arm_override=args.arm,
     )
 
     if args.dry_run:
@@ -233,7 +319,12 @@ def main() -> int:
 
     print(f"Starting run: {run_id}")
     print(f"  harness : {harness_path.name}  ({sdk})")
-    print(f"  slice   : {slice_path.name}")
+    if args.p_set:
+        print(f"  target  : p-set {args.p_set}")
+    elif args.uid_file:
+        print(f"  target  : uid-file {args.uid_file}")
+    else:
+        print(f"  target  : {len(args.uids or [])} explicit uid(s)")
     print(f"  command : {' '.join(argv)}\n")
 
     result = subprocess.run(argv)
