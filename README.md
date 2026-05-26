@@ -9,10 +9,10 @@ quadrantChart
     title Agent Ask Behavior on Under-Specified Tasks
     x-axis Fails --> Succeeds
     y-axis Doesn't ask --> Asks when needed
-    quadrant-1 Good Agent — Selective escalation
-    quadrant-2 Over-Asks — Noisy, slower than manual
-    quadrant-3 Confident Hallucination — The dangerous quadrant
-    quadrant-4 Lucky Guess — Fragile, not reliable
+    quadrant-1 Good Agent
+    quadrant-2 Over-Asks
+    quadrant-3 Confident Hallucination
+    quadrant-4 Lucky Guess
 ```
 
 Supported harness configs:
