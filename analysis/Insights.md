@@ -255,7 +255,3 @@ These need verification before public-facing text:
 | `05_strategy_buckets` | Finding 3b | Cross-system strategy summary | ready |
 | `08_first_ask_timing` | Finding 3b | First-ask timing diagnostic | ready |
 | `04_terminal_evidence_mix` | Finding 3d | Terminal-state decomposition | ready, pending OpenCode caveat |
-
-## Quickstart
-
-TODO: Add public-facing command snippet after final package/API shape is settled.
