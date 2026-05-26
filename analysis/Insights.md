@@ -114,7 +114,7 @@ However, as tunable as skills are, one important note is that no one skill yield
 
 One skill variant we tried was removing the codebase escape hatch, — replacing the gate's permission to self-resolve ("cannot resolve it from the codebase") with a strict no-inference clause ("even implicit answers are not good enough"); this gave Claude-Code an +22% improvement in pass@3 due to it clarifying more blockers., However,but for Codex, it had zero effect since pass@3 held flat at 0.533, confirming the escape hatch never governed Codex's asking behavior. 
 
-Another variant was strengthening the asking mandate and gate (example 4), which drastically improved Codex's pass@3 by +630% (0.073→0.533) with a near-10x increase in avg questions/pass (0.5→4.7), whilebut for Claude-Code produced a far more modest response; — avg questions/pass rose only +0.9 (vs Codex's +4.2), and pass@3 reached only 0.120, confirming that Claude modulates even strong mandate text against its inference priors. 
+Another variant was strengthening the asking mandate and gate, which drastically improved Codex's pass@3 by +630% (0.073→0.533) with a near-10x increase in avg questions/pass (0.5→4.7), whilebut for Claude-Code produced a far more modest response; — avg questions/pass rose only +0.9 (vs Codex's +4.2), and pass@3 reached only 0.120, confirming that Claude modulates even strong mandate text against its inference priors. 
 
 It would seem that Codex is much more responsive to mandate and gate volume settings, while Claude-Code relies a lot more on controlling its inference escape hatch. Our findings suggest that skill engineering should be calibrated per harness rather than applied uniformly. 
 
