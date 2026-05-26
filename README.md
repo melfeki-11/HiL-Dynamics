@@ -50,6 +50,10 @@ result.json       solve outcome
 eval_result.json  test pass/fail
 ```
 
+## Key Findings
+
+See [analysis/Insights.md](analysis/Insights.md) for the full model-harness analysis: how different `<model, harness, skill>` configurations perform on selective escalation, how Ask Precision and Blocker Recall trade off, and what harness interventions move the needle.
+
 ## Prerequisites
 
 - Docker (running)
