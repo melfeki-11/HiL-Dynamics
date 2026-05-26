@@ -5,6 +5,12 @@ HiL-Dynamics is a HiL-Bench diagnostic: it measures how `<model, harness>` pairs
 The tool runs a prepared benchmark task through pluggable harnesses, collects structured trajectories, and computes ask precision/recall/F1 alongside pass@k. The output shows how far each `<model, harness>` pair is from the *selective escalation* ideal: asking exactly when needed, with questions that resolve actual blockers.
 
 ```mermaid
+%%{init: {"quadrantChart": {
+  "quadrant1Fill": "#d4ede9", "quadrant1TextFill": "#2d7d6f",
+  "quadrant2Fill": "#eae6f5", "quadrant2TextFill": "#6b42a0",
+  "quadrant3Fill": "#fde8e6", "quadrant3TextFill": "#8b1a10",
+  "quadrant4Fill": "#fef9e0", "quadrant4TextFill": "#9a7d0a"
+}}}%%
 quadrantChart
     title Agent Ask Behavior on Under-Specified Tasks
     x-axis Fails --> Succeeds
