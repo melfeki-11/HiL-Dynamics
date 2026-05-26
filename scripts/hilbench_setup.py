@@ -5,9 +5,8 @@ Verifies that all required tools, credentials, data, and Docker images are in
 place before launching a benchmark run.
 
 Usage:
-  python3 scripts/hilbench_setup.py --sdk claude --slice smoke
-  python3 scripts/hilbench_setup.py --sdk codex --slice configs/slices/test20.yaml
-  python3 scripts/hilbench_setup.py --sdk claude   # skips image checks
+  python3 scripts/hilbench_setup.py
+  python3 scripts/hilbench_setup.py --strict
 """
 
 from __future__ import annotations
@@ -41,49 +40,6 @@ def _fail(msg: str, fix: str | None = None) -> None:
     print(f"  {_RED}✗{_RESET} {msg}")
     if fix:
         print(f"    → {fix}")
-
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _load_slice_uids(slice_arg: str | None) -> list[str]:
-    """Return UIDs for a given slice name or path.  Returns [] if not given."""
-    if not slice_arg:
-        return []
-    try:
-        import yaml  # type: ignore[import]
-    except ImportError:
-        return []
-    path = _resolve_config(slice_arg, "slices")
-    if not path or not path.exists():
-        return []
-    data = yaml.safe_load(path.read_text()) or {}
-    if data.get("uids_file"):
-        uid_path = Path(str(data["uids_file"]))
-        if not uid_path.is_absolute():
-            uid_path = ROOT / uid_path
-        return [
-            line.strip()
-            for line in uid_path.read_text().splitlines()
-            if line.strip() and not line.strip().startswith("#")
-        ]
-    return [str(u) for u in data.get("uids", [])]
-
-
-def _resolve_config(name: str, kind: str) -> Path | None:
-    """Resolve a harness/slice name to a configs/<kind>/<name>.yaml path."""
-    p = Path(name)
-    if p.suffix == ".yaml":
-        return p if p.is_absolute() else ROOT / p
-    candidate = ROOT / "configs" / kind / f"{name}.yaml"
-    return candidate if candidate.exists() else None
-
-
-def _docker_image_exists(image: str) -> bool:
-    result = subprocess.run(
-        ["docker", "image", "inspect", image],
-        capture_output=True,
-    )
-    return result.returncode == 0
 
 
 # ── Checks ────────────────────────────────────────────────────────────────────
@@ -220,50 +176,12 @@ def check_runs_dir() -> bool:
         return False
 
 
-def check_docker_images(sdk: str, uids: list[str]) -> bool:
-    if not uids:
-        return True
-    prefix_map = {
-        "claude":   "hilbench-swe-harness-claude",
-        "codex":    "hilbench-swe-harness-codex",
-        "adk":      "hilbench-swe-harness-adk",
-        "opencode": "hilbench-swe-harness-opencode",
-        "antigravity": "hilbench-swe-harness-antigravity",
-    }
-    prefix = prefix_map.get(sdk, f"hilbench-swe-harness-{sdk}")
-    all_ok = True
-    for uid in uids:
-        image = f"{prefix}:{uid}"
-        if _docker_image_exists(image):
-            _ok(f"Docker image {image}")
-        else:
-            _fail(
-                f"Docker image not found: {image}",
-                fix=f"python3 scripts/build_harness_images.py --sdk {sdk} --uids {uid}",
-            )
-            all_ok = False
-    return all_ok
-
-
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Pre-flight checker for HiL-Bench runs.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument(
-        "--sdk",
-        choices=["claude", "codex", "adk", "opencode", "antigravity"],
-        default=None,
-        help="Agent SDK to validate images for.",
-    )
-    parser.add_argument(
-        "--slice",
-        default=None,
-        metavar="NAME_OR_PATH",
-        help="Slice config name or path (e.g. smoke, test20, configs/slices/smoke.yaml). "
-             "Used to determine which Docker images to check.",
     )
     parser.add_argument(
         "--strict",
@@ -285,13 +203,6 @@ def main() -> int:
         results.append(check_ask_human_judge(env, env_path))
     results.append(check_tasks_index())
     results.append(check_runs_dir())
-
-    if args.sdk and args.slice:
-        uids = _load_slice_uids(args.slice)
-        if uids:
-            results.append(check_docker_images(args.sdk, uids))
-        else:
-            print(f"  (skipping image check — could not load UIDs from slice '{args.slice}')")
 
     print()
     if all(results):

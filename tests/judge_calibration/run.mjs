@@ -84,6 +84,7 @@ const cases = [
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   ensureLiteLLMEnvLoaded({ required: true });
+  const judgeBaseUrl = process.env.ASK_HUMAN_BASE_URL || "";
   const selectedCases = args.quick ? [cases[0], cases[3]] : cases;
   const results = [];
   for (const c of selectedCases) {
@@ -91,6 +92,7 @@ async function main() {
       request: request(c.question),
       registry,
       modelId: args.model,
+      ...(judgeBaseUrl ? { baseUrl: judgeBaseUrl } : {}),
       cachePath: null,
     });
     results.push({

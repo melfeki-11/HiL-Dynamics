@@ -28,9 +28,10 @@ Commands:
   analyze  Generate report.md and metadata.json for a completed run
 
 Examples:
-  ./bin/hilbench setup --sdk claude --slice smoke
-  ./bin/hilbench run --harness claude --slice smoke
-  ./bin/hilbench run --harness claude --slice test20 --dry-run
+  ./bin/hilbench setup
+  ./bin/hilbench run --harness claude --p-set public --arm default
+  ./bin/hilbench run --harness claude --uid-file data/hil_swe_80_remaining_public_uids.txt --arm default --dry-run
+  ./bin/hilbench run --harness codex --p-set both --arm enhanced --dry-run
   ./bin/hilbench analyze --run-id my-first-run
 
 Run ./bin/hilbench <command> --help for per-command options.

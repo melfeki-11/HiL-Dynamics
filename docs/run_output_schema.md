@@ -8,7 +8,7 @@ All run outputs are written under `runs/`. Nothing in `runs/` is committed to gi
 runs/
   <run_id>/                           e.g. "claude_smoke_20260518_153000"
     <attempt_uid>/                    e.g. "69bc1094b455a91fa20fb868"
-      <mode>/                         "neutral" | "skill" | "full_info" | "no_tool"
+      <mode>/                         "ask_human" | "full_info"
         pass_1/
           attempt.json
           trajectory.json
@@ -46,15 +46,15 @@ A JSON array of steps. Each step:
 Clarification calls are normalized into ordinary steps. The `act` prefix distinguishes the surface:
 
 - `ask_human [native] ...` for Claude `AskUserQuestion` and Codex `requestUserInput`
-- `ask_human [custom_mcp] ...` for explicit MCP `human_input.ask_human`
-- `ask_human ...` for ADK/OpenCode native tool surfaces that already expose that name
+- `ask_human [custom_tool] ...` for explicit custom ask_human tool routing
+- `ask_human [other] ...` for non-primary fallback tool-name paths
 
 The matching `human_input_*` raw events retain the exact native event type:
 ```json
 {
   "type": "human_input_raw_event",
   "request_type": "clarification",
-  "native_event_type": "claude.AskUserQuestion.canUseTool | codex.item/tool/requestUserInput | claude.mcp.ask_human | codex.mcp.ask_human | adk.ask_human",
+  "native_event_type": "claude.AskUserQuestion.canUseTool | codex.item/tool/requestUserInput | claude.mcp.ask_human | codex.mcp.ask_human | adk.ask_human | antigravity.ask_question",
   "question": "<question text>"
 }
 ```
@@ -87,7 +87,7 @@ Empty string if no changes were made.
   "total_tokens": 21600,
   "agent": "claude-code",
   "model": "claude-opus-4-7",
-  "mode": "neutral",
+  "mode": "ask_human",
   "attempt_uid": "69bc1094b455a91fa20fb868",
   "pass_num": 1,
   "run_id": "claude_smoke_20260518_153000",
@@ -101,7 +101,7 @@ Each row is a normalized pass-level record with solve/eval status, ask metrics, 
 ```json
 {
   "uid": "69bc1094b455a91fa20fb868",
-  "mode": "neutral",
+  "mode": "ask_human",
   "agent": "claude",
   "model": "claude-opus-4-7",
   "pass_index": 1,
@@ -121,7 +121,7 @@ Each row is a normalized pass-level record with solve/eval status, ask metrics, 
   "llm_proxy_error_count": 0,
   "llm_proxy_status_counts": {"200": 19},
   "llm_proxy_stripped_params": {"tool_choice": 19},
-  "pass_dir": "runs/<run-id>/<uid>/neutral/pass_1"
+  "pass_dir": "runs/<run-id>/<uid>/ask_human/pass_1"
 }
 ```
 
@@ -134,10 +134,10 @@ Written after all passes for a run_id complete:
     "num_passes": 3,
     "include_partial": false,
     "generated_at": "2026-05-18T22:30:00Z",
-    "formula": "macro/paper ..."
+    "formula": "micro/global totals (resolved = unique blocker IDs per pass)"
   },
   "by_mode_agent_model": {
-    "neutral/claude/claude-opus-4-7": {
+    "ask_human/claude/claude-opus-4-7": {
       "num_attempts": 3,
       "pass_at_1": 0.33,
       "pass_at_3": 0.67,
@@ -160,16 +160,12 @@ Written after all passes for a run_id complete:
 
 ## Metrics Formulas
 
-All ask metrics use the **macro (average-of-ratios)** formula from the HiL-Bench paper
-(matching `paper_pipeline.py`'s `run_paper_pipeline` comments):
+Ask metrics use **micro/global totals** over valid pass rows (matching `scripts/metrics_hil_swe.py`):
 
 ```
-precision_for_pass  = num_blockers_resolved / num_questions   (0 if num_questions == 0)
-recall_for_pass     = num_blockers_resolved / total_num_blockers
-
-ask_precision = mean(precision_for_pass)  across all valid (attempt × pass) pairs
-ask_recall    = mean(recall_for_pass)     across all valid (attempt × pass) pairs
-ask_f1        = mean(f1_for_pass)         where f1 = harmonic mean of per-pass precision/recall
+ask_precision = min(1, sum(num_blockers_resolved) / sum(num_questions))
+ask_recall    = min(1, sum(num_blockers_resolved) / sum(total_num_blockers))
+ask_f1        = harmonic_mean(ask_precision, ask_recall)
 
 pass@k: fraction of attempts where ANY of the first k passes resolved the task
 ```
@@ -186,7 +182,7 @@ Budgets are intentionally unbounded by default. Fairness is audited by reporting
 
 | Field | Description |
 |-------|-------------|
-| `attempt_uid` | The HF dataset `uid` field = the Docker image name suffix = CSV `attempt_id` |
+| `attempt_uid` | The HF dataset `uid` field = the Docker image name suffix |
 | `instance_id` | The HF dataset `task_id` field (e.g. `public_swe_0`) |
 | `num_questions` | Number of times agent invoked `AskUserQuestion` / `ask_human` tool / `requestUserInput` |
 | `num_blockers_resolved` | Number of distinct blocker IDs the LLM judge matched to agent questions |

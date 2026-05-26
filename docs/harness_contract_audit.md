@@ -122,7 +122,7 @@ Before a benchmark run:
 
 ```bash
 npm test
-./bin/hilbench setup --strict --slice public3
+./bin/hilbench setup --strict
 ```
 
 After a generation run:
