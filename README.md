@@ -1,10 +1,10 @@
 # HiL-Dynamics
 
-**HiL-Dynamics is a diagnostic for selective escalation.** It measures whether a coding agent knows to ask for help when it lacks the information to finish a task, or whether it silently guesses and ships the wrong answer.
+**HiL-Dynamics measures how coding agents behave when a task is underspecified.** When critical information is missing (a hidden constraint, a half-spec'd requirement, the one thing the PM never wrote down), does the agent stop and ask, or silently assume and ship the wrong answer?
 
-It is the open-source companion to **[HiL-Bench](https://static.scale.com/uploads/67a153343e046988406ef320/HiL_Bench.pdf)**, the underlying benchmark of human-validated underspecified tasks. HiL-Dynamics runs HiL-Bench across modern harnesses (Claude Code, Codex, Antigravity, ADK, OpenCode), captures full agent trajectories, and reports both *whether* agents finish and *how* they handled the missing information along the way.
+HiL-Dynamics is the open-source companion to **[HiL-Bench](https://static.scale.com/uploads/67a153343e046988406ef320/HiL_Bench.pdf)**, our benchmark of underspecified coding tasks with human-validated blockers. It works across modern harnesses (Claude Code, Codex, Antigravity, ADK, OpenCode), captures full agent trajectories, and reports both *whether* agents finish and *how* they handled the missing information along the way. We call the underlying skill **selective escalation**: knowing what you don't know, and asking before charging ahead with an assumption.
 
-**The headline result.** Frontier agents pass 75-80% of HiL-Bench tasks when given complete information. The same agents pass under 10% the moment 3-5 critical facts are withheld and they are forced to ask. Stronger harnesses don't close the gap, but skill engineering can move it, asymmetrically: Codex jumps from 7% to 53% pass@3 with a tuned skill; Claude Code only moves from 3% to 15% with the same template.
+**The headline result.** Frontier agents pass 75-80% of HiL-Bench tasks when given complete information. The same agents pass under 10% the moment 3-5 critical facts are withheld and they are forced to ask. Stronger harnesses don't close the gap, but skill engineering can move it, asymmetrically: Codex jumps from 7% to 53% pass@3 with a tuned skill, while Claude Code's best tuning only takes it from 3% to 15%.
 
 ![Agent Ask Behavior on Under-Specified Tasks](analysis/figures/quadrant_chart.svg)
 
@@ -53,7 +53,7 @@ eval_result.json  test pass/fail
 See [analysis/Insights.md](analysis/Insights.md) for the full write-up. The three headline results:
 
 1. **The judgment gap survives modern scaffolding.** Stronger harnesses haven't taught agents *when* to ask.
-2. **Skill engineering is a real handle, but a harness-specific one.** The template that lifts Codex from 7% to 53% pass@3 barely moves Claude Code.
+2. **Skill engineering is a real handle, but a harness-specific one.** Skill tuning that lifts Codex from 7% to 53% pass@3 only takes Claude Code from 3% to 15%.
 3. **Every `{harness, model}` we tested has its own failure shape.** There is no universal recipe.
 
 ## Repository layout
@@ -113,7 +113,7 @@ If you have a direct API key rather than a LiteLLM proxy, you can omit `LITELLM_
 | Anthropic | `ANTHROPIC_AUTH_TOKEN=sk-ant-...` and `ANTHROPIC_BASE_URL=https://api.anthropic.com` |
 | OpenAI | `OPENAI_API_KEY=sk-...` and `OPENAI_BASE_URL=https://api.openai.com/v1` |
 
-The tool resolves credentials in this priority order: `LITELLM_API_KEY`, then `ANTHROPIC_AUTH_TOKEN`, then `OPENAI_API_KEY`. A LiteLLM proxy is recommended when running multiple harnesses (claude + codex + gemini) from a single endpoint.
+The tool resolves credentials in this priority order: `LITELLM_API_KEY`, then `ANTHROPIC_AUTH_TOKEN`, then `OPENAI_API_KEY`. A LiteLLM proxy is recommended when running multiple harnesses (e.g. `claude`, `codex`, and `adk`) from a single endpoint.
 
 **2. Ingest benchmark tasks**
 
