@@ -1,11 +1,11 @@
 # HiL-Dynamics: Insights from Running HiL-Bench Across Modern Harnesses
 
-**TL;DR.** Frontier coding agents pass 75-80% of HiL-Bench tasks when given complete information. The same agents collapse to under 10% the moment 3-5 critical facts are withheld and they are forced to ask. That gap doesn't close with stronger harnesses, but it does respond, asymmetrically, to skill engineering: Codex jumps from 7% to 53% pass@3 with a tuned skill, while Claude Code only moves from 3% to 15% with the same template. HiL-Dynamics is the diagnostic we built to make those differences visible.
+**TL;DR.** Frontier coding agents pass 75-80% of HiL-Bench tasks when given complete information. The same agents collapse to under 10% the moment 3-5 critical facts are withheld and they are forced to ask. That gap doesn't close with stronger harnesses, but it does respond, asymmetrically, to skill engineering: Codex jumps from 7% to 53% pass@3 with a tuned skill, while Claude Code's best tuning only takes it from 3% to 15%. HiL-Dynamics is the diagnostic we built to make those differences visible.
 
 ## Three headline findings
 
-1. **The judgment gap survives modern scaffolding.** Stronger harnesses haven't taught agents *when* to ask. Every system we tested loses 40-70 percentage points of pass@3 the moment information is withheld.
-2. **Skill engineering is a real handle, but a harness-specific one.** Tuning the skill spec lifts Codex from 7% to 53% pass@3 and Ask-F1 from 0.20 to 0.62. Claude Code moves too (3% to 15%), but the template that works for one harness can flatten or hurt another.
+1. **The judgment gap survives modern scaffolding.** Stronger harnesses haven't taught agents *when* to ask. Every system we tested loses 70+ percentage points of pass@3 the moment information is withheld.
+2. **Skill engineering is a real handle, but a harness-specific one.** Tuning the skill spec lifts Codex from 7% to 53% pass@3. Claude Code's best tuning only takes it from 3% to 15%. The template that excels on one harness can flatten or hurt another.
 3. **Every `{harness, model}` has its own failure shape.** Their optimal scaffolds diverge. There is no universal recipe.
 
 ## Background: the judgment gap
