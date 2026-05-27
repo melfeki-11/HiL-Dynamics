@@ -12,9 +12,9 @@ Supported harness configs:
 |---|---|---|
 | `claude` | `claude-opus-4-7` | `xhigh` |
 | `codex` | `gpt-5.5` | `xhigh` |
+| `antigravity` | `gemini/gemini-3.1-pro-preview-customtools` | `high` |
 | `adk` | `gemini/gemini-3.1-pro-preview-customtools` | `high` |
 | `opencode` | `fireworks_ai/glm-5p1` | `high` |
-| `antigravity` | `gemini/gemini-3.1-pro-preview-customtools` | `high` |
 
 ## Repository Layout
 
