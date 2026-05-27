@@ -113,7 +113,7 @@ The custom-skill sweep surfaced six non-leaking dimensions that independently st
 - **Mandate.** Force of the instruction to ask. Stronger mandates use language like "MUST ask" and explicit failure framing. The gate says *when*; the mandate says *with what conviction*.
 - **Pre-Ask Sequence.** Silent ordering step before asking. For example: enumerate blockers, pick the highest-impact unasked blocker, then ask. Controls cognitive ordering, not wording.
 - **Question Quality Scaffolding.** Definition of a good question, usually through bad/good examples or artifact anchors (file, function, schema field, test, observed behavior).
-- **Anti-Fragmentation / COMBINE.** Rule that related candidate questions about one artifact merge into a single question. Prevents burning asking opportunities on fragments of one decision.
+- **COMBINE.** Rule that related candidate questions about one artifact merge into a single question. Prevents burning asking opportunities on fragments of one decision.
 - **Search Budget.** Cap on local exploration before asking. Constrains indefinite search and acts as a tie-breaker when the gate is wide.
 
 ### Harnesses respond to skills differently
