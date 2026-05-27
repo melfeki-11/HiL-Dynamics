@@ -126,6 +126,17 @@ As tunable as skills are, no single template yielded the maximal improvement fro
 
 The takeaway is asymmetric. Codex is much more responsive to mandate settings, while Claude Code relies more on controlling its inference escape hatch. Skill engineering should be calibrated per harness rather than applied uniformly.
 
+**Skill recommendations for practitioners.** The guidelines below are starting points for tuning a skill for your own `{harness, model}` setup. No single template works everywhere — but two levers held up across every harness we tested:
+
+- **Question Quality Scaffolding and COMBINE** (merging questions about the same artifact into one call) improved Ask Precision on every configuration. Include both regardless of which harness you are targeting.
+
+For everything else, calibrate to the harness prior you measured:
+
+- **Conservative harnesses** (e.g. Claude Code): widen the gate and close the codebase-inference escape hatch. The asking suppression is the bottleneck; mandate strength matters less until the gate is open.
+- **Permissive harnesses** (e.g. Codex): strengthen the mandate and add a pre-ask sequence (list all open blockers before each ask). The agent is willing to ask; focus on precision.
+- **Avoid stacking every "ask more" lever onto a permissive harness** — it inflates question noise without improving precision.
+- **Diagnose before tuning**: measure questions/pass on a vanilla template to identify whether your harness prior is conservative or permissive before choosing which levers to pull.
+
 Even with the best performance we could achieve through careful enhancement, all agents still leave a substantial pass@3 gap compared to their full-information ceiling.
 
 ## Finding 3: Every agent has its own failure shape
