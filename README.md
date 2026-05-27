@@ -1,8 +1,8 @@
 # HiL-Dynamics
 
-**HiL-Dynamics measures how coding agents behave when a task is underspecified.** When critical information is missing (a hidden constraint, a half-spec'd requirement, the one thing the PM never wrote down), does the agent stop and ask, or silently assume and ship the wrong answer?
+**HiL-Dynamics measures how frontier agents behave when a task is underspecified.** When critical information is missing (a hidden constraint, a half-spec'd requirement, the one thing the PM never wrote down), does the agent stop and ask, or silently assume and ship the wrong answer?
 
-HiL-Dynamics is the open-source companion to **[HiL-Bench](https://static.scale.com/uploads/67a153343e046988406ef320/HiL_Bench.pdf)**, our benchmark of underspecified coding tasks with human-validated blockers. It works across modern harnesses (Claude Code, Codex, Antigravity, ADK, OpenCode), captures full agent trajectories, and reports both *whether* agents finish and *how* they handled the missing information along the way. We call the underlying skill **selective escalation**: knowing what you don't know, and asking before charging ahead with an assumption.
+HiL-Dynamics is the open-source companion to **[HiL-Bench](https://static.scale.com/uploads/67a153343e046988406ef320/HiL_Bench.pdf)**, our benchmark of underspecified tasks with human-validated blockers. It works across modern harnesses (Claude Code, Codex, Antigravity, ADK, OpenCode), captures full agent trajectories, and reports both *whether* agents finish and *how* they handled the missing information along the way. We call the underlying skill **selective escalation**: knowing what you don't know, and asking before charging ahead with an assumption.
 
 **The headline result.** Frontier agents pass 75-80% of HiL-Bench tasks when given complete information. The same agents pass under 10% the moment 3-5 critical facts are withheld and they are forced to ask. Stronger harnesses don't close the gap, but skill engineering can move it, asymmetrically: Codex jumps from 7% to 53% pass@3 with a tuned skill, while Claude Code's best tuning only takes it from 3% to 15%.
 
