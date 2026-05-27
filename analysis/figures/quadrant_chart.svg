@@ -4,11 +4,11 @@
   <rect width="800" height="640" fill="white"/>
 
   <!-- Quadrant backgrounds -->
-  <!-- Top-left: Over-Cautious (lavender) -->
+  <!-- Top-left: Over-Asks (lavender) -->
   <rect x="80" y="40" width="340" height="270" fill="#ede9f6"/>
   <!-- Top-right: Good Agent (mint) -->
   <rect x="420" y="40" width="340" height="270" fill="#d5eee9"/>
-  <!-- Bottom-left: Confident Failure (pink) -->
+  <!-- Bottom-left: Confident Hallucination (pink) -->
   <rect x="80" y="310" width="340" height="270" fill="#fce4e1"/>
   <!-- Bottom-right: Lucky Guess (cream) -->
   <rect x="420" y="310" width="340" height="270" fill="#fef8e0"/>
@@ -18,17 +18,17 @@
   <line x1="420" y1="40" x2="420" y2="580" stroke="#cccccc" stroke-width="1.5"/>
   <line x1="80" y1="310" x2="760" y2="310" stroke="#cccccc" stroke-width="1.5"/>
 
-  <!-- Over-Cautious label -->
-  <text x="250" y="155" text-anchor="middle" font-size="22" font-weight="bold" fill="#6b3fa0">Over-Cautious</text>
+  <!-- Over-Asks label -->
+  <text x="250" y="155" text-anchor="middle" font-size="22" font-weight="bold" fill="#6b3fa0">Over-Asks</text>
   <text x="250" y="190" text-anchor="middle" font-size="15" font-style="italic" fill="#999999">Noisy, slower than manual</text>
 
   <!-- Good Agent label -->
   <text x="590" y="155" text-anchor="middle" font-size="22" font-weight="bold" fill="#1d7a6e">Good Agent ✓</text>
   <text x="590" y="190" text-anchor="middle" font-size="15" font-style="italic" fill="#999999">Selective escalation</text>
 
-  <!-- Confident Failure label -->
+  <!-- Confident Hallucination label -->
   <text x="250" y="415" text-anchor="middle" font-size="22" font-weight="bold" fill="#8b1712">Confident</text>
-  <text x="250" y="443" text-anchor="middle" font-size="22" font-weight="bold" fill="#8b1712">Failure</text>
+  <text x="250" y="443" text-anchor="middle" font-size="22" font-weight="bold" fill="#8b1712">Hallucination</text>
   <text x="250" y="487" text-anchor="middle" font-size="14" font-weight="bold" fill="#c0392b">The dangerous quadrant</text>
 
   <!-- Lucky Guess label -->
