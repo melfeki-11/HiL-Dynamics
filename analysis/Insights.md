@@ -6,7 +6,7 @@
 
 1. **The judgment gap survives modern scaffolding.** Stronger harnesses haven't taught agents *when* to ask. Every system we tested loses 70+ percentage points of pass@3 the moment information is withheld.
 2. **Skill engineering is a real handle, but a harness-specific one.** Tuning the skill spec lifts Codex from 7% to 53% pass@3. Claude Code's best tuning only takes it from 3% to 15%. The template that excels on one harness can flatten or hurt another.
-3. **Every `{model, harness}` has its own failure shape.** Their optimal scaffolds diverge. There is no universal recipe.
+3. **Every `{harness, model}` has its own failure shape.** Their optimal scaffolds diverge. There is no universal recipe.
 
 ## Background: the judgment gap
 
