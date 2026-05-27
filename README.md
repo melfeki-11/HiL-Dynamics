@@ -1,8 +1,8 @@
 # HiL-Dynamics
 
-HiL-Dynamics is a HiL-Bench diagnostic: it measures how `<model, harness>` pairs behave on under-specified coding tasks — when they ask for clarification, when they silently guess, and whether their questions actually resolve the blockers that block progress.
+HiL-Dynamics is a HiL-Bench diagnostic: it measures how `{model, harness, skill}` systems behave on underspecified coding tasks — when they identify information gaps they cannot resolve through exploration alone, when they silently guess, and whether their questions actually surface registered blockers.
 
-The tool runs a prepared benchmark task through pluggable harnesses, collects structured trajectories, and computes ask precision/recall/F1 alongside pass@k. The output shows how far each `<model, harness>` pair is from the *selective escalation* ideal: asking exactly when needed, with questions that resolve actual blockers.
+The tool runs a prepared benchmark task through pluggable harnesses, collects structured trajectories, and computes **Ask Precision**, **Blocker Recall**, and **Ask-F1** alongside pass@k. The output shows how far each `{model, harness, skill}` system is from the *selective escalation* ideal — discerning mid-task when an information gap must be escalated rather than guessed around — and how large the *judgment gap* is between full-information and underspecified performance.
 
 ![Agent Ask Behavior on Under-Specified Tasks](analysis/figures/quadrant_chart.svg)
 
@@ -34,7 +34,9 @@ docs/                 schema + behavior reference
 Three outputs per run:
 
 - **pass@k** — task resolution rate
-- **Ask-F1** — F1 calculated from question precision and blocker recall
+- **Ask Precision** — ratio of relevant questions to total questions asked; penalizes over-asking
+- **Blocker Recall** — proportion of registered information gaps the agent surfaces through targeted questions
+- **Ask-F1** — harmonic mean of Ask Precision and Blocker Recall; structurally prevents gaming through question spam
 - **Trajectories** — complete `{thought, act, obs}` traces for manual inspection or LLM-as-a-judge analysis
 
 Each attempt saves a normalized bundle under `runs/<run-id>/<uid>/<mode>/pass_<n>/`:
@@ -49,7 +51,7 @@ eval_result.json  test pass/fail
 
 ## Key Findings
 
-See [analysis/Insights.md](analysis/Insights.md) for the full model-harness analysis: how different `<model, harness, skill>` configurations perform on selective escalation, how Ask Precision and Blocker Recall trade off, and what harness interventions move the needle.
+See [analysis/Insights.md](analysis/Insights.md) for the full analysis: how the judgment gap persists across modern harnesses, how different `{model, harness, skill}` configurations perform on selective escalation, how Ask Precision and Blocker Recall trade off, and what skill interventions move the needle.
 
 ## Prerequisites
 
