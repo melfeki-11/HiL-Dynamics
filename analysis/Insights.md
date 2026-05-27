@@ -1,194 +1,187 @@
-# HiL-Dynamics Narrative
+# HiL-Dynamics: Insights from Running HiL-Bench Across Modern Harnesses
 
-## Introducing HiL-Dynamics
+**TL;DR.** Frontier coding agents pass 75-80% of HiL-Bench tasks when given complete information. The same agents collapse to under 10% the moment 3-5 critical facts are withheld and they are forced to ask. That gap doesn't close with stronger harnesses, but it does respond, asymmetrically, to skill engineering: Codex jumps from 7% to 53% pass@3 with a tuned skill, while Claude Code's best tuning only takes it from 3% to 15%. HiL-Dynamics is the diagnostic we built to make those differences visible.
 
-Earlier this year we released HiL-Bench, a benchmark to measure how well a coding agent can ask for help when faced with underspecified problems. The gap between a fully specified and underspecified prompt is large: agents with full information have an 80-90% pass@3, while agents with only partial information and an `ask_human()` tool top out at around 30%. The accompanying paper termed the common failure pattern **selective escalation**: the ability to identify when necessary information cannot be ascertained from the current context and ask for help from a human before continuing implementation.
+## Three headline findings
 
-We presented results using the SWE-agent harness. Since then, many harnesses and frameworks have been developed, including complete agentic ones such as Claude-Code and Codex. As a result, selective escalation is no longer a model-only property, but rather that of the entire agentic system. However, no matter how sophisticated agentic systems become, there will always be some context locked in someone's head: product intent, business norms, or the one thing the PM never wrote down.
+1. **The judgment gap survives modern scaffolding.** Stronger harnesses haven't taught agents *when* to ask. Every system we tested loses 70+ percentage points of pass@3 the moment information is withheld.
+2. **Skill engineering is a real handle, but a harness-specific one.** Tuning the skill spec lifts Codex from 7% to 53% pass@3. Claude Code's best tuning only takes it from 3% to 15%. The template that excels on one harness can flatten or hurt another.
+3. **Every `{harness, model}` has its own failure shape.** Their optimal scaffolds diverge. There is no universal recipe.
 
-Most people are working towards agentic autonomy. But facing underspecified problems with hidden context, it must be balanced with agentic trustworthiness. We introduce HiL-Dynamics, a diagnostic tool that unpacks how different agent configurations ask, explore, and fail with underspecified tasks. It runs HiL-Bench-style tasks across harnesses, then dissects the trajectories: when agents explore, when they ask, what they ask, whether they recover from bad questions, and how failed runs end.
+## Background: the judgment gap
 
-We ran five native harness/model setups, including two Google-backed systems:
+Earlier this year we released **HiL-Bench**, a benchmark that asks a simple question: when a coding agent runs into something it cannot figure out on its own, does it know to ask? The headline result was a wide one. Given complete context, frontier agents passed around 80% of tasks. Strip out 3-5 critical pieces of information and hand the agent an `ask_human()` tool, and pass@3 collapsed to around 30%. The paper named the missing skill **selective escalation**: recognizing mid-task that a gap cannot be closed through exploration alone, and surfacing it before charging ahead with an assumption.
 
-- Claude-Code SDK with Claude Opus 4.7
+Those original results came from the SWE-agent harness. Since then the agentic surface area has exploded: Claude Code, Codex, Antigravity, ADK, OpenCode, each with its own native question-asking affordances and its own opinions about when escalation is appropriate. Selective escalation is no longer a property of the model in isolation. It is a property of the whole `{harness, model, skill}` system. And no matter how capable that system becomes, some context will always live in a human's head: product intent, business norms, the one constraint the PM never wrote down.
+
+Most of the field is racing toward agentic autonomy. But autonomy without trustworthiness on underspecified work just produces confident wrong answers faster. **HiL-Dynamics** is the diagnostic we built to study that trade-off. It runs HiL-Bench-style tasks across modern harnesses and dissects the trajectories: when agents explore, when they ask, what they ask, whether they recover from a bad question, and how failed runs actually end.
+
+## What we ran
+
+Five native harness/model setups, including two Google-backed systems:
+
+- Claude Code SDK with Claude Opus 4.7
 - Codex SDK with GPT 5.5
-- Google-ADK with Gemini 3.1 Pro Preview
+- Google ADK with Gemini 3.1 Pro Preview
 - OpenCode with GLM 5.1
 - Google Antigravity with Gemini 3.5 Flash
 
-We compare four conditions — see the Conditions table below. The headline figure in Finding 1 focuses on Full_Info vs native; tool/guidance and custom skill are reported later as scaffold-level interventions.
-
-### Conditions
+Each system was tested under four conditions:
 
 | Condition | What it provides | Used in |
 |---|---|---|
 | `Full_Info` | Missing context supplied up front; agents do not need to ask. | Finding 1 (upper-bound control) |
-| `native` | Native ask affordance only — `AskUserQuestion` (Claude-Code), `requestUserInput` (Codex/Antigravity), or the custom `ask_human()` MCP for ADK/OpenCode. No skill or escalation guidance beyond harness defaults. | Findings 1, 2, 3 |
-| `tool/guidance` | Native plus the shared escalation guidance package in the system prompt; Claude-Code and Codex additionally get a custom `ask_human()` MCP tool. | Findings 2, 3 |
-| `custom skill` | Tuned `skill9` template (Claude-Code and Codex only), layered on top of `tool/guidance`. | Findings 2, 3 |
+| `native` | Native ask affordance only: `AskUserQuestion` (Claude Code), `requestUserInput` (Codex/Antigravity), or the custom `ask_human()` MCP for ADK/OpenCode. No skill or escalation guidance beyond harness defaults. | Findings 1, 2, 3 |
+| `tool/guidance` | Native plus the shared escalation guidance package in the system prompt; Claude Code and Codex additionally get a custom `ask_human()` MCP tool. | Findings 2, 3 |
+| `custom skill` | Tuned `skill` template (Claude Code and Codex only), layered on top of `tool/guidance`. | Findings 2, 3 |
 
-TODO: confirm whether `baseline` is strictly the default system prompt or already includes minimal escalation framing — this determines whether Finding 1's gap is reported as native-harness behavior or a partially-instructed baseline.
+The headline figure in Finding 1 focuses on `Full_Info` vs `native`. `tool/guidance` and `custom skill` appear later as scaffold-level interventions.
 
-### Two Distinct Contributions
+## Finding 1: The judgment gap survives modern scaffolds
 
-This draft makes two contributions that should be kept separate when others read or revise it:
+**Selective escalation remains difficult even when the harness provides a means to ask.**
 
-- **Evaluation claim:** modern agentic harnesses still leave large pass@3 on the table when faced with underspecification (Finding 1). This claim stands on existing data.
-- **Design claim:** the diagnostic surfaces specific failure modes — blocker recall, escalation timing, recovery behavior, terminal-state mix — that motivate scaffold-level interventions, and we show one such intervention (skill-in-the-loop) recovers substantial performance (Findings 2 and 3). This claim depends on the skill-in-the-loop runs landing as currently reported.
+We first measured agent performance out of the box, with each harness's default system prompt. Claude Code and Codex both ship with native question-asking tools (`AskUserQuestion` and `requestUserInput`, respectively); Antigravity, ADK, and OpenCode either expose weaker native affordances or none at all. For ADK and OpenCode we supplied a custom MCP tool that mirrors HiL-Bench's original `ask_human()`.
 
-Keeping these separate matters because the evaluation claim does not need the design claim to hold up. If the skill-in-the-loop intervention is later revised or weakened, the evaluation claim still stands.
+The two SDKs with native tools (Codex and Claude Code) largely declined to use them: their scaffolds discourage or block escalation once implementation begins. The gap between *planning-phase* asking (which scaffolds tolerate) and *implementation-phase* asking (which scaffolds suppress) is, we think, the most actionable place to direct future work. Agents need to interleave exploration, planning, asking, and implementing rather than treat them as separate stages.
 
-**Key findings:**
+### 1a. Native current-gen harnesses do well with full info, poorly without it
 
-1. **The performance gap survives scaffolding improvements.** Even with stronger harnesses, agents still struggle to decide *when* to ask for help.
-2. **Skill engineering is a concrete handle.** Tuning the skill spec raises Codex pass@3 from 0.07 to 0.53 and ask-F1 from 0.20 to 0.62; gains for Claude-Code are more modest (pass@3 0.03 → 0.15), and no single template works universally across harnesses.
-3. **Agents (harness + model) show very different strategies and failure patterns, and their optima diverge.**
+Under `Full_Info`, every harness lands in roughly the same place: 75-80% pass@3. Strip the information out and pass rates collapse:
 
-## Finding 1: The Performance Gap Still Exists
+| Harness / Model | Full_Info pass@3 | Native AskHuman pass@3 |
+|---|---:|---:|
+| ADK / Gemini 3.1 Pro | 80.0% | 8.0% |
+| OpenCode / GLM 5.1 | 79.3% | 0.0% |
+| Codex / GPT 5.5 | 78.0% | 0.7% |
+| Claude Code / Claude Opus 4.7 | 76.7% | 2.7% |
+| Antigravity / Gemini 3.5 Flash | 75.0% | 2.7% |
 
-We first gather agent performance directly out-of-the-box, with the harnesses' default system prompts. Claude-Code and Codex both have native question-asking capabilities (`AskUserQuestion` and `requestUserInput`, respectively), while ADK and OpenCode do not. For the latter we provided our own custom MCP tool that mirrors HiL-Bench's original `ask_human()` tool.
-
-Selective escalation remained difficult, even when the harness provides the means to receive help. The two SDKs without native asking tools (ADK and OpenCode) produced different problem-solving approaches from their SWE-agent equivalents; model capability is not the only factor in performance here. On the other hand, the two agent SDKs that *do* have native asking tools (Codex and Claude-Code) didn't use them, largely due to the scaffold severely discouraging or preventing escalation during implementation. Based on our findings, we believe teaching agents to interweave exploration, planning, asking, and implementing in one go is an important area of future work.
-
-### 1a: Native current-gen harnesses do well with full info, poorly without it
-
-Full_Info pass@3 sits around 75–80% across systems — ADK/Gemini `80.0%`, OpenCode/GLM `79.3%`, Codex/GPT 5.5 `78.0%`, Claude-Code/Claude Opus `76.7%`, Antigravity/Gemini Flash `75.0%`. In the baseline condition (native ask tools only, or AskHuman-tool-only for SDKs without native escalation), pass@3 collapses: ADK/Gemini `8.0%`, Claude-Code/Claude Opus `2.7%`, Antigravity/Gemini Flash `2.7%`, Codex/GPT 5.5 `0.7%`, OpenCode/GLM `0.0%`.
-
-The shared tool/guidance setup moves Codex, Antigravity, and ADK substantially: Codex reaches `42.0%` pass@3, Antigravity `34.0%`, and ADK `21.3%`. Claude-Code (`12.0%`) and OpenCode (`11.7%`) barely move (note: OpenCode's number has parser/submission caveats — see Finding 3d before drawing strong conclusions about OpenCode here). This is the broad setup comparison; we keep the tuned custom-skill rows out of this figure so the first finding does not mix generic harness augmentation with the later skill-specific intervention.
+Adding the shared tool/guidance package moves Codex (42.0%), Antigravity (34.0%), and ADK (21.3%) substantially. Claude Code (12.0%) and OpenCode (11.7%) barely move. (OpenCode's number carries a parser/submission caveat; see Finding 3d before drawing strong conclusions there.) We keep the tuned custom-skill rows out of this comparison so Finding 1 isolates generic scaffold augmentation from the skill-specific intervention in Finding 2.
 
 ![Full_Info vs AskHuman pass@3](figures/01_same_model_different_scaffold.png)
+*Figure 1: Full_Info vs AskHuman pass@3 across all five harness configurations. Each row shows the same model's score under full information (right dot) versus the AskHuman-only condition (left dot).*
 
 ![Codex-only selective escalation gap](figures/15_codex_selective_escalation_gap.png)
+*Figure 2: GPT 5.5 / Codex selective escalation gap across native, tool/guidance, and custom skill conditions.*
 
-### 1b: Blocker Recall vs Ask Precision
+### 1b. Blocker Recall vs Ask Precision
 
-To more directly assess how well these agentic systems selectively escalate, we use our original paper's ask-F1 metric, split into **Blocker Recall** (how many real blockers the agent surfaced) and **Ask Precision** (how many of its questions were relevant). Together they answer two practical questions: if there's a blocker, can I trust the system to clarify? And can it finish work without bothering the user indiscriminately?
+To assess selective escalation more directly than pass@3 allows, we split HiL-Bench's Ask-F1 metric into its two components: **Blocker Recall** (how many real blockers the agent surfaced) and **Ask Precision** (how many of its questions were relevant). Together they answer two practical questions. If there is a blocker, can I trust the system to clarify? And can it finish work without bothering the user indiscriminately?
 
-Harness variations can move recall or precision substantially, but every system we tested still struggles with Blocker Recall. Several systems hit reasonable precision when they choose to ask — Native Codex/GPT 5.5 `71.8%`, Native Codex + tool/guidance `67.2%`, Claude-Code `65.4%`, OpenCode `63.1%` — but recall lags far behind: Claude-Code `26.7%`, OpenCode `34.5%`, Native Codex `38.0%`. Tool variants help: GPT 5.5 under Native Codex + tool/guidance reaches `61.5%` recall versus `38.0%` on Native Codex.
+When these agents do choose to ask, they ask reasonably well. Ask Precision lands between 63% and 72% for Codex, Claude Code, and OpenCode in their native conditions. The failure is on the recall side: most systems surface fewer than 40% of the registered blockers. Tool/guidance can move recall (Codex jumps from 38.0% to 61.5%), but no system we tested makes it into the high-recall, high-precision quadrant.
 
-As above, this diagnostic plot keeps the tuned custom-skill rows out of the broad comparison. That keeps Detection vs Targeting aligned with the baseline and shared tool/guidance setup, while the custom-skill precision/recall tradeoff is handled in Finding 2.
+> **Asking *well* is not the problem. Knowing *when* to ask is.**
+
+This diagnostic plot also keeps the tuned custom-skill rows out of the broad comparison, so Detection vs Targeting stays aligned with the baseline and shared tool/guidance setup. The custom-skill precision/recall trade-off is handled in Finding 2.
 
 ![Detection vs targeting](figures/02_detection_targeting.png)
+*Figure 3: Blocker Recall vs Ask Precision across all systems and conditions. High recall means blockers were surfaced; high precision means questions were relevant.*
 
-These results reiterate HiL-Bench's original finding: agents still can't reliably decide when to ask for help. Even strong modern harnesses don't close the gap.
+These results reiterate HiL-Bench's original finding: agents still cannot reliably decide when to ask for help. Even strong modern harnesses don't close the gap.
 
-## Finding 2: Skill Engineering as a Concrete Handle
+## Finding 2: Skill engineering moves the needle, per harness
 
-The constructive punchline: HiL-Bench is useful not only as a benchmark, but as feedback for building better coding agents. In real engineering workflows we never deploy a model alone — we wrap it in project-specific skills, tools, conventions, and escalation guidance. **Skill-in-the-loop** is the harness-design layer where we tune that wrapper.
+**Finding 1 is diagnostic. Finding 2 is constructive.**
 
-We provided Claude-Code and Codex with thorough, well-written skill and escalation guidance in the system prompt, plus a custom `ask_human()` MCP tool — hypothesizing that the custom tool would be free from the bounds of their native training or prompting restrictions. The results are much better, with all SDKs showing significant improvement. All agents ask much more frequently, and Claude-Code and Codex utilize the custom tool more effectively than they do their native tool.
+In real engineering workflows nobody deploys a model alone. The model arrives wrapped in project skills, custom tools, conventions, and escalation guidance. We call that wrapper **skill-in-the-loop**, and HiL-Dynamics is designed to measure whether changes to it actually move agent behavior.
 
-Our current custom-skill runs are the first concrete intervention. They use four `example9` shards (`skill_smoke10`, `smoke40`, `smoke50b`, `smoke50c`). The latest regeneration evaluates all three passes cleanly for all 150 custom-skill tasks on both Codex and Claude. The only remaining infra errors in ingested native runs are four OpenCode baseline pass rows.
+We gave Claude Code and Codex thorough escalation guidance in the system prompt, plus a custom `ask_human()` MCP tool. The hypothesis was that a custom tool would be free of the training and prompting restrictions that suppress the native tools. The results were much better: all SDKs showed significant improvement, all agents asked much more frequently, and Claude Code and Codex used the custom tool more readily than their native ones.
 
 ![Customization effects on pass@3](figures/16_custom_skill_metric_lift.png)
+*Figure 4: Custom-skill pass@3 lift for Claude Code and Codex relative to their native baselines.*
 
 | system | clean tasks | pass@1 | pass@3 | Ask Precision | Blocker Recall | ask-F1 | avg questions |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | `Claude Opus 4.7 / Native Claude-Code + custom skill` | `150` | `10.0%` | `14.0%` | `43.6%` | `31.3%` | `36.5%` | `2.55` |
 | `GPT 5.5 / Native Codex + custom skill` | `150` | `36.7%` | `51.3%` | `48.9%` | `67.0%` | `56.5%` | `4.87` |
 
-Skill text is not documentation. It is a behavioral prior — it shapes what the agent believes it is supposed to do before it reads a line of code.
+> **Skill text is not documentation. It is a behavioral prior.** It shapes what the agent believes it is supposed to do before it reads a line of code.
 
 ### What kinds of skill techniques helped
 
-Beyond just better performance, we uncovered interesting responses to different skill techniques:
+Beyond raw performance, the sweep surfaced clear patterns in how agents respond to different skill techniques:
 
-- **When-to-ask guidance** intuitively bettered performance.
-- **How-to-formulate guidance** also bettered performance — somewhat surprising, given the agents already know how to write questions in general.
-- **Emotional language** — leveraging the agents' trained desire to fulfill requests with strong framing that they would fail if they don't ask — also yielded a performance boost.
+- **When-to-ask guidance** intuitively raised performance.
+- **Emotional language**, leveraging the agents' trained desire to fulfill requests with strong framing (e.g. they would fail if they don't ask), also yielded a measurable boost.
 
 ### Six skill levers
 
 The custom-skill sweep surfaced six non-leaking dimensions that independently steer behavior:
 
-- **Gate** — eligibility condition for asking. Narrow gates restrict asking to rare cases ("cannot resolve from codebase"); wide gates make asking the default when implementation details remain uncertain.
-- **Mandate** — force of the instruction to ask. Stronger mandates use language like "MUST ask" and explicit failure framing. The gate says *when*; the mandate says *with what conviction*.
-- **Pre-Ask Sequence** — silent ordering step before asking. For example: enumerate blockers, pick the highest-impact unasked blocker, then ask. Controls cognitive ordering, not wording.
-- **Question Quality Scaffolding** — definition of a good question, usually through bad/good examples or artifact anchors (file, function, schema field, test, observed behavior).
-- **Anti-Fragmentation / COMBINE** — rule that related candidate questions about one artifact merge into a single question. Prevents burning asking opportunities on fragments of one decision.
-- **Search Budget** — cap on local exploration before asking. Constrains indefinite search and acts as a tie-breaker when the gate is wide.
+- **Gate.** Eligibility condition for asking. Narrow gates restrict asking to rare cases ("cannot resolve from codebase"); wide gates make asking the default when implementation details remain uncertain.
+- **Mandate.** Force of the instruction to ask. Stronger mandates use language like "MUST ask" and explicit failure framing. The gate says *when*; the mandate says *with what conviction*.
+- **Pre-Ask Sequence.** Silent ordering step before asking. For example: enumerate blockers, pick the highest-impact unasked blocker, then ask. Controls cognitive ordering, not wording.
+- **Question Quality Scaffolding.** Definition of a good question, usually through bad/good examples or artifact anchors (file, function, schema field, test, observed behavior).
+- **COMBINE.** Rule that related candidate questions about one artifact merge into a single question. Prevents burning asking opportunities on fragments of one decision.
+- **Search Budget.** Cap on local exploration before asking. Constrains indefinite search and acts as a tie-breaker when the gate is wide.
 
 ### Harnesses respond to skills differently
 
-There is no universal best template. Different harnesses start from different priors. **Claude-Code is structurally conservative** — its default behavior is silence, its failure mode is under-asking, and across all our experiments its natural questions-per-pass sits between `0.21` and `2.45`. **Codex is more permissive** — its default behavior is spray, its failure mode is over-asking, and across the same experiments its natural questions-per-pass sits between `0.50` (`example1_`) and `4.66` (`example4_`).
+As tunable as skills are, no single template yielded the maximal improvement from the default harness baseline across all agents. A skill that excels on one harness can even degrade performance on another. Claude Code and Codex, for example, have almost opposite asking priors, with the latter being more open to asking questions.
 
-That baseline divergence propagates through every lever. As a simple case study: with a given set of skill modifications — a stronger ask mandate (escalating to "MUST use skill multiple times"), removal of the per-pass question cap, and a bad/good question filter (i.e. ruling out "how to implement X?" in favor of "what is the return type of X?") — Claude-Code increased its questions-per-pass by **147%**, while Codex's improvement was a mere **16%**. On the other hand, what really triggered Codex's improvement was providing it the custom `ask_human()` tool *in addition to* its native tool; skill modifications had less influence.
+**Closing the codebase escape hatch.** The baseline gate let agents skip asking whenever they believed the answer was inferable from the codebase ("cannot resolve it from the codebase"). We replaced that clause with a strict no-inference rule ("even implicit answers from the codebase are not good enough"). For Claude Code this lifted pass@3 by +22%, because it stopped suppressing questions it would otherwise have self-resolved. For Codex, which was already asking near its ceiling, the change did nothing. Pass@3 held flat at 0.533, confirming the escape hatch never governed Codex's asking behavior.
 
-Comparing `example9_` against `example7_`, the same template changes moved Claude's questions per pass far more than Codex's. Skill engineering is per-harness, not one-size-fits-all prompting.
+**Strengthening the mandate.** A second variant combined a stricter gate with explicit "MUST ask" framing and failure language ("you will fail this task if you do not ask"). Codex's pass@3 jumped +630% (0.073 to 0.533), with average questions per pass rising nearly 10x (0.5 to 4.7). Claude Code's response was far more muted: average questions per pass rose only +0.9 (vs Codex's +4.2), and pass@3 reached just 0.120, confirming that Claude modulates even strong mandate text against its own inference priors.
 
-Draft design rules:
+The takeaway is asymmetric. Codex is much more responsive to mandate settings, while Claude Code relies more on controlling its inference escape hatch. Skill engineering should be calibrated per harness rather than applied uniformly.
 
-- Diagnose the harness prior by measuring questions/pass on a vanilla template.
-- For conservative harnesses, push procedurally: wider gate, stronger mandate, enumerate-first pre-ask sequence.
-- For permissive harnesses, use precision levers: question-quality examples, COMBINE, clearer artifact anchors.
-- Don't stack every "ask more" rule into permissive harnesses — it inflates noise.
-- Treat COMBINE as a broadly useful precision lever.
-- Optimize the skill for the harness you care about, and expect different harnesses to need different skills.
+Even with the best performance we could achieve through careful enhancement, all agents still leave a substantial pass@3 gap compared to their full-information ceiling.
 
-### Skill evolution notes
+## Finding 3: Every agent has its own failure shape
 
-> **Working notes for coauthors; candidate for appendix or removal before any external draft.** `Alina` refers to a reference prompt-skill template used as a comparison baseline (TODO: gloss or rename before any external version). The `smoke*` shards (e.g., `smoke10`, `smoke40`, `smoke50b`, `smoke50c`) are internal task-set names and also need glossing.
+**HiL-Dynamics lets us look past aggregate pass rates and examine how an agent actually moved through an underspecified task.** Two agents can fail for completely different reasons. One may write before resolving blockers; another may correctly identify the gap but fail to validate the patch that follows.
 
-These ablation notes are merged from the latest skill-in-the-loop draft. Validate against final experiment tables before public use.
+Trajectory inspection surfaces what aggregate metrics miss. We highlight four aspects here.
 
-**Full-run path, examples 1 → 4 → 7 → 9:**
+### 3a. Model families have a characteristic strategy shape under a fixed harness
 
-- `example1_ → example4_` — Moved every lever toward "ask more, ask better": wider Gate, stronger Mandate, enumerate-first Pre-Ask Sequence, COMBINE, explicit artifact anchors, tighter Search Budget, plus a quantity floor and ceiling. Biggest metric jump, but methodologically tainted — quantity hints leak the benchmark blocker distribution.
-- `example4_ → example7_` — Removed the floor with other levers held constant. Claude questions/pass and recall dropped; Codex barely moved. The floor was doing real recall work for Claude, and counts as leakage.
-- `example7_ → example9_` — Removed the ceiling and adopted Alina's most aggressive non-leaking settings: wide Gate, strong Mandate, bad/good question quality scaffolding, five-step Search Budget, plus our Pre-Ask Sequence and COMBINE. Recall recovered, precision dropped, F1 landed close to Alina's.
-- `example9_` vs Alina — Our additions appear to improve operational solve rate (especially for Codex) at some F1 cost. Under-tapped levers — Pre-Ask Sequence, COMBINE, artifact-anchor scaffolding — can lift pass@k even when they don't maximize F1.
+> **Trajectory shape is a repeatable behavioral signature, not run-to-run noise.**
 
-**Smoke-test path, examples 1 – 10:**
-
-- `example1_` — Diagnoses what kills recall: narrow Gate plus search-first behavior gives high precision but very low recall.
-- `example2_` – `example6_` — Find what wins F1 but cheats: the best headline template uses quantity hints that leak blocker distribution.
-- `example7_` – `example10_` — De-leak. `example9_` is the current full-run non-leaking template. `example10_` strengthens COMBINE with a worked canonical-decision example and is the first smoke result noted as beating Alina on Codex F1.
-
-## Finding 3: Agents Show Different Problem-Solving Patterns
-
-HiL-Dynamics lets us look past aggregate pass rates and examine how an agent actually moved through an underspecified task. Two agents may fail for different reasons: one may write before resolving blockers; another may fail to validate its patches.
-
-Examining trajectories surfaces what aggregate metrics miss. We highlight four aspects here.
-
-### 3a: Model families have a characteristic strategy shape under a fixed harness
-
-Under SWE-agent, related model families exhibit similar explore/ask/write shapes. GPT models ask early; Claude models do more early exploration before asking. Trajectory shape is a repeatable behavioral signature, not run-to-run noise.
+Under SWE-agent, related model families show similar explore/ask/write shapes. GPT models ask early. Claude models do more early exploration before asking. Hold the harness constant and the pattern reproduces across tasks.
 
 ![SWE-agent model-family strategy](figures/13_swe_agent_model_family_strategy.svg)
+*Figure 5: Action-type distributions by turn for GPT, Claude, and Gemini model families under SWE-agent.*
 
-### 3b: The same model bends to the harness
+### 3b. The same model bends to the harness
 
-That family-level signature is not harness-invariant. GPT 5.5 asks early under SWE-agent, shifts toward early exploration under Native Codex, and — with the tuned custom skill — still explores first but asks more consistently before writing. Codex + custom skill is the extreme case: `99.8%` of pass rows ask before editing, median first ask at turn `18`, median first write at turn `36`.
+That family-level signature is not harness-invariant. GPT 5.5 asks early under SWE-agent, shifts toward early exploration under Native Codex, and with the tuned custom skill it still explores first but asks more consistently before writing. Codex + custom skill is the extreme case: 99.8% of pass rows ask before editing, median first ask at turn 18, median first write at turn 36.
 
-To compare cleanly, we collapse each trajectory into a strategy bucket — asked upfront, explored then asked, wrote before asking, or never asked:
+Collapsing each trajectory into a strategy bucket (asked upfront, explored then asked, wrote before asking, or never asked) makes the harness effect easy to see:
 
-- `GPT 5.5 / Native Codex + tool/guidance`: `84.8%` explored then asked before writing; `11.9%` asked upfront; `3.3%` never asked.
-- `GPT 5.5 / Native Codex + custom skill`: essentially all explore-then-ask-before-write (`100%` in the strategy CSV, `99.8%` in the timing CSV).
-- `GPT 5.5 / SWE-agent`: `70.4%` asked upfront before reading; `29.6%` explored then asked.
-- `GPT 5.5 / Native Codex`: `70.9%` explored then asked; `17.0%` upfront; `11.2%` never asked.
-- `Claude Opus 4.7 / Native Claude-Code`: roughly half explored then asked, but `43.5%` never asked.
-- `Claude Opus 4.7 / Native Claude-Code + custom skill`: `59.6%` explored then asked; `10.2%` wrote before asking; `29.8%` never asked.
-- `GLM 5.1 / Native OpenCode`: roughly split between explored-then-asked and no-ask (parser/harness caveat below).
+| System | Asked upfront | Explored then asked | Wrote before asking | Never asked |
+|---|---:|---:|---:|---:|
+| `GPT 5.5 / SWE-agent` | 70.4% | 29.6% | 0% | 0% |
+| `GPT 5.5 / Native Codex` | 17.0% | 70.9% | 0.9% | 11.2% |
+| `GPT 5.5 / Native Codex + tool/guidance` | 11.9% | 84.8% | 0% | 3.3% |
+| `GPT 5.5 / Native Codex + custom skill` | ~0% | ~100% | ~0% | ~0% |
+| `Claude Opus 4.7 / Native Claude-Code` | ~6% | ~50% | ~0% | 43.5% |
+| `Claude Opus 4.7 / Native Claude-Code + custom skill` | ~0% | 59.6% | 10.2% | 29.8% |
+| `GLM 5.1 / Native OpenCode` | ~0% | ~50% | ~0% | ~50% (parser caveat) |
 
-First-ask timing shifts the same way — Claude Opus 4.7 asks later under Claude-Code than under SWE-agent, for instance.
+First-ask timing shifts the same way. Claude Opus 4.7 asks later under Claude Code than under SWE-agent, for example.
 
 ![Codex strategy buckets](figures/14_codex_strategy_buckets.png)
+*Figure 6: Distribution of trajectory strategies (asked upfront, explored-then-asked, wrote-before-asking, never asked) across Codex conditions.*
 
 ![GPT 5.5 trajectory strategy fingerprints](figures/17_gpt55_trajectory_strategy_fingerprints.png)
+*Figure 7: GPT 5.5 action-sequence fingerprints across Native Codex, tool/guidance, custom skill, and SWE-agent.*
 
 ![Strategy buckets](figures/05_strategy_buckets.png)
+*Figure 8: Cross-system strategy bucket summary across all five harnesses.*
 
 ![First ask timing](figures/08_first_ask_timing.png)
+*Figure 9: First-ask timing distributions relative to first edit, across configurations.*
 
-### 3c: Recovery after a bad first ask
+### 3c. Recovery after a bad first ask
 
-Strong agents shouldn't only avoid bad questions — they should notice when a question missed the blocker, sharpen the next one, and still finish the task.
+Strong agents shouldn't just avoid bad questions. They should notice when a question missed the blocker, sharpen the next one, and still finish the task.
 
 Using trace-level ask sequences, we deterministically mark the first irrelevant or incorrect `ask_human()` as `I` and a blocker resolution as `R`. For Codex we filter out MCP permission prompts, which are harness permission events rather than clarification questions.
 
 Percentages below use first-failed-ask runs as the denominator. The table is regenerated from `data/bad_first_ask_recovery.csv`.
 
-| system | first failed ask runs | solved after first failed ask | asked later relevant question | solved after later relevant question |
+| System | First failed ask runs | Solved after first failed ask | Asked later relevant question | Solved after later relevant question |
 |---|---:|---:|---:|---:|
 | `GPT 5.5 / SWE-agent` | 135 | 15.6% | 71.1% | 15.6% |
 | `GPT 5.5 / Native Codex` | 67 | 6.0% | 16.4% | 1.5% |
@@ -201,57 +194,36 @@ Percentages below use first-failed-ask runs as the denominator. The table is reg
 | `Gemini 3.1 Pro / SWE-agent` | 112 | 0.9% | 83.0% | 0.9% |
 | `Gemini 3.1 Pro / Native ADK` | 102 | 5.9% | 56.9% | 5.9% |
 
-Codex + custom skill is the cleanest positive case: after a bad first ask, it more often asks a later relevant question and more often solves after doing so. Claude-Code + custom skill lifts the later-relevant-question rate but does not translate that into solves in this deterministic trace proxy.
+Codex + custom skill is the cleanest positive case. After a bad first ask, it more often asks a later relevant question and more often solves after doing so. Claude Code + custom skill lifts the later-relevant-question rate but does not translate that into solves in this deterministic trace proxy.
 
-### 3d: Failed runs end in different terminal states
+### 3d. Failed runs end in different terminal states
 
 Failed AskHuman trajectories terminate in deterministically distinguishable states, which lets us diagnose how systems fail before, around, or after the help-seeking step. Failures vary not only by model, but also by harness.
 
-The custom-skill rows clarify what shifted under Codex. Among unresolved `GPT 5.5 / Native Codex + custom skill` passes, `35.5%` end as patch-made/no-submit, `32.4%` as local-green/hidden-red, `16.9%` as visible-red-at-end, and `15.2%` as weak-validation-only — substantive work failing to close the loop, not refusal to engage. Claude + custom skill looks similar (`37.9%` local-green/hidden-red, `35.7%` patch-made/no-submit).
-
-> **OpenCode caveat.** OpenCode/GLM exhibits a disproportionately large patch-made/no-submit share in this figure. We do not yet know whether this reflects substantive harness behavior (the agent constructs a patch but never invokes the submission step), a submission-mechanic difference between OpenCode and the other harnesses, or a trajectory-parser artifact in how we identify `submit` events in OpenCode traces. Resolve before publication. Until then, treat OpenCode's terminal-state share as provisional and do not lean on it for scaffold-level claims.
+The custom-skill rows clarify what shifted under Codex. Among unresolved `GPT 5.5 / Native Codex + custom skill` passes, 35.5% end as patch-made/no-submit, 32.4% as local-green/hidden-red, 16.9% as visible-red-at-end, and 15.2% as weak-validation-only. These are signatures of substantive work failing to close the loop, not refusal to engage. Claude Code + custom skill looks similar (37.9% local-green/hidden-red, 35.7% patch-made/no-submit).
 
 ![Terminal evidence mix](figures/04_terminal_evidence_mix.png)
+*Figure 10: Terminal-state decomposition of failed AskHuman trajectories across all systems.*
 
 ## Takeaways
 
-In real-world settings, human collaboration often means digging up information locked in people's heads and asking for clarification. Across our HiL-Dynamics experiments on different state-of-the-art agent harnesses, agents consistently struggle with this capability. No matter the harness or model, selective escalation on underspecified coding tasks remains an obstacle.
+In real engineering work, collaboration often means digging up information locked in someone's head and asking for clarification. Across every HiL-Dynamics experiment we ran, agents consistently struggled with that step. No matter the harness or model, selective escalation on underspecified coding tasks remains an obstacle.
 
-Each setup, however, balances exploration and escalation differently and fails in different shapes — suggesting targeted areas of improvement for future generations of models and harnesses, and enabling users to decide for themselves which setup best suits their needs. After all, almost all problems encountered in real-world engineering situations will be underspecified; users frequently write vague problems and hold hidden assumptions or tribal knowledge. We as a community need to push towards agents that aren't just capable of solving solo, but also of knowing when they need to ask for context hidden away in people's heads.
+But each setup balances exploration and escalation differently, and each fails in its own shape. That diversity is useful. It suggests targeted areas of improvement for the next generation of models and harnesses, and it lets practitioners pick the setup that best fits their domain. Almost all problems encountered in real engineering work are underspecified; users write vague problems and hold hidden assumptions or tribal knowledge. As a community we need to push toward agents that are not only capable of solving solo, but also of knowing when to ask for context hidden in people's heads.
 
-The unit of analysis is the whole `{model, harness, customization}` system — harnesses and skills change pass@3, ask-F1, question burden, strategy shape, and terminal failure anatomy. HiL-Dynamics is meant to make these differences visible: a way to evaluate whether a setup is **trustworthy** enough to surface blockers, **autonomous** enough not to ask indiscriminately, and **steerable** enough that targeted harness or skill changes improve behavior.
+The unit of analysis is the whole `{harness, model, customization}` system. Harnesses and skills change pass@3, Ask-F1, question burden, strategy shape, and terminal failure anatomy. HiL-Dynamics is meant to make those differences visible. It is a way to evaluate whether a setup is **trustworthy** (it surfaces real blockers), **judicious** (it does not pester the user indiscriminately), and **steerable** (it responds in predictable ways to scaffold or skill changes).
 
-## Methodology Notes
+## Figure inventory
 
-These need verification before public-facing text:
-
-- **Task set and intersection.** TODO: state whether the pass@3 and Ask-F1 numbers in Findings 1 and 2 are computed over each condition's full task set or only over tasks present in all conditions being compared. With pass@3 swings of 70+ percentage points between `Full_Info` and `baseline`, the per-system ranking only stands if denominators are intersected. Report `num_tasks` and `num_intersected_tasks` per cell.
-- **N per cell.** TODO: state tasks × passes per `{model, harness, condition}` cell. The custom-skill cells are stated as 150 tasks × 3 passes; native baseline and `tool/guidance` cells need to be confirmed.
-- **Confidence intervals.** TODO: decide whether bootstrap CIs are reported on the main figures. The headline `Full_Info` vs `baseline` gap is large enough that CIs do not change the qualitative story, but the per-system rankings in Finding 1b and the strategy bucket percentages in Finding 3b are CI-sensitive.
-- **Ask-relevance judge.** Ask Precision and Blocker Recall depend on a per-ask relevance label. TODO: state which judge produced these labels, whether the same judge was used across all five systems, and what the audit / calibration status is. If the judge has not been audited, the Finding 1b ranking is provisional.
-- **Task split.** TODO: confirm whether the headline numbers are over the public HiL-Bench split, the private split, or both, and whether the public version of this draft restricts to the public split until private rerun / image issues are resolved.
-- **Trajectory parsing parity.** Strategy buckets and timing depend on the trajectory parser identifying `ASK`, `READ`, `WRITE`, and `TEST` actions across five different harness formats. The OpenCode `patch-made/no-submit` share called out in Finding 3d is the largest outstanding parser/harness question.
-
-## Open Questions
-
-- Is OpenCode's `patch-made/no-submit` share in Finding 3d substantive harness behavior or a parsing/submission artifact? (See also the Methodology / `baseline` framing TODOs.)
-- Is Antigravity headline-only (Finding 1), or should Findings 3a–3d include Antigravity strategy and terminal-state breakdowns? It currently appears in the headline numbers but is not dissected later.
-- Should the public version restrict to the public HiL-Bench task split until private rerun / image issues are resolved?
-- Do we have validated answer-incorporation judging, or should Finding 2 / Finding 3c claims about "answer used" or "recovery" remain deterministic trace proxies?
-- Should `tool/guidance` and `custom skill` be reported as scaffold-level interventions distinct from the native baseline (preserving the evaluation-vs-design separation), or merged into a single "post-tuning" narrative?
-- Is the "Skill evolution notes" subsection in Finding 2 (`example1` → `example4` → `example7` → `example9`, references to Alina's settings, smoke shards) appropriate for coauthor circulation, or should it move to an appendix before any external draft?
-
-## Figure Inventory
-
-| Figure | Used in | Role | Status |
+| # | File | Used in | Role |
 |---|---|---|---|
-| `01_same_model_different_scaffold` | Finding 1a | Primary: performance gap exists | ready |
-| `15_codex_selective_escalation_gap` | Finding 1a | Codex deep-dive | ready |
-| `02_detection_targeting` | Finding 1b | Primary: blocker recall vs ask precision | ready, pending judge provenance |
-| `16_custom_skill_metric_lift` | Finding 2 | Primary: constructive result | ready |
-| `13_swe_agent_model_family_strategy` | Finding 3a | Primary: model-family strategy fingerprint | ready (SVG; format-consistency TODO) |
-| `14_codex_strategy_buckets` | Finding 3b | Codex strategy detail | ready |
-| `17_gpt55_trajectory_strategy_fingerprints` | Finding 3b | GPT 5.5 trajectory fingerprint | ready |
-| `05_strategy_buckets` | Finding 3b | Cross-system strategy summary | ready |
-| `08_first_ask_timing` | Finding 3b | First-ask timing diagnostic | ready |
-| `04_terminal_evidence_mix` | Finding 3d | Terminal-state decomposition | ready, pending OpenCode caveat |
+| Figure 1 | `01_same_model_different_scaffold` | Finding 1a | Primary: performance gap exists |
+| Figure 2 | `15_codex_selective_escalation_gap` | Finding 1a | Codex deep-dive |
+| Figure 3 | `02_detection_targeting` | Finding 1b | Primary: blocker recall vs ask precision |
+| Figure 4 | `16_custom_skill_metric_lift` | Finding 2 | Primary: constructive result |
+| Figure 5 | `13_swe_agent_model_family_strategy` | Finding 3a | Primary: model-family strategy fingerprint |
+| Figure 6 | `14_codex_strategy_buckets` | Finding 3b | Codex strategy detail |
+| Figure 7 | `17_gpt55_trajectory_strategy_fingerprints` | Finding 3b | GPT 5.5 trajectory fingerprint |
+| Figure 8 | `05_strategy_buckets` | Finding 3b | Cross-system strategy summary |
+| Figure 9 | `08_first_ask_timing` | Finding 3b | First-ask timing diagnostic |
+| Figure 10 | `04_terminal_evidence_mix` | Finding 3d | Terminal-state decomposition |

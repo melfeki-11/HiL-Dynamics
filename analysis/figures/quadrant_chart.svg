@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="665" viewBox="0 0 800 665" font-family="sans-serif">
+
+  <!-- Background -->
+  <rect width="800" height="640" fill="white"/>
+
+  <!-- Quadrant backgrounds -->
+  <!-- Top-left: Over-Asks (lavender) -->
+  <rect x="80" y="40" width="340" height="270" fill="#ede9f6"/>
+  <!-- Top-right: Good Agent (mint) -->
+  <rect x="420" y="40" width="340" height="270" fill="#d5eee9"/>
+  <!-- Bottom-left: Confident Hallucination (pink) -->
+  <rect x="80" y="310" width="340" height="270" fill="#fce4e1"/>
+  <!-- Bottom-right: Lucky Guess (cream) -->
+  <rect x="420" y="310" width="340" height="270" fill="#fef8e0"/>
+
+  <!-- Quadrant borders -->
+  <rect x="80" y="40" width="680" height="540" fill="none" stroke="#cccccc" stroke-width="1.5"/>
+  <line x1="420" y1="40" x2="420" y2="580" stroke="#cccccc" stroke-width="1.5"/>
+  <line x1="80" y1="310" x2="760" y2="310" stroke="#cccccc" stroke-width="1.5"/>
+
+  <!-- Over-Asks label -->
+  <text x="250" y="155" text-anchor="middle" font-size="22" font-weight="bold" fill="#6b3fa0">Over-Asks</text>
+  <text x="250" y="190" text-anchor="middle" font-size="15" font-style="italic" fill="#999999">Noisy, slower than manual</text>
+
+  <!-- Good Agent label -->
+  <text x="590" y="155" text-anchor="middle" font-size="22" font-weight="bold" fill="#1d7a6e">Good Agent ✓</text>
+  <text x="590" y="190" text-anchor="middle" font-size="15" font-style="italic" fill="#999999">Selective escalation</text>
+
+  <!-- Confident Hallucination label -->
+  <text x="250" y="415" text-anchor="middle" font-size="22" font-weight="bold" fill="#8b1712">Confident</text>
+  <text x="250" y="443" text-anchor="middle" font-size="22" font-weight="bold" fill="#8b1712">Hallucination</text>
+  <text x="250" y="487" text-anchor="middle" font-size="14" font-weight="bold" fill="#c0392b">The dangerous quadrant</text>
+
+  <!-- Lucky Guess label -->
+  <text x="590" y="430" text-anchor="middle" font-size="22" font-weight="bold" fill="#9a7d0a">Lucky Guess</text>
+  <text x="590" y="465" text-anchor="middle" font-size="15" font-style="italic" fill="#999999">Fragile, not reliable</text>
+
+  <!-- Y-axis label left: "Asks when needed" (top) -->
+  <text x="30" y="175" text-anchor="middle" font-size="13" fill="#666666" transform="rotate(-90,30,175)">Asks when needed</text>
+  <!-- Y-axis label left: "Doesn't ask" (bottom) -->
+  <text x="30" y="445" text-anchor="middle" font-size="13" fill="#666666" transform="rotate(-90,30,445)">Doesn&#x2019;t ask</text>
+
+  <!-- X-axis labels -->
+  <text x="250" y="615" text-anchor="middle" font-size="13" fill="#666666">Fails</text>
+  <text x="590" y="615" text-anchor="middle" font-size="13" fill="#666666">Succeeds</text>
+
+  <!-- Caption -->
+  <text x="420" y="652" text-anchor="middle" font-size="13" fill="#444444"><tspan font-weight="bold">The Judgment Matrix.</tspan> Most agents are in the bottom left box.</text>
+
+</svg>
