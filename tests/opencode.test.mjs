@@ -69,30 +69,44 @@ function extractAskQuestion({ input, state, part }) {
 
 function extractTrajectory(serverEvents) {
   const steps = [];
+  const emittedStepIndexByPartId = new Map();
   for (const ev of serverEvents) {
     if (ev?.type !== "message.part.updated") continue;
     const part = ev?.properties?.part || {};
     const partType = String(part.type || "").toLowerCase();
     if (partType !== "tool") continue;
+    const partId = part.id || part.partID || part.partId || null;
     const toolName = String(part.tool?.name || part.tool || part.name || "");
     const state = part.state || {};
+    const status = String(state.status || part.status || "").toLowerCase();
+    const isRunningStatus = status === "running" || status === "in_progress" || status === "started";
     const input = state.input || part.input || part.args || {};
     const output = state.output || part.output || part.result || "";
     const hasInputObject = input && typeof input === "object" && Object.keys(input).length > 0;
     const hasOutputText = String(output ?? "").trim().length > 0;
     if (!toolName.trim() && !hasInputObject && !hasOutputText) continue;
+    if (partId && isRunningStatus && !hasOutputText) continue;
+    const obs = hasOutputText ? cap(String(output), OBS_CAP) : "[no observation returned by tool]";
+    let step;
     if (isAskHumanToolName(toolName)) {
       const q = extractAskQuestion({ input, state, part });
-      steps.push({ thought: "", act: cap(`ask_human [custom_tool] ${q}`, 4000), obs: cap(String(output), OBS_CAP) });
-      continue;
-    }
-    if (toolName === "shell" || toolName === "bash") {
+      step = { thought: "", act: cap(`ask_human [custom_tool] ${q}`, 4000), obs };
+    } else if (toolName === "shell" || toolName === "bash") {
       const cmd = String(input.command || input.cmd || "");
-      steps.push({ thought: "", act: cap(cmd || "shell: [missing command]", 4000), obs: String(output) });
-      continue;
+      step = { thought: "", act: cap(cmd || "shell: [missing command]", 4000), obs };
+    } else {
+      let inputStr;
+      try { inputStr = JSON.stringify(input); } catch { inputStr = String(input); }
+      if (!inputStr || inputStr === "{}") inputStr = "[no args]";
+      const renderedName = toolName.trim() || "unknown_tool";
+      step = { thought: "", act: `${renderedName}: ${inputStr}`, obs };
     }
-    const renderedName = toolName.trim() || "unknown_tool";
-    steps.push({ thought: "", act: `${renderedName}: ${JSON.stringify(input)}`, obs: String(output) });
+    if (partId && emittedStepIndexByPartId.has(partId)) {
+      steps[emittedStepIndexByPartId.get(partId)] = step;
+    } else {
+      if (partId) emittedStepIndexByPartId.set(partId, steps.length);
+      steps.push(step);
+    }
   }
   return steps;
 }
@@ -500,4 +514,51 @@ test("extractTrajectory drops malformed blank tool events", () => {
     properties: { part: { type: "tool", tool: "", state: { input: {}, output: "" } } },
   }]);
   assert.deepEqual(steps, []);
+});
+
+test("extractTrajectory keeps latest update for repeated part id", () => {
+  const steps = extractTrajectory([
+    {
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "part-1",
+          type: "tool",
+          tool: "shell",
+          state: { status: "running", input: {}, output: "" },
+        },
+      },
+    },
+    {
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "part-1",
+          type: "tool",
+          tool: "shell",
+          state: { status: "completed", input: { command: "ls -la" }, output: "ok" },
+        },
+      },
+    },
+  ]);
+  assert.equal(steps.length, 1);
+  assert.equal(steps[0].act, "ls -la");
+  assert.equal(steps[0].obs, "ok");
+});
+
+test("extractTrajectory avoids empty generic input rendering", () => {
+  const steps = extractTrajectory([{
+    type: "message.part.updated",
+    properties: {
+      part: {
+        id: "part-2",
+        type: "tool",
+        tool: "read",
+        state: { status: "completed", input: {}, output: "" },
+      },
+    },
+  }]);
+  assert.equal(steps.length, 1);
+  assert.equal(steps[0].act, "read: [no args]");
+  assert.equal(steps[0].obs, "[no observation returned by tool]");
 });

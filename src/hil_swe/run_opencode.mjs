@@ -438,8 +438,8 @@ function computeTrajectoryStats(events, trajectorySteps, numBlockersTotal) {
 //                       OpenCode emits non-tool action parts for edits/commands.
 function extractTrajectory(serverEvents, { stopReason = "", sdkErrorMsg = "" } = {}) {
   const steps = [];
-  const seenPartIds = new Set();
   const pendingByPartId = new Map();
+  const emittedStepIndexByPartId = new Map();
   let pendingThought = "";
 
   const interruptedObs = () => {
@@ -456,8 +456,6 @@ function extractTrajectory(serverEvents, { stopReason = "", sdkErrorMsg = "" } =
     const part = ev?.properties?.part || {};
     const partType = String(part.type || "").toLowerCase();
     const partId = part.id || part.partID || part.partId || null;
-    if (partId && seenPartIds.has(partId)) continue;
-    if (partId) seenPartIds.add(partId);
 
     if (partType === "text" || partType === "reasoning") {
       const text = String(part.text || part.content || "");
@@ -476,6 +474,7 @@ function extractTrajectory(serverEvents, { stopReason = "", sdkErrorMsg = "" } =
         : (state.output || part.output || part.result || "");
       const hasInputObject = input && typeof input === "object" && Object.keys(input).length > 0;
       const hasOutputText = String(output ?? "").trim().length > 0;
+      const isRunningStatus = status === "running" || status === "in_progress" || status === "started";
 
       // Ignore no-op tool events that carry no identity, no args, and no output.
       if (!toolName.trim() && !hasInputObject && !hasOutputText) continue;
@@ -490,17 +489,35 @@ function extractTrajectory(serverEvents, { stopReason = "", sdkErrorMsg = "" } =
       } else {
         let inputStr;
         try { inputStr = JSON.stringify(input); } catch { inputStr = String(input); }
+        if (!inputStr || inputStr === "{}") inputStr = "[no args]";
         const renderedName = toolName.trim() || "unknown_tool";
         act = cap(`${renderedName}: ${inputStr}`, ACT_CAP);
       }
+      const obs = hasOutputText
+        ? cap(String(output), OBS_CAP)
+        : "[no observation returned by tool]";
 
-      if (partId && (status === "running" || status === "in_progress" || status === "started")) {
+      if (partId && isRunningStatus && !hasOutputText) {
         pendingByPartId.set(partId, { thought: pendingThought, act });
         pendingThought = "";
         continue;
       }
 
-      steps.push({ thought: pendingThought, act, obs: cap(String(output), OBS_CAP) });
+      if (partId && emittedStepIndexByPartId.has(partId)) {
+        const idx = emittedStepIndexByPartId.get(partId);
+        if (idx !== undefined) {
+          const previous = steps[idx] || { thought: "", act: "", obs: "" };
+          steps[idx] = {
+            thought: previous.thought || pendingThought || "",
+            act,
+            obs,
+          };
+        }
+      } else {
+        const idx = steps.length;
+        steps.push({ thought: pendingThought, act, obs });
+        if (partId) emittedStepIndexByPartId.set(partId, idx);
+      }
       if (partId) pendingByPartId.delete(partId);
       pendingThought = "";
       continue;
@@ -509,7 +526,11 @@ function extractTrajectory(serverEvents, { stopReason = "", sdkErrorMsg = "" } =
     if (partType === "patch") {
       const files = Array.isArray(part.files) ? part.files.filter(Boolean) : [];
       const act = files.length ? `Edit: ${files.join(", ")}` : "Edit";
-      steps.push({ thought: pendingThought, act: cap(act, ACT_CAP), obs: "" });
+      steps.push({
+        thought: pendingThought,
+        act: cap(act, ACT_CAP),
+        obs: "[patch update emitted by SDK]",
+      });
       pendingThought = "";
       continue;
     }
@@ -517,7 +538,11 @@ function extractTrajectory(serverEvents, { stopReason = "", sdkErrorMsg = "" } =
     if (partType === "command") {
       const cmd = String(part.command || "");
       const output = String(part.output || part.result || "");
-      steps.push({ thought: pendingThought, act: cap(cmd, ACT_CAP), obs: cap(output, OBS_CAP) });
+      steps.push({
+        thought: pendingThought,
+        act: cap(cmd || "[missing command]", ACT_CAP),
+        obs: cap(output || "[command produced no output]", OBS_CAP),
+      });
       pendingThought = "";
       continue;
     }
@@ -531,7 +556,13 @@ function extractTrajectory(serverEvents, { stopReason = "", sdkErrorMsg = "" } =
     });
   }
 
-  if (pendingThought) steps.push({ thought: pendingThought, act: "", obs: "" });
+  if (pendingThought) {
+    steps.push({
+      thought: pendingThought,
+      act: "[no action emitted by SDK]",
+      obs: "[no observation emitted by SDK]",
+    });
+  }
   return steps;
 }
 
