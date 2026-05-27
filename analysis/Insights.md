@@ -206,7 +206,7 @@ The unit of analysis is the whole `{model, harness, customization}` system — h
 ## Figure Inventory
 
 | # | File | Used in | Role | 
-|---|---|---|---|---|
+|---|---|---|---|
 | Figure 1 | `01_same_model_different_scaffold` | Finding 1a | Primary: performance gap exists | 
 | Figure 2 | `15_codex_selective_escalation_gap` | Finding 1a | Codex deep-dive | 
 | Figure 3 | `02_detection_targeting` | Finding 1b | Primary: blocker recall vs ask precision | 
