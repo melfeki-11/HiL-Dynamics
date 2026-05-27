@@ -1,12 +1,23 @@
 # HiL-Dynamics
 
-HiL-Dynamics is a [HiL-Bench](https://static.scale.com/uploads/67a153343e046988406ef320/HiL_Bench.pdf) diagnostic: it measures how `{model, harness, skill}` systems behave on underspecified tasks — when they identify information gaps they cannot resolve through exploration alone, when they silently guess, and whether their questions actually surface registered blockers.
+**HiL-Dynamics is a diagnostic for selective escalation.** It measures whether a coding agent knows to ask for help when it lacks the information to finish a task, or whether it silently guesses and ships the wrong answer.
 
-The tool runs a prepared benchmark task through pluggable harnesses, collects structured trajectories, and computes **Ask Precision**, **Blocker Recall**, and **Ask-F1** alongside pass@k. The output shows how far each `{model, harness, skill}` system is from the *selective escalation* ideal — discerning mid-task when an information gap must be escalated rather than guessed around — and how large the *judgment gap* is between full-information and underspecified performance.
+It is the open-source companion to **[HiL-Bench](https://static.scale.com/uploads/67a153343e046988406ef320/HiL_Bench.pdf)**, the underlying benchmark of human-validated underspecified tasks. HiL-Dynamics runs HiL-Bench across modern harnesses (Claude Code, Codex, Antigravity, ADK, OpenCode), captures full agent trajectories, and reports both *whether* agents finish and *how* they handled the missing information along the way.
+
+**The headline result.** Frontier agents pass 75-80% of HiL-Bench tasks when given complete information. The same agents pass under 10% the moment 3-5 critical facts are withheld and they are forced to ask. Stronger harnesses don't close the gap, but skill engineering can move it, asymmetrically: Codex jumps from 7% to 53% pass@3 with a tuned skill; Claude Code only moves from 3% to 15% with the same template.
 
 ![Agent Ask Behavior on Under-Specified Tasks](analysis/figures/quadrant_chart.svg)
 
-Supported harness configs:
+*The four quadrants of agent behavior on underspecified tasks. Most modern agents sit in the confident-hallucination corner. See [analysis/Insights.md](analysis/Insights.md) for the full write-up.*
+
+## Why use HiL-Dynamics
+
+- **Quantify the judgment gap** between full-information and underspecified performance for any `{model, harness, skill}` setup.
+- **Compare modern harnesses** on the same fixed set of underspecified tasks.
+- **Inspect trajectories**, not just aggregate scores. See *when* the agent asked, *what* it asked, and how it recovered from a bad question.
+- **Iterate on skill text** and escalation guidance, then re-measure to see what moved.
+
+## Supported harnesses
 
 | Harness | Default model | Default reasoning |
 |---|---|---|
@@ -16,7 +27,36 @@ Supported harness configs:
 | `adk` | `gemini/gemini-3.1-pro-preview-customtools` | `high` |
 | `opencode` | `fireworks_ai/glm-5p1` | `high` |
 
-## Repository Layout
+## What HiL-Dynamics reports
+
+Each run produces four metrics plus the full per-attempt trajectory:
+
+- **pass@k.** Task resolution rate.
+- **Ask Precision.** Share of asked questions that targeted a real blocker. Penalizes question spam.
+- **Blocker Recall.** Share of registered blockers the agent surfaced through targeted questions.
+- **Ask-F1.** Harmonic mean of Ask Precision and Blocker Recall. Structurally resistant to gaming.
+- **Trajectories.** Complete `{thought, act, obs}` traces for manual inspection or LLM-as-a-judge analysis.
+
+Each attempt saves a normalized bundle under `runs/<run-id>/<uid>/<mode>/pass_<n>/`:
+
+```
+attempt.json      task metadata
+trajectory.json   [{thought, act, obs}, ...]
+stats.json        num_steps, num_questions, num_blockers_resolved, ...
+patch.diff        agent's git diff
+result.json       solve outcome
+eval_result.json  test pass/fail
+```
+
+## Key findings
+
+See [analysis/Insights.md](analysis/Insights.md) for the full write-up. The three headline results:
+
+1. **The judgment gap survives modern scaffolding.** Stronger harnesses haven't taught agents *when* to ask.
+2. **Skill engineering is a real handle, but a harness-specific one.** The template that lifts Codex from 7% to 53% pass@3 barely moves Claude Code.
+3. **Every `{harness, model}` we tested has its own failure shape.** There is no universal recipe.
+
+## Repository layout
 
 ```
 bin/                  `hilbench` entry point (setup/run/analyze)
@@ -29,42 +69,20 @@ runs/                 run outputs (one folder per run-id, gitignored)
 docs/                 schema + behavior reference
 ```
 
-## What This Measures
-
-Three outputs per run:
-
-- **pass@k** — task resolution rate
-- **Ask Precision** — ratio of relevant questions to total questions asked; penalizes over-asking
-- **Blocker Recall** — proportion of registered information gaps the agent surfaces through targeted questions
-- **Ask-F1** — harmonic mean of Ask Precision and Blocker Recall; structurally prevents gaming through question spam
-- **Trajectories** — complete `{thought, act, obs}` traces for manual inspection or LLM-as-a-judge analysis
-
-Each attempt saves a normalized bundle under `runs/<run-id>/<uid>/<mode>/pass_<n>/`:
-```
-attempt.json      task metadata
-trajectory.json   [{thought, act, obs}, ...]
-stats.json        num_steps, num_questions, num_blockers_resolved, ...
-patch.diff        agent's git diff
-result.json       solve outcome
-eval_result.json  test pass/fail
-```
-
-## Key Findings
-
-See [analysis/Insights.md](analysis/Insights.md) for the full analysis: how the judgment gap persists across modern harnesses, how different `{model, harness, skill}` configurations perform on selective escalation, how Ask Precision and Blocker Recall trade off, and what skill interventions move the needle.
-
 ## Prerequisites
 
 - Docker (running)
 - Node.js 20+
 - Python 3.10+
 
+Install dependencies:
+
 ```bash
 npm install
 pip install litellm boto3 pandas pytest tqdm pyyaml
 ```
 
-## First-Time Setup
+## First-time setup
 
 **1. Configure credentials**
 
@@ -75,14 +93,14 @@ cp .env.example .env
 Open `.env` and fill in the required fields:
 
 ```bash
-# LiteLLM proxy — recommended when running multiple harnesses
+# LiteLLM proxy. Recommended when running multiple harnesses.
 LITELLM_BASE_URL="https://<your-litellm-endpoint>"
 LITELLM_API_KEY="sk-..."
 
-# HuggingFace token — needed to pull task Docker base images
+# HuggingFace token. Needed to pull task Docker base images.
 HF_TOKEN="hf_..."
 
-# Judge model — required for ask_human-based arms (default and enhanced)
+# Judge model. Required for ask_human-based arms (default and enhanced).
 # Any instruction-tuned model your LiteLLM proxy serves works.
 # Paper results used: "casperhansen/llama-3.3-70b-instruct-awq"
 ASK_HUMAN_MODEL="<your-judge-model>"
@@ -95,7 +113,7 @@ If you have a direct API key rather than a LiteLLM proxy, you can omit `LITELLM_
 | Anthropic | `ANTHROPIC_AUTH_TOKEN=sk-ant-...` and `ANTHROPIC_BASE_URL=https://api.anthropic.com` |
 | OpenAI | `OPENAI_API_KEY=sk-...` and `OPENAI_BASE_URL=https://api.openai.com/v1` |
 
-The tool resolves credentials in this priority order: `LITELLM_API_KEY` → `ANTHROPIC_AUTH_TOKEN` → `OPENAI_API_KEY`. A LiteLLM proxy is recommended when running multiple harnesses (claude + codex + gemini) from a single endpoint.
+The tool resolves credentials in this priority order: `LITELLM_API_KEY`, then `ANTHROPIC_AUTH_TOKEN`, then `OPENAI_API_KEY`. A LiteLLM proxy is recommended when running multiple harnesses (claude + codex + gemini) from a single endpoint.
 
 **2. Ingest benchmark tasks**
 
@@ -144,7 +162,7 @@ All checks passed. Ready to run.
 
 ## Using HiL-Dynamics
 
-### Getting Agent Results
+### Running agents
 
 ```bash
 # 1) default arm: ask_human mode only
@@ -160,7 +178,7 @@ All checks passed. Ready to run.
 ./bin/hilbench run --harness claude --uid-file data/hil_swe_20_attempt_test_set_uids.txt --arm default
 ```
 
-### Doing Agent Analyses
+### Analyzing runs
 
 ```bash
 # Build report + metadata for one run
@@ -173,7 +191,7 @@ python3 -m json.tool runs/<run-id>/metadata.json
 python3 -m json.tool runs/<run-id>/metrics/summary.json
 ```
 
-## Configuration Files
+## Configuration files
 
 Harness configs live in `configs/harnesses/` and are the only configs required for normal usage:
 
@@ -194,7 +212,7 @@ configs/harnesses/
 | `model` | Model slug as understood by your LiteLLM proxy |
 | `reasoning_effort` | `low`, `medium`, `high`, `xhigh`, `max` |
 
-## Clarification Routing
+## Clarification routing
 
 All harnesses route through the same sidecar backend (`src/hil_swe/ask_human_sidecar.mjs`), but their question surfaces differ:
 
@@ -206,7 +224,7 @@ All harnesses route through the same sidecar backend (`src/hil_swe/ask_human_sid
 | ADK | native `ask_human` tool | no separate toggle |
 | OpenCode | no native surface; uses `ask_human` tool path | no separate toggle |
 
-The blocker registry is never copied into the agent workspace; it is only mounted for the sidecar.
+> **Note.** The blocker registry is never copied into the agent workspace. It is only mounted for the sidecar, so the agent cannot read the registry to game the metric.
 
 For full output schema and details, see [docs/run_output_schema.md](docs/run_output_schema.md).
 For harness caveats and interpretation notes, see [docs/harness_asymmetries.md](docs/harness_asymmetries.md).
