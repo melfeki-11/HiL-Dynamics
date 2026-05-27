@@ -215,7 +215,6 @@ These need verification before public-facing text:
 - Should the public version restrict to the public HiL-Bench task split until private rerun / image issues are resolved?
 - Do we have validated answer-incorporation judging, or should Finding 2 / Finding 3c claims about "answer used" or "recovery" remain deterministic trace proxies?
 - Should `tool/guidance` and `custom skill` be reported as scaffold-level interventions distinct from the native baseline (preserving the evaluation-vs-design separation), or merged into a single "post-tuning" narrative?
-- Is the "Skill evolution notes" subsection in Finding 2 (`example1` → `example4` → `example7` → `example9`, references to Alina's settings, smoke shards) appropriate for coauthor circulation, or should it move to an appendix before any external draft?
 
 ## Figure Inventory
 
