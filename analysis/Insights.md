@@ -208,25 +208,17 @@ These need verification before public-facing text:
 - **Task split.** TODO: confirm whether the headline numbers are over the public HiL-Bench split, the private split, or both, and whether the public version of this draft restricts to the public split until private rerun / image issues are resolved.
 - **Trajectory parsing parity.** Strategy buckets and timing depend on the trajectory parser identifying `ASK`, `READ`, `WRITE`, and `TEST` actions across five different harness formats. The OpenCode `patch-made/no-submit` share called out in Finding 3d is the largest outstanding parser/harness question.
 
-## Open Questions
-
-- Is OpenCode's `patch-made/no-submit` share in Finding 3d substantive harness behavior or a parsing/submission artifact? (See also the Methodology / `baseline` framing TODOs.)
-- Is Antigravity headline-only (Finding 1), or should Findings 3a–3d include Antigravity strategy and terminal-state breakdowns? It currently appears in the headline numbers but is not dissected later.
-- Should the public version restrict to the public HiL-Bench task split until private rerun / image issues are resolved?
-- Do we have validated answer-incorporation judging, or should Finding 2 / Finding 3c claims about "answer used" or "recovery" remain deterministic trace proxies?
-- Should `tool/guidance` and `custom skill` be reported as scaffold-level interventions distinct from the native baseline (preserving the evaluation-vs-design separation), or merged into a single "post-tuning" narrative?
-
 ## Figure Inventory
 
 | Figure | Used in | Role | Status |
 |---|---|---|---|
-| `01_same_model_different_scaffold` | Finding 1a | Primary: performance gap exists | ready |
-| `15_codex_selective_escalation_gap` | Finding 1a | Codex deep-dive | ready |
-| `02_detection_targeting` | Finding 1b | Primary: blocker recall vs ask precision | ready, pending judge provenance |
-| `16_custom_skill_metric_lift` | Finding 2 | Primary: constructive result | ready |
-| `13_swe_agent_model_family_strategy` | Finding 3a | Primary: model-family strategy fingerprint | ready (SVG; format-consistency TODO) |
-| `14_codex_strategy_buckets` | Finding 3b | Codex strategy detail | ready |
-| `17_gpt55_trajectory_strategy_fingerprints` | Finding 3b | GPT 5.5 trajectory fingerprint | ready |
-| `05_strategy_buckets` | Finding 3b | Cross-system strategy summary | ready |
-| `08_first_ask_timing` | Finding 3b | First-ask timing diagnostic | ready |
-| `04_terminal_evidence_mix` | Finding 3d | Terminal-state decomposition | ready, pending OpenCode caveat |
+| `01_same_model_different_scaffold` | Finding 1a | Primary: performance gap exists | 
+| `15_codex_selective_escalation_gap` | Finding 1a | Codex deep-dive | 
+| `02_detection_targeting` | Finding 1b | Primary: blocker recall vs ask precision | 
+| `16_custom_skill_metric_lift` | Finding 2 | Primary: constructive result | 
+| `13_swe_agent_model_family_strategy` | Finding 3a | Primary: model-family strategy fingerprint | 
+| `14_codex_strategy_buckets` | Finding 3b | Codex strategy detail | 
+| `17_gpt55_trajectory_strategy_fingerprints` | Finding 3b | GPT 5.5 trajectory fingerprint | 
+| `05_strategy_buckets` | Finding 3b | Cross-system strategy summary | 
+| `08_first_ask_timing` | Finding 3b | First-ask timing diagnostic | 
+| `04_terminal_evidence_mix` | Finding 3d | Terminal-state decomposition | 
