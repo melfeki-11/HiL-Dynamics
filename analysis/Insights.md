@@ -57,8 +57,10 @@ Full_Info pass@3 sits around 75–80% across systems — ADK/Gemini `80.0%`, Ope
 The shared tool/guidance setup moves Codex, Antigravity, and ADK substantially: Codex reaches `42.0%` pass@3, Antigravity `34.0%`, and ADK `21.3%`. Claude-Code (`12.0%`) and OpenCode (`11.7%`) barely move (note: OpenCode's number has parser/submission caveats — see Finding 3d before drawing strong conclusions about OpenCode here). This is the broad setup comparison; we keep the tuned custom-skill rows out of this figure so the first finding does not mix generic harness augmentation with the later skill-specific intervention.
 
 ![Full_Info vs AskHuman pass@3](figures/01_same_model_different_scaffold.png)
+*Figure 1: Full_Info vs AskHuman pass@3 across all five harness configurations. Each row shows the same model's score under full information (right dot) versus the AskHuman-only condition (left dot).*
 
 ![Codex-only selective escalation gap](figures/15_codex_selective_escalation_gap.png)
+*Figure 2: GPT 5.5 / Codex selective escalation gap across native, tool/guidance, and custom skill conditions.*
 
 ### 1b: Blocker Recall vs Ask Precision
 
@@ -69,6 +71,7 @@ Harness variations can move recall or precision substantially, but every system 
 As above, this diagnostic plot keeps the tuned custom-skill rows out of the broad comparison. That keeps Detection vs Targeting aligned with the baseline and shared tool/guidance setup, while the custom-skill precision/recall tradeoff is handled in Finding 2.
 
 ![Detection vs targeting](figures/02_detection_targeting.png)
+*Figure 3: Blocker Recall vs Ask Precision across all systems and conditions. High recall means blockers were surfaced; high precision means questions were relevant.*
 
 These results reiterate HiL-Bench's original finding: agents still can't reliably decide when to ask for help. Even strong modern harnesses don't close the gap.
 
@@ -79,6 +82,7 @@ The constructive punchline: HiL-Bench is useful not only as a benchmark, but as 
 We provided Claude-Code and Codex with thorough, well-written skill and escalation guidance in the system prompt, plus a custom `ask_human()` MCP tool — hypothesizing that the custom tool would be free from the bounds of their native training or prompting restrictions. The results are much better, with all SDKs showing significant improvement. All agents ask much more frequently, and Claude-Code and Codex utilize the custom tool more effectively than they do their native tool.
 
 ![Customization effects on pass@3](figures/16_custom_skill_metric_lift.png)
+*Figure 4: Custom-skill pass@3 lift for Claude-Code and Codex relative to their native baselines.*
 
 | system | clean tasks | pass@1 | pass@3 | Ask Precision | Blocker Recall | ask-F1 | avg questions |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -131,6 +135,7 @@ Examining trajectories surfaces what aggregate metrics miss. We highlight four a
 Under SWE-agent, related model families exhibit similar explore/ask/write shapes. GPT models ask early; Claude models do more early exploration before asking. Trajectory shape is a repeatable behavioral signature, not run-to-run noise.
 
 ![SWE-agent model-family strategy](figures/13_swe_agent_model_family_strategy.svg)
+*Figure 5: Action-type distributions by turn for GPT, Claude, and Gemini model families under SWE-agent.*
 
 ### 3b: The same model bends to the harness
 
@@ -149,12 +154,16 @@ To compare cleanly, we collapse each trajectory into a strategy bucket — asked
 First-ask timing shifts the same way — Claude Opus 4.7 asks later under Claude-Code than under SWE-agent, for instance.
 
 ![Codex strategy buckets](figures/14_codex_strategy_buckets.png)
+*Figure 6: Distribution of trajectory strategies (asked upfront, explored-then-asked, wrote-before-asking, never asked) across Codex conditions.*
 
 ![GPT 5.5 trajectory strategy fingerprints](figures/17_gpt55_trajectory_strategy_fingerprints.png)
+*Figure 7: GPT 5.5 action-sequence fingerprints across Native Codex, tool/guidance, custom skill, and SWE-agent.*
 
 ![Strategy buckets](figures/05_strategy_buckets.png)
+*Figure 8: Cross-system strategy bucket summary across all five harnesses.*
 
 ![First ask timing](figures/08_first_ask_timing.png)
+*Figure 9: First-ask timing distributions relative to first edit, across configurations.*
 
 ### 3c: Recovery after a bad first ask
 
@@ -186,6 +195,7 @@ Failed AskHuman trajectories terminate in deterministically distinguishable stat
 The custom-skill rows clarify what shifted under Codex. Among unresolved `GPT 5.5 / Native Codex + custom skill` passes, `35.5%` end as patch-made/no-submit, `32.4%` as local-green/hidden-red, `16.9%` as visible-red-at-end, and `15.2%` as weak-validation-only — substantive work failing to close the loop, not refusal to engage. Claude + custom skill looks similar (`37.9%` local-green/hidden-red, `35.7%` patch-made/no-submit).
 
 ![Terminal evidence mix](figures/04_terminal_evidence_mix.png)
+*Figure 10: Terminal-state decomposition of failed AskHuman trajectories across all systems.*
 
 ## Takeaways
 
@@ -197,15 +207,15 @@ The unit of analysis is the whole `{model, harness, customization}` system — h
 
 ## Figure Inventory
 
-| Figure | Used in | Role | Status |
-|---|---|---|---|
-| `01_same_model_different_scaffold` | Finding 1a | Primary: performance gap exists | 
-| `15_codex_selective_escalation_gap` | Finding 1a | Codex deep-dive | 
-| `02_detection_targeting` | Finding 1b | Primary: blocker recall vs ask precision | 
-| `16_custom_skill_metric_lift` | Finding 2 | Primary: constructive result | 
-| `13_swe_agent_model_family_strategy` | Finding 3a | Primary: model-family strategy fingerprint | 
-| `14_codex_strategy_buckets` | Finding 3b | Codex strategy detail | 
-| `17_gpt55_trajectory_strategy_fingerprints` | Finding 3b | GPT 5.5 trajectory fingerprint | 
-| `05_strategy_buckets` | Finding 3b | Cross-system strategy summary | 
-| `08_first_ask_timing` | Finding 3b | First-ask timing diagnostic | 
-| `04_terminal_evidence_mix` | Finding 3d | Terminal-state decomposition | 
+| # | File | Used in | Role | Status |
+|---|---|---|---|---|
+| Figure 1 | `01_same_model_different_scaffold` | Finding 1a | Primary: performance gap exists | ready |
+| Figure 2 | `15_codex_selective_escalation_gap` | Finding 1a | Codex deep-dive | ready |
+| Figure 3 | `02_detection_targeting` | Finding 1b | Primary: blocker recall vs ask precision | ready, pending judge provenance |
+| Figure 4 | `16_custom_skill_metric_lift` | Finding 2 | Primary: constructive result | ready |
+| Figure 5 | `13_swe_agent_model_family_strategy` | Finding 3a | Primary: model-family strategy fingerprint | ready (SVG; format-consistency TODO) |
+| Figure 6 | `14_codex_strategy_buckets` | Finding 3b | Codex strategy detail | ready |
+| Figure 7 | `17_gpt55_trajectory_strategy_fingerprints` | Finding 3b | GPT 5.5 trajectory fingerprint | ready |
+| Figure 8 | `05_strategy_buckets` | Finding 3b | Cross-system strategy summary | ready |
+| Figure 9 | `08_first_ask_timing` | Finding 3b | First-ask timing diagnostic | ready |
+| Figure 10 | `04_terminal_evidence_mix` | Finding 3d | Terminal-state decomposition | ready, pending OpenCode caveat |
