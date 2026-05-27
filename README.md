@@ -1,6 +1,6 @@
 # HiL-Dynamics
 
-HiL-Dynamics is a HiL-Bench (https://doi.org/10.48550/arXiv.2604.09408) diagnostic: it measures how `{model, harness, skill}` systems behave on underspecified coding tasks — when they identify information gaps they cannot resolve through exploration alone, when they silently guess, and whether their questions actually surface registered blockers.
+HiL-Dynamics is a [HiL-Bench](https://static.scale.com/uploads/67a153343e046988406ef320/HiL_Bench.pdf) diagnostic: it measures how `{model, harness, skill}` systems behave on underspecified coding tasks — when they identify information gaps they cannot resolve through exploration alone, when they silently guess, and whether their questions actually surface registered blockers.
 
 The tool runs a prepared benchmark task through pluggable harnesses, collects structured trajectories, and computes **Ask Precision**, **Blocker Recall**, and **Ask-F1** alongside pass@k. The output shows how far each `{model, harness, skill}` system is from the *selective escalation* ideal — discerning mid-task when an information gap must be escalated rather than guessed around — and how large the *judgment gap* is between full-information and underspecified performance.
 
