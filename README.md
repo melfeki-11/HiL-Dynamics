@@ -54,7 +54,7 @@ See [analysis/Insights.md](analysis/Insights.md) for the full write-up. The thre
 
 1. **The judgment gap survives modern scaffolding.** Stronger harnesses haven't taught agents *when* to ask.
 2. **Skill engineering is a real handle, but a harness-specific one.** Skill tuning that lifts Codex from 7% to 53% pass@3 only takes Claude Code from 3% to 15%.
-3. **Every `{harness, model}` we tested has its own failure shape.** There is no universal recipe.
+3. **Every `{model, harness}` we tested has its own failure shape.** There is no universal recipe.
 
 ## Repository layout
 
