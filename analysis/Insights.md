@@ -103,7 +103,6 @@ We gave Claude Code and Codex thorough escalation guidance in the system prompt,
 Beyond raw performance, the sweep surfaced clear patterns in how agents respond to different skill techniques:
 
 - **When-to-ask guidance** intuitively raised performance.
-- **How-to-formulate guidance** also raised performance, somewhat surprising given the agents already know how to write questions in general.
 - **Emotional language**, leveraging the agents' trained desire to fulfill requests with strong framing (e.g. they would fail if they don't ask), also yielded a measurable boost.
 
 ### Six skill levers
