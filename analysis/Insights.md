@@ -27,8 +27,6 @@ We compare four conditions — see the Conditions table below. The headline figu
 | `tool/guidance` | Native plus the shared escalation guidance package in the system prompt; Claude-Code and Codex additionally get a custom `ask_human()` MCP tool. | Findings 2, 3 |
 | `custom skill` | Tuned `skill` template (Claude-Code and Codex only), layered on top of `tool/guidance`. | Findings 2, 3 |
 
-TODO: confirm whether `baseline` is strictly the default system prompt or already includes minimal escalation framing — this determines whether Finding 1's gap is reported as native-harness behavior or a partially-instructed baseline.
-
 ### Two Distinct Contributions
 
 This draft makes two contributions that should be kept separate when others read or revise it:
@@ -207,15 +205,15 @@ The unit of analysis is the whole `{model, harness, customization}` system — h
 
 ## Figure Inventory
 
-| # | File | Used in | Role | Status |
+| # | File | Used in | Role | 
 |---|---|---|---|---|
-| Figure 1 | `01_same_model_different_scaffold` | Finding 1a | Primary: performance gap exists | ready |
-| Figure 2 | `15_codex_selective_escalation_gap` | Finding 1a | Codex deep-dive | ready |
-| Figure 3 | `02_detection_targeting` | Finding 1b | Primary: blocker recall vs ask precision | ready, pending judge provenance |
-| Figure 4 | `16_custom_skill_metric_lift` | Finding 2 | Primary: constructive result | ready |
-| Figure 5 | `13_swe_agent_model_family_strategy` | Finding 3a | Primary: model-family strategy fingerprint | ready (SVG; format-consistency TODO) |
-| Figure 6 | `14_codex_strategy_buckets` | Finding 3b | Codex strategy detail | ready |
-| Figure 7 | `17_gpt55_trajectory_strategy_fingerprints` | Finding 3b | GPT 5.5 trajectory fingerprint | ready |
-| Figure 8 | `05_strategy_buckets` | Finding 3b | Cross-system strategy summary | ready |
-| Figure 9 | `08_first_ask_timing` | Finding 3b | First-ask timing diagnostic | ready |
-| Figure 10 | `04_terminal_evidence_mix` | Finding 3d | Terminal-state decomposition | ready, pending OpenCode caveat |
+| Figure 1 | `01_same_model_different_scaffold` | Finding 1a | Primary: performance gap exists | 
+| Figure 2 | `15_codex_selective_escalation_gap` | Finding 1a | Codex deep-dive | 
+| Figure 3 | `02_detection_targeting` | Finding 1b | Primary: blocker recall vs ask precision | 
+| Figure 4 | `16_custom_skill_metric_lift` | Finding 2 | Primary: constructive result | 
+| Figure 5 | `13_swe_agent_model_family_strategy` | Finding 3a | Primary: model-family strategy fingerprint | 
+| Figure 6 | `14_codex_strategy_buckets` | Finding 3b | Codex strategy detail | 
+| Figure 7 | `17_gpt55_trajectory_strategy_fingerprints` | Finding 3b | GPT 5.5 trajectory fingerprint | 
+| Figure 8 | `05_strategy_buckets` | Finding 3b | Cross-system strategy summary | 
+| Figure 9 | `08_first_ask_timing` | Finding 3b | First-ask timing diagnostic |
+| Figure 10 | `04_terminal_evidence_mix` | Finding 3d | Terminal-state decomposition | 
