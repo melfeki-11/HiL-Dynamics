@@ -202,9 +202,9 @@ All harnesses route through the same sidecar backend (`src/hil_swe/ask_human_sid
 |---|---|---|
 | Claude Code | `AskUserQuestion` | yes (`ask_human` custom tool) |
 | Codex | `requestUserInput` | yes (`ask_human` custom tool) |
+| Antigravity | native ask + optional custom tool path | yes (`ask_human` custom tool) |
 | ADK | native `ask_human` tool | no separate toggle |
 | OpenCode | no native surface; uses `ask_human` tool path | no separate toggle |
-| Antigravity | native ask + optional custom tool path | yes (`ask_human` custom tool) |
 
 The blocker registry is never copied into the agent workspace; it is only mounted for the sidecar.
 
