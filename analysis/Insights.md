@@ -118,13 +118,13 @@ The custom-skill sweep surfaced six non-leaking dimensions that independently st
 
 ### Harnesses respond to skills differently
 
-As tunable as skills are, no single template yielded the maximal improvement from the default harness baseline across all agents. A skill that excels on one harness can even degrade performance on another. Claude Code and Codex, for example, have almost opposite asking priors, with the former being more open to asking questions.
+As tunable as skills are, no single template yielded the maximal improvement from the default harness baseline across all agents. A skill that excels on one harness can even degrade performance on another. Claude Code and Codex, for example, have almost opposite asking priors, with the latter being more open to asking questions.
 
 **Closing the codebase escape hatch.** The baseline gate let agents skip asking whenever they believed the answer was inferable from the codebase ("cannot resolve it from the codebase"). We replaced that clause with a strict no-inference rule ("even implicit answers from the codebase are not good enough"). For Claude Code this lifted pass@3 by +22%, because it stopped suppressing questions it would otherwise have self-resolved. For Codex, which was already asking near its ceiling, the change did nothing. Pass@3 held flat at 0.533, confirming the escape hatch never governed Codex's asking behavior.
 
 **Strengthening the mandate.** A second variant combined a stricter gate with explicit "MUST ask" framing and failure language ("you will fail this task if you do not ask"). Codex's pass@3 jumped +630% (0.073 to 0.533), with average questions per pass rising nearly 10x (0.5 to 4.7). Claude Code's response was far more muted: average questions per pass rose only +0.9 (vs Codex's +4.2), and pass@3 reached just 0.120, confirming that Claude modulates even strong mandate text against its own inference priors.
 
-The takeaway is asymmetric. Codex is much more responsive to mandate and gate volume settings, while Claude Code relies more on controlling its inference escape hatch. Skill engineering should be calibrated per harness rather than applied uniformly.
+The takeaway is asymmetric. Codex is much more responsive to mandate settings, while Claude Code relies more on controlling its inference escape hatch. Skill engineering should be calibrated per harness rather than applied uniformly.
 
 Even with the best performance we could achieve through careful enhancement, all agents still leave a substantial pass@3 gap compared to their full-information ceiling.
 
