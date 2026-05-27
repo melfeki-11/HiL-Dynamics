@@ -12,7 +12,7 @@ HiL-Dynamics is the open-source companion to **[HiL-Bench](https://static.scale.
 
 ## Why use HiL-Dynamics
 
-- **Quantify the judgment gap** between full-information and underspecified performance for any `{model, harness, skill}` setup.
+- **Quantify the judgment gap** between full-information and underspecified performance for any `{harness, model, skill}` setup.
 - **Compare modern harnesses** on the same fixed set of underspecified tasks.
 - **Inspect trajectories**, not just aggregate scores. See *when* the agent asked, *what* it asked, and how it recovered from a bad question.
 - **Iterate on skill text** and escalation guidance, then re-measure to see what moved.
