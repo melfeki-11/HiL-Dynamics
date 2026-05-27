@@ -4,17 +4,37 @@ HiL-Dynamics is a HiL-Bench diagnostic: it measures how `<model, harness>` pairs
 
 The tool runs a prepared benchmark task through pluggable harnesses, collects structured trajectories, and computes ask precision/recall/F1 alongside pass@k. The output shows how far each `<model, harness>` pair is from the *selective escalation* ideal: asking exactly when needed, with questions that resolve actual blockers.
 
-```mermaid
-%%{init: {"theme": "base", "themeVariables": {"quadrant1Fill": "#d5f0e8", "quadrant1TextFill": "#1d7a6e", "quadrant2Fill": "#ede9f6", "quadrant2TextFill": "#6b3fa0", "quadrant3Fill": "#fce4e1", "quadrant3TextFill": "#8b1712", "quadrant4Fill": "#fef9e0", "quadrant4TextFill": "#9a7d0a"}}}%%
-quadrantChart
-    title Agent Ask Behavior on Under-Specified Tasks
-    x-axis Fails --> Succeeds
-    y-axis Doesn't ask --> Asks when needed
-    quadrant-1 Good Agent
-    quadrant-2 Over-Asks
-    quadrant-3 Confident Hallucination
-    quadrant-4 Lucky Guess
-```
+**Agent Ask Behavior on Under-Specified Tasks**
+
+<table border="1" cellpadding="28" cellspacing="0" width="100%">
+<tr>
+  <td align="center" valign="middle" width="4%"><em><font color="#888888">Asks<br>when<br>needed</font></em></td>
+  <td align="center" bgcolor="#ede9f6" width="48%">
+    <strong><font color="#6b3fa0">Over-Asks</font></strong><br><br>
+    <em><font color="#888888">Noisy, slower than manual</font></em>
+  </td>
+  <td align="center" bgcolor="#d5eee9" width="48%">
+    <strong><font color="#1d7a6e">Good Agent ✓</font></strong><br><br>
+    <em><font color="#888888">Selective escalation</font></em>
+  </td>
+</tr>
+<tr>
+  <td align="center" valign="middle"><em><font color="#888888">Doesn't<br>ask</font></em></td>
+  <td align="center" bgcolor="#fce4e1">
+    <strong><font color="#8b1712">Confident Hallucination</font></strong><br><br>
+    <strong><font color="#c0392b">The dangerous quadrant</font></strong>
+  </td>
+  <td align="center" bgcolor="#fef8e0">
+    <strong><font color="#9a7d0a">Lucky Guess</font></strong><br><br>
+    <em><font color="#888888">Fragile, not reliable</font></em>
+  </td>
+</tr>
+<tr>
+  <td></td>
+  <td align="center"><em><font color="#888888">Fails</font></em></td>
+  <td align="center"><em><font color="#888888">Succeeds</font></em></td>
+</tr>
+</table>
 
 Supported harness configs:
 
