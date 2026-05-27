@@ -185,8 +185,6 @@ Failed AskHuman trajectories terminate in deterministically distinguishable stat
 
 The custom-skill rows clarify what shifted under Codex. Among unresolved `GPT 5.5 / Native Codex + custom skill` passes, `35.5%` end as patch-made/no-submit, `32.4%` as local-green/hidden-red, `16.9%` as visible-red-at-end, and `15.2%` as weak-validation-only — substantive work failing to close the loop, not refusal to engage. Claude + custom skill looks similar (`37.9%` local-green/hidden-red, `35.7%` patch-made/no-submit).
 
-> **OpenCode caveat.** OpenCode/GLM exhibits a disproportionately large patch-made/no-submit share in this figure. We do not yet know whether this reflects substantive harness behavior (the agent constructs a patch but never invokes the submission step), a submission-mechanic difference between OpenCode and the other harnesses, or a trajectory-parser artifact in how we identify `submit` events in OpenCode traces. Resolve before publication. Until then, treat OpenCode's terminal-state share as provisional and do not lean on it for scaffold-level claims.
-
 ![Terminal evidence mix](figures/04_terminal_evidence_mix.png)
 
 ## Takeaways
@@ -196,17 +194,6 @@ In real-world settings, human collaboration often means digging up information l
 Each setup, however, balances exploration and escalation differently and fails in different shapes — suggesting targeted areas of improvement for future generations of models and harnesses, and enabling users to decide for themselves which setup best suits their needs. After all, almost all problems encountered in real-world engineering situations will be underspecified; users frequently write vague problems and hold hidden assumptions or tribal knowledge. We as a community need to push towards agents that aren't just capable of solving solo, but also of knowing when they need to ask for context hidden away in people's heads.
 
 The unit of analysis is the whole `{model, harness, customization}` system — harnesses and skills change pass@3, ask-F1, question burden, strategy shape, and terminal failure anatomy. HiL-Dynamics is meant to make these differences visible: a way to evaluate whether a setup is **trustworthy** enough to surface blockers, **autonomous** enough not to ask indiscriminately, and **steerable** enough that targeted harness or skill changes improve behavior.
-
-## Methodology Notes
-
-These need verification before public-facing text:
-
-- **Task set and intersection.** TODO: state whether the pass@3 and Ask-F1 numbers in Findings 1 and 2 are computed over each condition's full task set or only over tasks present in all conditions being compared. With pass@3 swings of 70+ percentage points between `Full_Info` and `baseline`, the per-system ranking only stands if denominators are intersected. Report `num_tasks` and `num_intersected_tasks` per cell.
-- **N per cell.** TODO: state tasks × passes per `{model, harness, condition}` cell. The custom-skill cells are stated as 150 tasks × 3 passes; native baseline and `tool/guidance` cells need to be confirmed.
-- **Confidence intervals.** TODO: decide whether bootstrap CIs are reported on the main figures. The headline `Full_Info` vs `baseline` gap is large enough that CIs do not change the qualitative story, but the per-system rankings in Finding 1b and the strategy bucket percentages in Finding 3b are CI-sensitive.
-- **Ask-relevance judge.** Ask Precision and Blocker Recall depend on a per-ask relevance label. TODO: state which judge produced these labels, whether the same judge was used across all five systems, and what the audit / calibration status is. If the judge has not been audited, the Finding 1b ranking is provisional.
-- **Task split.** TODO: confirm whether the headline numbers are over the public HiL-Bench split, the private split, or both, and whether the public version of this draft restricts to the public split until private rerun / image issues are resolved.
-- **Trajectory parsing parity.** Strategy buckets and timing depend on the trajectory parser identifying `ASK`, `READ`, `WRITE`, and `TEST` actions across five different harness formats. The OpenCode `patch-made/no-submit` share called out in Finding 3d is the largest outstanding parser/harness question.
 
 ## Figure Inventory
 
