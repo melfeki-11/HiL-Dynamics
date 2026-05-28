@@ -55,6 +55,6 @@ The OpenCode LiteLLM shim exposes per-run proxy diagnostics, including upstream 
 
 ## Arm Presets
 
-- `default`: `ask_human` mode only.
-- `enhanced`: `ask_human` mode plus skill + guidance templates (+ custom tool where supported).
+- `default`: `ask_human` mode only. Custom ask_human() tool provided for agents that don't have a native asking ability.
+- `enhanced`: `ask_human` mode plus skill + guidance templates + custom tool.
 - `full_info`: `full_info` mode; sidecar ask path disabled.
