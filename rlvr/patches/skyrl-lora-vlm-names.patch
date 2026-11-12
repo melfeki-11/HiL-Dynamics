@@ -1,0 +1,29 @@
+SkyRL FSDP LoRA weight sync: tensor names vLLM applies for multimodal checkpoints.
+
+Qwen3.5 (and Gemma-4) checkpoints are multimodal; with language_model_only SkyRL trains the text-only
+HF class, so PEFT names the adapter tensors base_model.model.model.layers.*. vLLM serves the multimodal
+class, whose LoRA loader expects base_model.model.model.language_model.layers.* and silently skips every
+tensor it cannot match: the adapter "loads" and changes nothing, so every rollout comes from the base
+model while the trainer updates the LoRA (rollout/trainer logprob drift grows each step). SkyRL already
+adds the language_model. prefix for full-weight sync under the same condition (_is_multimodal_lm_only).
+Applied by rlvr/install.sh.
+
+diff --git a/skyrl/backends/skyrl_train/workers/fsdp/fsdp_worker.py b/skyrl/backends/skyrl_train/workers/fsdp/fsdp_worker.py
+index ca9f5acd..c91790d7 100644
+--- a/skyrl/backends/skyrl_train/workers/fsdp/fsdp_worker.py
++++ b/skyrl/backends/skyrl_train/workers/fsdp/fsdp_worker.py
+@@ -237,6 +237,14 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
+         )
+ 
+         lora_params = collect_lora_params(module=self.model.model)
++        if self._is_multimodal_lm_only:
++            # vLLM serves the multimodal checkpoint, whose LoRA loader expects the HF multimodal layout
++            # (...model.language_model.layers.*) and silently skips tensors it cannot match; the text-only
++            # PEFT model names them ...model.layers.*. Same condition as the full-weight sync prefix.
++            p, lm = "base_model.model.model.", "base_model.model.model.language_model."
++            lora_params = {
++                (lm + k[len(p):] if k.startswith(p) and not k.startswith(lm) else k): v for k, v in lora_params.items()
++            }
+ 
+         if torch.distributed.get_rank() == 0:
+             os.makedirs(lora_sync_path, exist_ok=True)
