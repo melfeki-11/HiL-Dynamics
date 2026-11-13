@@ -28,7 +28,9 @@ def task_dirs(paths):
     return out
 
 
-INFRA_TYPES = ("Environment", "AgentSetup", "AddTestsDir", "RewardFileNotFound")
+# Modal sandbox-service failures (sandbox name claim, command-router auth, creation rate limit) are infrastructure too
+INFRA_TYPES = ("Environment", "AgentSetup", "AddTestsDir", "RewardFileNotFound",
+               "AuthError", "ServiceError", "ResourceExhaustedError")
 INFRA_MESSAGES = ("Docker compose command failed", "Failed to start tmux session", "failed to send non-blocking keys")
 
 

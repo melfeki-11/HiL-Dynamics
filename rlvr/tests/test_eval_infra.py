@@ -18,7 +18,8 @@ def row(exc_type, exc="", reward=None):
 
 def test_infra_errors_are_excluded():
     for r in (row("EnvironmentStartTimeoutError"), row("AgentSetupTimeoutError"), row("AddTestsDirError"),
-              row("RewardFileNotFoundError"),
+              row("RewardFileNotFoundError"), row("AuthError", "token validation failed"),
+              row("ServiceError", "Could not claim the sandbox name"), row("ResourceExhaustedError"),
               row("RuntimeError", "Docker compose command failed for environment x. Command: docker compose ..."),
               row("RuntimeError", "Failed to start tmux session. Error: None"),
               row("RuntimeError", "t__p1: failed to send non-blocking keys: command=\"tmux send-keys -t terminus-2 ...")):
